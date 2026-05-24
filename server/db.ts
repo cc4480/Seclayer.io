@@ -1,0 +1,497 @@
+import fs from 'fs';
+import path from 'path';
+import crypto from 'crypto';
+import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule } from '../src/types.js';
+
+const DB_FILE = path.join(process.cwd(), 'db.json');
+
+interface DbSchema {
+  users: Record<string, User>;
+  scans: Record<string, Scan>;
+  transactions: CreditTransaction[];
+  apiKeys: Record<string, ApiKey>;
+  suppressions?: SuppressionRule[];
+}
+
+// Initial seed data to make the app look stunning and populated out-of-the-box
+const INITIAL_DEMO_SCANS: Record<string, Scan> = {
+  'demo-scan-1': {
+    id: 'demo-scan-1',
+    userId: 'user_default',
+    url: 'https://seclayer.io',
+    status: 'complete',
+    score: 94,
+    severity: 'low',
+    createdAt: new Date(Date.now() - 3600000 * 48).toISOString(), // 2 days ago
+    completedAt: new Date(Date.now() - 3600000 * 47.9).toISOString(),
+    aiSummary: "The target website is exceptionally well-secured. All standard security headers are present with secure configurations. SSL/TLS is modern and correctly configured. The server does not leak technological implementations, which limits vector fingerprinting. Minor adjustments are suggested for Subresource Integrity (SRI) on external scripts.",
+    findings: [
+      {
+        id: 'finding-1',
+        title: 'Missing Subresource Integrity (SRI) on external vendor assets',
+        description: 'Several script tags loaded from third-party CDNs (including analytical resources) do not feature integrity hashes. If these vendors are compromised, malicious code could run in visitors\' browser context.',
+        severity: 'low',
+        fix: 'Add the integrity="" attribute with correct SHA-384 hashes and crossorigin="anonymous" to all external script and stylesheet links.',
+        category: 'Client-side Security'
+      },
+      {
+        id: 'finding-2',
+        title: 'TLS 1.2 Suite with mild preference for CBC ciphers',
+        description: 'The server supports TLS 1.2 with certain Cipher-Block Chaining (CBC) suites enabled. While not actively exploitable, transitioning to fully authenticated AEAD ciphers represents superior hygiene.',
+        severity: 'info',
+        fix: 'Update the server TLS cipher string to prefer GCM/CHACHA20 suites and deprecate CBC-mode ciphers where legacy client compatibility allows.',
+        category: 'Cryptography'
+      }
+    ]
+  },
+  'demo-scan-2': {
+    id: 'demo-scan-2',
+    userId: 'user_default',
+    url: 'https://vulnerable-test-shop.org',
+    status: 'complete',
+    score: 41,
+    severity: 'high',
+    createdAt: new Date(Date.now() - 3600000 * 120).toISOString(), // 5 days ago
+    completedAt: new Date(Date.now() - 3600000 * 119.8).toISOString(),
+    aiSummary: "The application exhibits severe perimeter exposures. Multiple critical issues were uncovered, including high-risk directory listing, sensitive file leakage (.env containing database credentials), and completely missing anti-framing and modern script protection policies (missing Content-Security-Policy). Remediation represents an urgent requirement to avoid data exfiltration or site hijacking.",
+    findings: [
+      {
+        id: 'finding-3',
+        title: 'Exposed Environment Configuration File (.env)',
+        description: 'A raw /.env configuration file was detected and read via root directory probing. This file contains active credentials, including database passwords, Stripe private keys, and SMTP server logins.',
+        severity: 'critical',
+        fix: 'Immediately change all leaked credentials. Move the .env file completely out of the public serving directory (web root) and verify server configuration rules block requests to dotfiles.',
+        category: 'Information Leakage'
+      },
+      {
+        id: 'finding-4',
+        title: 'Directory Listing Enabled on /uploads',
+        description: 'Requesting /uploads returns a directory index listing all raw filenames. This allows unauthorized exploration of customer assets, user attachments, and server filesystem details.',
+        severity: 'medium',
+        fix: 'Disable index lists globally in the HTTP server configuration (e.g., `Options -Indexes` in Apache or removing `autoindex on;` in nginx).',
+        category: 'Access Control'
+      },
+      {
+        id: 'finding-5',
+        title: 'Missing Content-Security-Policy (CSP) Header',
+        description: 'The response does not contain a Content-Security-Policy header. Browsers are left vulnerable to Cross-Site Scripting (XSS) and data injection attacks.',
+        severity: 'high',
+        fix: 'Implement a strict CSP header declaring trusted sources for scripts, styles, images, and frame origins. Utilize nonces or hashes for inline content.',
+        category: 'Headers Security'
+      },
+      {
+        id: 'finding-6',
+        title: 'X-Powered-By Exposure: PHP 7.4.3',
+        description: 'The server response header leaks both technology and precise versioning strings (PHP/7.4.3). This aids malicous operators in target matching against known platform CVEs.',
+        severity: 'low',
+        fix: 'Disable the X-Powered-By header via server configuration or runtime flags (e.g., set expose_php = Off in php.ini).',
+        category: 'Information Leakage'
+      }
+    ]
+  }
+};
+
+class LocalFileDb {
+  private data: DbSchema;
+
+  constructor() {
+    this.data = {
+      users: {},
+      scans: {},
+      transactions: [],
+      apiKeys: {},
+      suppressions: []
+    };
+    this.load();
+  }
+
+  private load() {
+    try {
+      if (fs.existsSync(DB_FILE)) {
+        const fileContent = fs.readFileSync(DB_FILE, 'utf8');
+        this.data = JSON.parse(fileContent);
+        if (!this.data.suppressions) {
+          this.data.suppressions = [];
+        }
+      } else {
+        // Seed default user and default data
+        const defaultUser: User = {
+          id: 'user_default',
+          email: 'c.c4480131515@gmail.com',
+          credits: 10,
+          apiKey: 'sl_live_' + crypto.randomBytes(16).toString('hex'),
+          createdAt: new Date().toISOString()
+        };
+        
+        this.data.users[defaultUser.id] = defaultUser;
+        this.data.scans = { ...INITIAL_DEMO_SCANS };
+        
+        // Seed default transactions
+        this.data.transactions.push({
+          id: 'tx-seed',
+          userId: 'user_default',
+          amount: 10,
+          type: 'purchase',
+          stripeSessionId: 'cs_test_initial_provision',
+          createdAt: new Date().toISOString()
+        });
+
+        // Seed API key matching the user's default key
+        this.data.apiKeys[defaultUser.apiKey] = {
+          id: 'key-default',
+          userId: 'user_default',
+          key: defaultUser.apiKey,
+          credits: 10,
+          active: true,
+          createdAt: new Date().toISOString()
+        };
+
+        this.save();
+      }
+    } catch (err) {
+      console.error('Error loading DB file:', err);
+    }
+  }
+
+  private save() {
+    try {
+      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf8');
+    } catch (err) {
+      console.error('Error saving DB file:', err);
+    }
+  }
+
+  // --- Users ---
+  getUser(id: string): User | undefined {
+    return this.data.users[id];
+  }
+
+  getOrCreateUser(email: string): User {
+    const normEmail = email.toLowerCase().trim();
+    let user = Object.values(this.data.users).find(u => u.email.toLowerCase() === normEmail);
+    if (!user) {
+      const id = 'user_' + crypto.randomBytes(6).toString('hex');
+      const apiKey = 'sl_live_' + crypto.randomBytes(16).toString('hex');
+      user = {
+        id,
+        email: normEmail,
+        credits: 5, // 5 signup credits
+        apiKey,
+        createdAt: new Date().toISOString()
+      };
+      this.data.users[id] = user;
+      
+      // Seed initial credit transaction
+      this.data.transactions.push({
+        id: 'tx-signup-' + id,
+        userId: id,
+        amount: 5,
+        type: 'purchase',
+        createdAt: new Date().toISOString()
+      });
+
+      // Create matching API key record
+      this.data.apiKeys[apiKey] = {
+        id: 'key-' + id,
+        userId: id,
+        key: apiKey,
+        credits: 5,
+        active: true,
+        createdAt: new Date().toISOString()
+      };
+
+      this.save();
+    }
+    return user;
+  }
+
+  addCredits(userId: string, amount: number, type: 'purchase' | 'scan_debit', stripeSessionId?: string): User {
+    const user = this.data.users[userId];
+    if (!user) throw new Error('User not found');
+    user.credits = Math.max(0, user.credits + amount);
+    
+    // Also mirror credits on API key active entries
+    Object.values(this.data.apiKeys).forEach(k => {
+      if (k.userId === userId && k.active) {
+        k.credits = user.credits;
+      }
+    });
+
+    const tx: CreditTransaction = {
+      id: 'tx_' + crypto.randomBytes(8).toString('hex'),
+      userId,
+      amount,
+      type,
+      stripeSessionId,
+      createdAt: new Date().toISOString()
+    };
+    this.data.transactions.push(tx);
+    this.save();
+    return user;
+  }
+
+  deductCredits(userId: string, amount: number): boolean {
+    const user = this.data.users[userId];
+    if (!user || user.credits < amount) return false;
+    this.addCredits(userId, -amount, 'scan_debit');
+    return true;
+  }
+
+  // --- Scans ---
+  listScans(userId: string): Scan[] {
+    return Object.values(this.data.scans)
+      .filter(s => s.userId === userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+  }
+
+  getScan(id: string): Scan | undefined {
+    return this.data.scans[id];
+  }
+
+  createScan(userId: string, url: string): Scan {
+    const id = 'scan_' + crypto.randomBytes(8).toString('hex');
+    const scan: Scan = {
+      id,
+      userId,
+      url,
+      status: 'queued',
+      createdAt: new Date().toISOString()
+    };
+    this.data.scans[id] = scan;
+    this.save();
+    return scan;
+  }
+
+  updateScan(id: string, updates: Partial<Scan>): Scan {
+    const scan = this.data.scans[id];
+    if (!scan) throw new Error('Scan not found');
+    
+    this.data.scans[id] = {
+      ...scan,
+      ...updates
+    };
+    this.save();
+    return this.data.scans[id];
+  }
+
+  // --- API Keys ---
+  listApiKeys(userId: string): ApiKey[] {
+    return Object.values(this.data.apiKeys).filter(k => k.userId === userId);
+  }
+
+  generateApiKey(userId: string): ApiKey {
+    const user = this.data.users[userId];
+    if (!user) throw new Error('User not found');
+    const id = 'key_' + crypto.randomBytes(8).toString('hex');
+    const keyStr = 'sl_live_' + crypto.randomBytes(16).toString('hex');
+    
+    const keyObj: ApiKey = {
+      id,
+      userId,
+      key: keyStr,
+      credits: user.credits,
+      active: true,
+      createdAt: new Date().toISOString()
+    };
+    
+    this.data.apiKeys[keyStr] = keyObj;
+    this.save();
+    return keyObj;
+  }
+
+  revokeApiKey(userId: string, keyId: string): boolean {
+    const keyObj = Object.values(this.data.apiKeys).find(k => k.id === keyId && k.userId === userId);
+    if (!keyObj) return false;
+    keyObj.active = false;
+    this.save();
+    return true;
+  }
+
+  validateApiKeyAndDeduct(apiKeyString: string, quantity: number = 1): User | null {
+    const keyObj = this.data.apiKeys[apiKeyString];
+    if (!keyObj || !keyObj.active) return null;
+    
+    const user = this.data.users[keyObj.userId];
+    if (!user || user.credits < quantity) return null;
+
+    // Deduct credit
+    this.addCredits(user.id, -quantity, 'scan_debit');
+    return user;
+  }
+
+  // --- Suppression Rules (False Positives Management) ---
+  listSuppressions(userId: string): SuppressionRule[] {
+    return (this.data.suppressions || []).filter(s => s.userId === userId);
+  }
+
+  addSuppression(userId: string, targetUrl: string, findingTitle: string, reason: string): SuppressionRule {
+    const id = 'supp_' + crypto.randomBytes(8).toString('hex');
+    const rule: SuppressionRule = {
+      id,
+      userId,
+      targetUrl,
+      findingTitle,
+      reason,
+      createdAt: new Date().toISOString()
+    };
+    if (!this.data.suppressions) {
+      this.data.suppressions = [];
+    }
+    this.data.suppressions.push(rule);
+
+    // Apply suppression retroactively to all existing scans for this user & URL
+    Object.values(this.data.scans).forEach(scan => {
+      if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(targetUrl)) {
+        let dirty = false;
+        if (scan.findings) {
+          scan.findings = scan.findings.map(finding => {
+            if (finding.title === findingTitle) {
+              dirty = true;
+              return {
+                ...finding,
+                isFalsePositive: true,
+                suppressionReason: reason,
+                suppressedAt: rule.createdAt
+              };
+            }
+            return finding;
+          });
+          if (dirty) {
+            const recalc = recalculateScore(scan.findings);
+            scan.score = recalc.score;
+            scan.severity = recalc.severity;
+          }
+        }
+      }
+    });
+
+    this.save();
+    return rule;
+  }
+
+  removeSuppression(userId: string, ruleId: string): boolean {
+    if (!this.data.suppressions) return false;
+    const initialLen = this.data.suppressions.length;
+    const ruleToRemove = this.data.suppressions.find(r => r.id === ruleId && r.userId === userId);
+    if (!ruleToRemove) return false;
+
+    this.data.suppressions = this.data.suppressions.filter(r => !(r.id === ruleId && r.userId === userId));
+    const finalLen = this.data.suppressions.length;
+
+    if (initialLen !== finalLen) {
+      // Un-suppress retroactively as well
+      Object.values(this.data.scans).forEach(scan => {
+        if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(ruleToRemove.targetUrl)) {
+          let dirty = false;
+          if (scan.findings) {
+            scan.findings = scan.findings.map(finding => {
+              if (finding.title === ruleToRemove.findingTitle) {
+                dirty = true;
+                const updated = { ...finding };
+                delete updated.isFalsePositive;
+                delete updated.suppressionReason;
+                delete updated.suppressedAt;
+                return updated;
+              }
+              return finding;
+            });
+            if (dirty) {
+              const recalc = recalculateScore(scan.findings);
+              scan.score = recalc.score;
+              scan.severity = recalc.severity;
+            }
+          }
+        }
+      });
+      this.save();
+      return true;
+    }
+    return false;
+  }
+
+  getScanWithSuppressedFindings(scan: Scan): Scan {
+    if (!scan || !scan.findings) return scan;
+    const userRules = this.listSuppressions(scan.userId);
+    const scanUrlClean = cleanUrl(scan.url);
+
+    let dirty = false;
+    const updatedFindings = scan.findings.map(finding => {
+      const matchingRule = userRules.find(r => 
+        cleanUrl(r.targetUrl) === scanUrlClean && 
+        r.findingTitle === finding.title
+      );
+      if (matchingRule) {
+        if (!finding.isFalsePositive) {
+          dirty = true;
+          return {
+            ...finding,
+            isFalsePositive: true,
+            suppressionReason: matchingRule.reason,
+            suppressedAt: matchingRule.createdAt
+          };
+        }
+      } else {
+        if (finding.isFalsePositive) {
+          dirty = true;
+          const cloned = { ...finding };
+          delete cloned.isFalsePositive;
+          delete cloned.suppressionReason;
+          delete cloned.suppressedAt;
+          return cloned;
+        }
+      }
+      return finding;
+    });
+
+    if (dirty) {
+      const recalc = recalculateScore(updatedFindings);
+      scan.findings = updatedFindings;
+      scan.score = recalc.score;
+      scan.severity = recalc.severity;
+      this.data.scans[scan.id] = scan;
+      this.save();
+    }
+
+    return scan;
+  }
+}
+
+// Helpers
+export function cleanUrl(urlStr: string): string {
+  try {
+    let clean = urlStr.replace(/https?:\/\//i, '').replace(/\/+$/, '').trim();
+    return clean.toLowerCase();
+  } catch {
+    return String(urlStr || '').trim().toLowerCase();
+  }
+}
+
+export function recalculateScore(findings: Finding[]): { score: number; severity: Severity } {
+  let score = 100;
+  const activeFindings = findings.filter(f => !f.isFalsePositive);
+
+  activeFindings.forEach(f => {
+    const sev = f.severity?.toLowerCase();
+    if (sev === 'critical') {
+      score -= 35;
+    } else if (sev === 'high') {
+      score -= 25;
+    } else if (sev === 'medium') {
+      score -= 15;
+    } else if (sev === 'low') {
+      score -= 5;
+    }
+  });
+
+  score = Math.max(12, Math.min(100, score));
+
+  let severity: Severity = 'low';
+  if (activeFindings.some(f => f.severity === 'critical')) severity = 'critical';
+  else if (activeFindings.some(f => f.severity === 'high')) severity = 'high';
+  else if (activeFindings.some(f => f.severity === 'medium')) severity = 'medium';
+  else if (activeFindings.some(f => f.severity === 'low')) severity = 'low';
+
+  return { score, severity };
+}
+
+export const db = new LocalFileDb();

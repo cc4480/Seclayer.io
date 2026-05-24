@@ -1,0 +1,6 @@
+{
+  "name": "Seclayer",
+  "description": "Pay-Per-Scan Black-Box Penetration Testing SaaS & MCP Server",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
