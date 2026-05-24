@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule } from '../src/types.js';
+import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
 
 const DB_FILE = path.join(process.cwd(), 'db.json');
 
@@ -11,6 +11,7 @@ interface DbSchema {
   transactions: CreditTransaction[];
   apiKeys: Record<string, ApiKey>;
   suppressions?: SuppressionRule[];
+  monitoredTargets?: MonitoredTarget[];
 }
 
 // Initial seed data to make the app look stunning and populated out-of-the-box
@@ -100,7 +101,8 @@ class LocalFileDb {
       scans: {},
       transactions: [],
       apiKeys: {},
-      suppressions: []
+      suppressions: [],
+      monitoredTargets: []
     };
     this.load();
   }
@@ -112,6 +114,9 @@ class LocalFileDb {
         this.data = JSON.parse(fileContent);
         if (!this.data.suppressions) {
           this.data.suppressions = [];
+        }
+        if (!this.data.monitoredTargets) {
+          this.data.monitoredTargets = [];
         }
       } else {
         // Seed default user and default data
@@ -248,12 +253,13 @@ class LocalFileDb {
     return this.data.scans[id];
   }
 
-  createScan(userId: string, url: string): Scan {
+  createScan(userId: string, url: string, authHeader?: string): Scan {
     const id = 'scan_' + crypto.randomBytes(8).toString('hex');
     const scan: Scan = {
       id,
       userId,
       url,
+      authHeader,
       status: 'queued',
       createdAt: new Date().toISOString()
     };
@@ -407,6 +413,39 @@ class LocalFileDb {
       return true;
     }
     return false;
+  }
+
+  // --- Monitored Targets ---
+  listMonitoredTargets(userId: string): MonitoredTarget[] {
+    return (this.data.monitoredTargets || []).filter(t => t.userId === userId);
+  }
+
+  addMonitoredTarget(userId: string, url: string, frequencyDays: number, scheduleString?: string): MonitoredTarget {
+    const id = 'mon_' + crypto.randomBytes(8).toString('hex');
+    const target: MonitoredTarget = {
+      id,
+      userId,
+      url,
+      frequencyDays,
+      scheduleString,
+      createdAt: new Date().toISOString(),
+      nextScanAt: new Date(Date.now() + frequencyDays * 24 * 60 * 60 * 1000).toISOString()
+    };
+    if (!this.data.monitoredTargets) {
+      this.data.monitoredTargets = [];
+    }
+    this.data.monitoredTargets.push(target);
+    this.save();
+    return target;
+  }
+
+  removeMonitoredTarget(userId: string, id: string): boolean {
+    if (!this.data.monitoredTargets) return false;
+    const initialLen = this.data.monitoredTargets.length;
+    this.data.monitoredTargets = this.data.monitoredTargets.filter(t => !(t.id === id && t.userId === userId));
+    const removed = this.data.monitoredTargets.length !== initialLen;
+    if (removed) this.save();
+    return removed;
   }
 
   getScanWithSuppressedFindings(scan: Scan): Scan {

@@ -100,7 +100,13 @@ Ensure the returned output is strictly compliant with the required JSON structur
       }
     });
 
-    const bodyText = response.text.trim();
+    let bodyText = response.text.trim();
+    try {
+        const u = url.startsWith('http') ? url : `https://${url}`;
+        const parsedUrl = new URL(u);
+        bodyText = bodyText.replace(/example\.com/gi, parsedUrl.hostname);
+        bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
+    } catch(e) {}
     const data = JSON.parse(bodyText);
 
     // Safeguard values
@@ -137,8 +143,8 @@ Ensure the returned output is strictly compliant with the required JSON structur
       aiSummary: data.aiSummary || compileLocalSummary(url, staticCompiled)
     };
 
-  } catch (err) {
-    console.error("Gemini API call or parsing failed, using high-quality local summary:", err);
+  } catch (err: any) {
+    console.warn(`Gemini API call or parsing failed, using high-quality local summary: ${err?.message || err}`);
     return {
       ...staticCompiled,
       aiSummary: compileLocalSummary(url, staticCompiled)
@@ -154,4 +160,84 @@ function compileLocalSummary(url: string, sc: { score: number; severity: Severit
     return `Seclayer security assessment for ${url} indicates moderate vulnerability flags are present. Key defensive layers (including SSL redirection pipelines, XSS protection boundaries, or secure session cookie directives) are absent or require strict consolidation. While not presenting an immediate server compromise, hardening these perimeter checkpoints aligns with standard production guidelines.`;
   }
   return `Seclayer verification scanner reports that ${url} displays strong basic defensive hygiene. No critical system exposures or active data leaks were detected. To reach industry-leading status, minor improvements should be introduced to satisfy full HSTS preload targets and deploy advanced content routing headers.`;
+}
+
+export async function generatePentagiLogs(url: string | undefined): Promise<{ time: string; agent: string; msg: string; }[]> {
+  const defaultUrl = url || 'staging.api.vulnerable.org';
+  const ai = getAiClient();
+  
+  const fallbackLogs = [
+    { time: '00:01', agent: 'Scout Agent', msg: `Core DNS Enumeration on domain base completed. Discovered open host ${defaultUrl}.` },
+    { time: '00:04', agent: 'Scout Agent', msg: 'Probing HTTP port 443. Technology fingerprint matches Node.js Express & Apache HTTP Server v2.4.' },
+    { time: '00:08', agent: 'Scout Agent', msg: 'Identified dynamic endpoint list: /api/v1/auth/login, /api/v1/support/ticket, /recovery/reset.' },
+    { time: '00:12', agent: 'Exploiter Agent', msg: 'Testing "/recovery/reset" endpoint. Found active open redirect.' },
+    { time: '00:15', agent: 'Exploiter Agent', msg: 'Constructing dynamic CSRF token bypass session.' },
+    { time: '00:19', agent: 'Exploiter Agent', msg: 'Chaining Open Redirect bypass with active session forgery. Admin user redirected -> Session token exfiltrated to PentAGI listener hook!' },
+    { time: '00:23', agent: 'Exploiter Agent', msg: 'Injected Administrative Bearer key. Successfully bypassed authentication constraints.' },
+    { time: '00:27', agent: 'Reporter Agent', msg: 'Vulnerability exploit chain validated. Severity calculation: CRITICAL (10.0 CVSS).' },
+    { time: '00:30', agent: 'Reporter Agent', msg: 'Standardized DefectDojo JSON findings schema generated.' }
+  ];
+
+  if (!ai) {
+    return fallbackLogs;
+  }
+
+  try {
+    const prompt = `You are PentAGI, an Autonomous Multi-Agent Multi-Step Pentest Coordinator.
+Your goal is to simulate a realistic sequence of actions taken by three AI agents: "Scout Agent" (performs recon/scanning), "Exploiter Agent" (finds and tests vulnerabilities), and "Reporter Agent" (summarizes impact and generates artifacts).
+The target is "${defaultUrl}".
+
+Generate an array of 6 to 9 log messages that sequentially describe a successful multi-stage attack simulation ending with a report generation.
+
+Please return a JSON response containing a single "logs" array. Each log object MUST have:
+1. "time": a string formatted as "MM:SS" (e.g. "00:01", "00:15", "01:30") showing elapsed time in the operation. Ensure the time progresses chronologically.
+2. "agent": strictly one of "Scout Agent", "Exploiter Agent", or "Reporter Agent".
+3. "msg": the log message describing what the agent is doing or has found. Make it sound highly technical, professional, and cyber-security focused. Mention the target url "${defaultUrl}" in the first Scout log.
+
+Do NOT use fake placeholders like "example.com" other than the provided target.
+Return ONLY valid JSON compliant with the requested schema.`;
+
+    const response = await ai.models.generateContent({
+      model: "gemini-3.5-flash",
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.OBJECT,
+          required: ["logs"],
+          properties: {
+            logs: {
+              type: Type.ARRAY,
+              items: {
+                type: Type.OBJECT,
+                required: ["time", "agent", "msg"],
+                properties: {
+                  time: { type: Type.STRING, description: "MM:SS" },
+                  agent: { type: Type.STRING },
+                  msg: { type: Type.STRING }
+                }
+              }
+            }
+          }
+        }
+      }
+    });
+
+    let bodyText = response.text.trim();
+    try {
+        const u = defaultUrl.startsWith('http') ? defaultUrl : `https://${defaultUrl}`;
+        const parsedUrl = new URL(u);
+        bodyText = bodyText.replace(/example\.com/gi, parsedUrl.hostname);
+        bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
+    } catch(e) {}
+    const data = JSON.parse(bodyText);
+    
+    if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
+      return data.logs;
+    }
+    return fallbackLogs;
+  } catch (err: any) {
+    console.warn(`Gemini PentAGI generation failed, using fallback logs: ${err?.message || err}`);
+    return fallbackLogs;
+  }
 }

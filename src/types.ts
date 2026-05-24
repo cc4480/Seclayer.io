@@ -14,11 +14,15 @@ export interface Finding {
   title: string;
   description: string;
   severity: Severity;
+  confidence?: 'low' | 'medium' | 'high';
   fix: string;
   category: string;
   isFalsePositive?: boolean;
   suppressionReason?: string;
   suppressedAt?: string;
+  endpoint?: string;
+  rawRequest?: string;
+  rawResponse?: string;
 }
 
 export interface SuppressionRule {
@@ -34,6 +38,7 @@ export interface Scan {
   id: string;
   userId: string;
   url: string;
+  authHeader?: string;
   status: ScanStatus;
   score?: number; // 0 - 100
   severity?: Severity;
@@ -50,6 +55,17 @@ export interface CreditTransaction {
   amount: number; // e.g. +5, -1
   type: 'purchase' | 'scan_debit';
   stripeSessionId?: string;
+  createdAt: string;
+}
+
+export interface MonitoredTarget {
+  id: string;
+  userId: string;
+  url: string;
+  frequencyDays: number;
+  scheduleString?: string;
+  lastScannedAt?: string;
+  nextScanAt?: string;
   createdAt: string;
 }
 

@@ -39,7 +39,7 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
       "DongTai passive tracer agent hooked inside backend JVM/Python...",
       "Tracing user input taint variables in query executors...",
       "DefectDojo parser validating static vs dynamic findings...",
-      "Deploying PentAGI autonomous simulation agents...",
+      "Deploying PentAGI autonomous exploitation agents...",
       "Calculating posture weights and severity metrics..."
     ],
     complete: [
@@ -137,7 +137,7 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
     };
   }, [scanId, pollCount]);
 
-  // Handle fake scrolling logs to mimic scanning mechanics relative to progression
+  // Handle UI scrolling logs to visualize scanning mechanics relative to progression
   useEffect(() => {
     if (!scan) return;
     

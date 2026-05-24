@@ -2,7 +2,8 @@ import React, { useState, useEffect } from 'react';
 import { 
   Shield, Play, Plus, Trash2, Key, HelpCircle, 
   Clock, Coins, Globe, Terminal, RefreshCw, CheckCircle, 
-  ExternalLink, ArrowRight, AlertTriangle, ShieldCheck 
+  ExternalLink, ArrowRight, AlertTriangle, ShieldCheck,
+  Code, Copy, FileText
 } from 'lucide-react';
 import { Scan, ApiKey, User } from '../types.js';
 
@@ -12,7 +13,7 @@ interface DashboardProps {
   apiKeys: ApiKey[];
   credits: number;
   transactions: any[];
-  onInitiateScan: (url: string) => void;
+  onInitiateScan: (url: string, authHeader?: string) => void;
   onGenerateKey: () => void;
   onRevokeKey: (keyId: string) => void;
   onPurchaseCredits: (packName: 'single' | 'pack5' | 'pack20') => void;
@@ -34,6 +35,8 @@ export default function Dashboard({
   isPerformingAction
 }: DashboardProps) {
   const [scanUrl, setScanUrl] = useState('');
+  const [authHeader, setAuthHeader] = useState('');
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [buyPack, setBuyPack] = useState<'single' | 'pack5' | 'pack20'>('pack5');
   const [isBuying, setIsBuying] = useState(false);
   const [errorText, setErrorText] = useState('');
@@ -41,7 +44,7 @@ export default function Dashboard({
   // Production-ready addition state variables
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
   const [revealKeyId, setRevealKeyId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'scans' | 'billing' | 'exclusions' | 'orchestrator'>('orchestrator');
+  const [activeTab, setActiveTab] = useState<'scans' | 'billing' | 'exclusions' | 'orchestrator' | 'monitoring' | 'api-docs'>('orchestrator');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
@@ -50,7 +53,7 @@ export default function Dashboard({
   const [toastMsg, setToastMsg] = useState('');
 
   // --- Enterprise Orchestrator Microservices State Hooks ---
-  const [orchSubTab, setOrchSubTab] = useState<'aspm' | 'easm' | 'apiscan' | 'iast' | 'pentagi'>('aspm');
+  const [orchSubTab, setOrchSubTab] = useState<'aspm' | 'easm' | 'apiscan' | 'iast' | 'pentagi'>('pentagi');
   
   // 1. ASPM state
   const [aspmUrl, setAspmUrl] = useState('staging.api.vulnerable-shop.io');
@@ -157,11 +160,12 @@ export default function Dashboard({
     }
   };
 
-  const runPentagiSimulation = async () => {
+  const runPentagiExploitation = async () => {
     setPentagiRunning(true);
     setPentagiLogs([]);
     try {
-      const res = await fetch('/api/enterprise/pentagi/logs');
+      const targetUrl = scanUrl || 'staging.api.vulnerable.org';
+      const res = await fetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(targetUrl)}`);
       if (res.ok) {
         const data = await res.json();
         // Stagger logs typewriter loading effect
@@ -186,6 +190,14 @@ export default function Dashboard({
   const [suppressRules, setSuppressRules] = useState<any[]>([]);
   const [isDeletingRule, setIsDeletingRule] = useState<string | null>(null);
 
+  // Monitoring targets
+  const [monitoredTargets, setMonitoredTargets] = useState<any[]>([]);
+  const [monitorUrl, setMonitorUrl] = useState('');
+  const [monitorFreq, setMonitorFreq] = useState(7);
+  const [monitorDay, setMonitorDay] = useState('Monday');
+  const [monitorTime, setMonitorTime] = useState('09:00');
+  const [isAddingMonitor, setIsAddingMonitor] = useState(false);
+
   const fetchSuppressRules = async () => {
     try {
       const res = await fetch(`/api/suppressions?userId=${user.id || 'user_default'}`);
@@ -198,9 +210,62 @@ export default function Dashboard({
     }
   };
 
+  const fetchMonitoredTargets = async () => {
+    try {
+      const res = await fetch(`/api/monitoring?userId=${user.id || 'user_default'}`);
+      if (res.ok) {
+        const data = await res.json();
+        setMonitoredTargets(data.monitoredTargets || []);
+      }
+    } catch (err) {
+      console.error('Error loading monitoring targets:', err);
+    }
+  };
+
   useEffect(() => {
     fetchSuppressRules();
+    fetchMonitoredTargets();
   }, [user.id, scans]);
+
+  const handleAddMonitor = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!monitorUrl.trim()) return;
+    setIsAddingMonitor(true);
+
+    let scheduleString = `Every day at ${monitorTime}`;
+    if (monitorFreq === 7) {
+      scheduleString = `Every ${monitorDay} at ${monitorTime}`;
+    } else if (monitorFreq === 30) {
+      scheduleString = `Monthly on the 1st at ${monitorTime}`;
+    }
+
+    try {
+      const res = await fetch('/api/monitoring', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString, userId: user.id })
+      });
+      if (res.ok) {
+        setMonitorUrl('');
+        fetchMonitoredTargets();
+      }
+    } finally {
+      setIsAddingMonitor(false);
+    }
+  };
+
+  const handleDeleteMonitor = async (id: string) => {
+    try {
+      const res = await fetch(`/api/monitoring/${id}?userId=${user.id || 'user_default'}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        fetchMonitoredTargets();
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
 
   // Toast notifier for balance changes
   useEffect(() => {
@@ -223,8 +288,9 @@ export default function Dashboard({
       return;
     }
 
-    onInitiateScan(urlStr);
+    onInitiateScan(urlStr, authHeader.trim() || undefined);
     setScanUrl('');
+    setAuthHeader('');
   };
 
   const handleBuyCredits = async () => {
@@ -265,19 +331,43 @@ export default function Dashboard({
       <div className="max-w-7xl mx-auto space-y-10">
         
         {/* Row 1: Header / Status banner */}
-        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-[#0c0c0e] p-6 rounded border border-[#27272a]">
-          <div>
-            <h1 className="text-2xl font-mono font-bold tracking-tighter text-white mb-1">Developer Console</h1>
-            <p className="text-[#a1a1aa] text-xs font-mono">
-              Account context: <span className="text-white">{user.email}</span>
-            </p>
+        <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 bg-[#0c0c0e] p-6 rounded border border-[#27272a] relative overflow-hidden">
+          <div className="absolute top-0 right-0 w-80 h-80 bg-[#22c55e]/5 rounded-full blur-[80px] pointer-events-none" />
+          
+          <div className="relative z-10 w-full md:w-auto flex flex-col md:flex-row items-start md:items-center justify-between gap-6">
+            <div>
+              <h1 className="text-2xl font-mono font-bold tracking-tighter text-white mb-1">Developer Console</h1>
+              <p className="text-[#a1a1aa] text-xs font-mono">
+                Account context: <span className="text-white">{user.email}</span>
+              </p>
+            </div>
           </div>
-          <div className="flex items-center space-x-6">
-            <div className="text-right">
-              <span className="text-[10px] font-mono text-[#52525b] uppercase block">Available Balance</span>
+          
+          <div className="flex flex-col md:flex-row items-center space-y-4 md:space-y-0 md:space-x-6 relative z-10 w-full md:w-auto">
+            <button
+              onClick={() => {
+                setActiveTab('orchestrator');
+                setOrchSubTab('pentagi');
+                document.getElementById('orchestrator-tab')?.scrollIntoView({ behavior: 'smooth' });
+              }}
+              className="w-full md:w-auto relative group overflow-hidden bg-black border border-[#22c55e]/40 rounded hover:border-[#22c55e] transition-colors p-3 flex items-center space-x-3 cursor-pointer"
+            >
+              <div className="absolute inset-0 bg-[#22c55e]/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
+              <div className="relative flex items-center justify-center bg-[#09090b] border border-[#27272a] rounded p-1.5 w-10 h-10 shrink-0">
+                <Terminal className="w-5 h-5 text-[#22c55e] animate-pulse" />
+              </div>
+              <div className="relative text-left pr-2">
+                <span className="block text-xs font-bold text-white uppercase tracking-wider">PentAGI Audit</span>
+                <span className="block text-[10px] text-[#22c55e] font-mono mt-0.5">Autonomous AI Agents</span>
+              </div>
+              <ArrowRight className="w-4 h-4 text-[#52525b] group-hover:text-[#22c55e] transition-colors absolute right-4 opacity-0 group-hover:opacity-100 hidden sm:block" />
+            </button>
+
+            <div className="text-right flex items-center justify-between w-full md:w-auto md:block pt-4 border-t border-[#27272a]/40 md:pt-0 md:border-0">
+              <span className="text-[10px] font-mono text-[#52525b] uppercase block md:mb-0.5">Available Balance</span>
               <span className="text-2xl font-mono font-black text-[#22c55e] flex items-center space-x-2">
                 <Coins className="w-5 h-5 text-[#22c55e] shrink-0" />
-                <span>{credits} <span className="text-xs font-normal text-[#52525b] font-mono">scans remaining</span></span>
+                <span>{credits} <span className="text-xs font-normal text-[#52525b] font-mono">scans</span></span>
               </span>
             </div>
           </div>
@@ -316,8 +406,37 @@ export default function Dashboard({
                       value={scanUrl}
                       onChange={(e) => setScanUrl(e.target.value)}
                       disabled={isPerformingAction}
+                      id="target-url-input"
                     />
                   </div>
+                </div>
+
+                <div>
+                  <button 
+                    type="button" 
+                    onClick={() => setShowAdvanced(!showAdvanced)}
+                    className="text-[11px] font-mono text-[#52525b] hover:text-white uppercase tracking-wider flex items-center space-x-1 transition-colors"
+                  >
+                    <span>{showAdvanced ? '- Hide Advanced Options' : '+ Show Advanced Options (Authenticated Scans)'}</span>
+                  </button>
+                  
+                  {showAdvanced && (
+                    <div className="mt-3 p-3 bg-black/40 border border-[#27272a] rounded space-y-3">
+                      <div>
+                        <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authorization Header</label>
+                        <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Provide a valid Bearer token, basic auth, or custom header to test authenticated endpoints.</p>
+                        <input
+                          type="text"
+                          className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded placeholder-[#52525b] transition-colors"
+                          placeholder="Bearer eyJhbGciOiJIUzI1..."
+                          value={authHeader}
+                          onChange={(e) => setAuthHeader(e.target.value)}
+                          disabled={isPerformingAction}
+                          id="auth-header-input"
+                        />
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {errorText && (
@@ -353,7 +472,7 @@ export default function Dashboard({
                 <h2 className="text-sm font-bold font-mono text-white">Purchase Credits (Stripe Sandbox)</h2>
               </div>
               <p className="text-[#a1a1aa] text-xs font-mono mb-6">
-                Need more scan capacity? To top up scan credits, choose a credit volume package below. We've set up a preconfigured Stripe simulator that performs instant top-ups dynamically.
+                Need more scan capacity? To top up scan credits, choose a credit volume package below. We've set up a preconfigured Stripe test integration that performs instant top-ups dynamically.
               </p>
 
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
@@ -533,6 +652,7 @@ export default function Dashboard({
               [+] Vulnerability Scans History ({scans.length})
             </button>
             <button
+              id="orchestrator-tab"
               onClick={() => setActiveTab('orchestrator')}
               className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
                 activeTab === 'orchestrator'
@@ -540,7 +660,17 @@ export default function Dashboard({
                   : 'border-transparent text-[#52525b] hover:text-[#a1a1aa]'
               }`}
             >
-              [+] SecOps Microservices Hub
+              [+] Autonomous AI Attacks
+            </button>
+            <button
+              onClick={() => setActiveTab('monitoring')}
+              className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
+                activeTab === 'monitoring'
+                  ? 'border-[#22c55e] text-white font-bold'
+                  : 'border-transparent text-[#52525b] hover:text-[#a1a1aa]'
+              }`}
+            >
+              [+] Continuous Monitoring
             </button>
             <button
               onClick={() => setActiveTab('exclusions')}
@@ -561,6 +691,16 @@ export default function Dashboard({
               }`}
             >
               [+] Billing & Receipts Log ({transactions.length})
+            </button>
+            <button
+              onClick={() => setActiveTab('api-docs')}
+              className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
+                activeTab === 'api-docs'
+                  ? 'border-[#22c55e] text-white font-bold'
+                  : 'border-transparent text-[#52525b] hover:text-[#a1a1aa]'
+              }`}
+            >
+              [+] API Documentation
             </button>
           </div>
 
@@ -723,14 +863,128 @@ export default function Dashboard({
             </div>
           )}
 
+          {activeTab === 'monitoring' && (
+            <div className="space-y-6 animate-fade-in text-xs font-mono">
+              <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
+                <Clock className="w-5 h-5 text-[#22c55e] shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-white text-xs uppercase font-bold">Continuous Security Monitoring</h4>
+                  <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+                    Set up automated, recurring scans for your critical infrastructure. Monitoring tasks will automatically deduct credits from your balance per execution.
+                  </p>
+                </div>
+              </div>
+
+              <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5">
+                <h3 className="text-sm font-bold font-mono text-white mb-4">Add Monitor Target</h3>
+                <form onSubmit={handleAddMonitor} className="flex flex-col gap-3">
+                  <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+                    <Globe className="w-4 h-4 text-[#52525b] mx-2" />
+                    <input
+                      type="text"
+                      className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
+                      placeholder="https://production.api.yoursite.com"
+                      value={monitorUrl}
+                      onChange={(e) => setMonitorUrl(e.target.value)}
+                      disabled={isAddingMonitor}
+                    />
+                  </div>
+                  <div className="flex flex-col sm:flex-row gap-3">
+                    <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+                      <select
+                        value={monitorFreq}
+                        onChange={(e) => setMonitorFreq(Number(e.target.value))}
+                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer"
+                        disabled={isAddingMonitor}
+                      >
+                        <option value={1} className="bg-black">Daily</option>
+                        <option value={7} className="bg-black">Weekly</option>
+                        <option value={30} className="bg-black">Monthly</option>
+                      </select>
+                    </div>
+                    
+                    {monitorFreq === 7 && (
+                      <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+                        <select
+                          value={monitorDay}
+                          onChange={(e) => setMonitorDay(e.target.value)}
+                          className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer"
+                          disabled={isAddingMonitor}
+                        >
+                          <option value="Monday" className="bg-black">Monday</option>
+                          <option value="Tuesday" className="bg-black">Tuesday</option>
+                          <option value="Wednesday" className="bg-black">Wednesday</option>
+                          <option value="Thursday" className="bg-black">Thursday</option>
+                          <option value="Friday" className="bg-black">Friday</option>
+                          <option value="Saturday" className="bg-black">Saturday</option>
+                          <option value="Sunday" className="bg-black">Sunday</option>
+                        </select>
+                      </div>
+                    )}
+                    
+                    <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+                      <input
+                        type="time"
+                        value={monitorTime}
+                        onChange={(e) => setMonitorTime(e.target.value)}
+                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer [color-scheme:dark]"
+                        disabled={isAddingMonitor}
+                      />
+                    </div>
+                    
+                    <button
+                      type="submit"
+                      disabled={isAddingMonitor || !monitorUrl.trim()}
+                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer w-full sm:w-auto ml-auto"
+                    >
+                      {isAddingMonitor ? <RefreshCw className="w-4 h-4 animate-spin text-black" /> : <Plus className="w-4 h-4 text-black" />}
+                      <span>Add Monitor</span>
+                    </button>
+                  </div>
+                </form>
+              </div>
+
+              <div className="space-y-3">
+                {monitoredTargets.length === 0 ? (
+                  <div className="text-center py-8 bg-black rounded border border-[#27272a]">
+                    <span className="text-xs text-[#52525b] font-mono">No active monitoring targets configured</span>
+                  </div>
+                ) : (
+                  monitoredTargets.map((target) => (
+                    <div key={target.id} className="p-4 bg-black border border-[#27272a] rounded flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="space-y-1.5">
+                        <div className="flex items-center space-x-2">
+                          <Globe className="w-4 h-4 text-[#52525b]" />
+                          <span className="text-white font-bold uppercase text-xs">{target.url}</span>
+                          <span className="bg-[#22c55e]/10 text-[#22c55e] text-[9px] px-2 py-0.5 rounded border border-[#22c55e]/30">ACTIVE</span>
+                        </div>
+                        <div className="text-[#a1a1aa] text-[10px] flex items-center space-x-3">
+                          <span>Schedule: {target.scheduleString || `Every ${target.frequencyDays} ${target.frequencyDays === 1 ? 'day' : 'days'}`}</span>
+                          <span>&bull;</span>
+                          <span>Next scan: {new Date(target.nextScanAt).toLocaleDateString()}</span>
+                        </div>
+                      </div>
+                      <button
+                        onClick={() => handleDeleteMonitor(target.id)}
+                        className="px-3 py-1.5 bg-[#18181b] border border-[#27272a] hover:bg-[#f87171] hover:text-white text-[#f87171] rounded text-[10px] uppercase font-bold tracking-wider transition-all cursor-pointer w-fit"
+                      >
+                        Remove
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+
           {activeTab === 'orchestrator' && (
             <div className="space-y-6 animate-fade-in text-xs font-mono">
               <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
                 <Shield className="w-5 h-5 text-[#22c55e] shrink-0 mt-0.5 animate-pulse" />
                 <div className="space-y-1">
-                  <h4 className="text-white text-xs uppercase font-bold">SecOps Microservices Orchestration Center</h4>
+                  <h4 className="text-white text-xs uppercase font-bold">Autonomous PentAGI & Microservices</h4>
                   <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
-                    Unify and correlate established open-source security engines inside a containerized sandbox environment. Launch targeted pipeline audits to de-duplicate, verify, and trace live exploitable postures.
+                    Trigger our autonomous AI ethical hacker agents, or utilize established standalone security engines to de-duplicate, verify, and trace live exploitable postures.
                   </p>
                 </div>
               </div>
@@ -1119,7 +1373,7 @@ export default function Dashboard({
                   <div className="flex justify-between items-center">
                     <span className="text-zinc-500 text-[10px]">Coordinates Neo4j Knowledge Entities automatically</span>
                     <button
-                      onClick={runPentagiSimulation}
+                      onClick={runPentagiExploitation}
                       disabled={pentagiRunning}
                       className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 cursor-pointer"
                     >
@@ -1279,6 +1533,168 @@ export default function Dashboard({
                   </table>
                 </div>
               )}
+            </div>
+          )}
+
+          {activeTab === 'api-docs' && (
+            <div className="space-y-6 animate-fade-in text-xs font-mono">
+              <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
+                <Code className="w-5 h-5 text-[#22c55e] shrink-0 mt-0.5" />
+                <div className="space-y-1">
+                  <h4 className="text-white text-xs uppercase font-bold">API & MCP Integration Documentation</h4>
+                  <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+                    Integrate Seclayer's automated penetration testing capabilities into your CI/CD pipelines, security orchestration tools, or LLM-based autonomous agents using our Model Context Protocol (MCP) standard endpoints.
+                  </p>
+                </div>
+              </div>
+
+              <div className="space-y-6">
+                <div className="bg-black border border-[#27272a] rounded overflow-hidden">
+                  <div className="bg-[#0c0c0e] px-4 py-3 border-b border-[#27272a] flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                      <span className="bg-[#22c55e]/10 text-[#22c55e] px-2 py-0.5 rounded font-mono text-[9px] uppercase font-bold tracking-wider">POST</span>
+                      <h3 className="text-white font-mono text-xs font-bold sm:text-sm">/api/mcp/scan</h3>
+                    </div>
+                    <span className="text-[10px] text-[#52525b] uppercase tracking-wider bg-[#18181b] px-2 py-1 rounded border border-[#27272a]">1 Credit / Request</span>
+                  </div>
+                  
+                  <div className="p-5 space-y-6">
+                    <p className="text-[#a1a1aa] text-[11px] font-sans">
+                      Initiate an active security diagnostic sweep and exploit chain analysis against a target URI. Synchronously returns calculated posture scores, unified threat logic, and explicit schema findings formatted for agent context passing.
+                    </p>
+
+                    <div>
+                      <h4 className="text-white mb-2 uppercase tracking-tight text-[10px] font-bold">Request Parameter Schema (JSON)</h4>
+                      <div className="relative group">
+                        <pre className="bg-[#09090b] border border-[#27272a]/40 p-4 rounded text-[#a1a1aa] text-[10px] overflow-x-auto">
+{`{
+  "url": "https://example.com",     // (Required) The fully qualified domain name to scan
+  "apiKey": "sec_b7x9...",          // (Required) Your provisioned MCP API key
+  "authHeader": "Bearer ey..."      // (Optional) Authorization header to pass to the target
+}`}
+                        </pre>
+                        <button 
+                          className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`{\n  "url": "https://example.com",     // (Required) The fully qualified domain name to scan\n  "apiKey": "sec_b7x9...",          // (Required) Your provisioned MCP API key\n  "authHeader": "Bearer ey..."      // (Optional) Authorization header to pass to the target\n}`);
+                            setToastMsg('Schema snippet copied to clipboard');
+                            setShowToast(true);
+                            setTimeout(() => setShowToast(false), 3000);
+                          }}
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h4 className="text-white mb-2 uppercase tracking-tight text-[10px] font-bold">Interactive cURL Snippet</h4>
+                      <div className="relative group">
+                        <pre className="bg-[#18181b] border border-[#27272a] p-4 rounded text-[#22c55e] text-[10px] overflow-x-auto">
+                          <code>
+{`curl -X POST ${window.location.origin}/api/mcp/scan \\
+  -H "Content-Type: application/json" \\
+  -d '{
+    "url": "https://example.com", 
+    "apiKey": "YOUR_API_KEY"
+  }'`}
+                          </code>
+                        </pre>
+                        <button 
+                          className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`curl -X POST ${window.location.origin}/api/mcp/scan -H "Content-Type: application/json" -d '{\n  "url": "https://example.com", \n  "apiKey": "YOUR_API_KEY"\n}'`);
+                            setToastMsg('cURL snippet copied to clipboard');
+                            setShowToast(true);
+                            setTimeout(() => setShowToast(false), 3000);
+                          }}
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+
+                    <div>
+                      <h4 className="text-white mb-2 uppercase tracking-tight text-[10px] font-bold">Response Data Envelope (200 OK)</h4>
+                      <div className="relative group">
+                        <pre className="bg-[#09090b] border border-[#27272a]/40 p-4 rounded text-[#a1a1aa] text-[10px] overflow-x-auto">
+{`{
+  "success": true,
+  "targetUrl": "https://staging.api.vulnerable.org",
+  "postureScore": 85,
+  "vulnerabilityLevel": "medium",
+  "analysisSummary": "Seclayer automated assessment identified 1 or more...",
+  "securityFindings": [
+    {
+      "testName": "GraphQL Schema Introspection Exposed",
+      "endpoint": "/graphql",
+      "severity": "high",
+      "description": "An active API endpoint probe discovered...",
+      "fix": "Disable introspection blocks in the production backend..."
+    }
+  ],
+  "creditsRemaining": 90
+}`}
+                        </pre>
+                        <button 
+                          className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
+                          onClick={() => {
+                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
+                            setToastMsg('Response envelope snippet copied to clipboard');
+                            setShowToast(true);
+                            setTimeout(() => setShowToast(false), 3000);
+                          }}
+                        >
+                          <Copy className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+                
+                {/* Node JS snippets etc. - Keep it minimal */}
+                <div className="bg-black border border-[#27272a] rounded overflow-hidden">
+                  <div className="bg-[#0c0c0e] px-4 py-3 border-b border-[#27272a] flex items-center justify-between">
+                    <div className="flex items-center space-x-2">
+                       <FileText className="w-3.5 h-3.5 text-[#52525b]" />
+                       <h3 className="text-white font-mono text-xs font-bold sm:text-sm">Example: TypeScript / Fetch</h3>
+                    </div>
+                  </div>
+                  <div className="p-5">
+                    <div className="relative group">
+                      <pre className="bg-[#09090b] border border-[#27272a]/40 p-4 rounded text-[#a1a1aa] text-[10px] overflow-x-auto">
+                          <code>
+{`async function runSeclayerScan(target: string, key: string) {
+  const response = await fetch('${window.location.origin}/api/mcp/scan', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url: target, apiKey: key })
+  });
+
+  if (!response.ok) throw new Error('Scan failed');
+  
+  const report = await response.json();
+  console.log(\`Score: \${report.postureScore}/100\`);
+  return report.securityFindings;
+}`}
+                          </code>
+                      </pre>
+                      <button 
+                        className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
+                        onClick={() => {
+                          navigator.clipboard.writeText(`async function runSeclayerScan(target: string, key: string) {\n  const response = await fetch('${window.location.origin}/api/mcp/scan', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ url: target, apiKey: key })\n  });\n\n  if (!response.ok) throw new Error('Scan failed');\n  \n  const report = await response.json();\n  console.log(\`Score: \${report.postureScore}/100\`);\n  return report.securityFindings;\n}`);
+                          setToastMsg('TypeScript snippet copied to clipboard');
+                          setShowToast(true);
+                          setTimeout(() => setShowToast(false), 3000);
+                        }}
+                      >
+                        <Copy className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                </div>
+                
+              </div>
             </div>
           )}
 

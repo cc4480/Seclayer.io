@@ -89,7 +89,7 @@ export default function App() {
     }, 400);
   };
 
-  const onInitiateScan = async (url: string) => {
+  const onInitiateScan = async (url: string, authHeader?: string) => {
     if (!user) {
       setShowLogin(true);
       return;
@@ -100,7 +100,7 @@ export default function App() {
       const res = await fetch('/api/scans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, userId: user.id })
+        body: JSON.stringify({ url, userId: user.id, authHeader })
       });
 
       if (res.ok) {
@@ -182,7 +182,7 @@ export default function App() {
         await loadUserContext(user.id);
       }
     } catch (err) {
-      console.error('Purchase transactions simulation failed:', err);
+      console.error('Purchase transactions failed:', err);
     } finally {
       setIsPerformingAction(false);
     }
@@ -298,6 +298,7 @@ export default function App() {
         {currentView === 'report' && activeScan && (
           <ReportViewer
             scan={activeScan}
+            previousScan={scans.filter(s => s.url === activeScan.url && s.id !== activeScan.id && new Date(s.createdAt).getTime() < new Date(activeScan.createdAt).getTime()).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]}
             onBack={() => handleNavigate('dashboard')}
             onRefreshScans={() => loadUserContext(user?.id || 'user_default')}
           />

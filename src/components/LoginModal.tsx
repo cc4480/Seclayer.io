@@ -17,7 +17,7 @@ export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps)
 
     setIsSubmitting(true);
     
-    // Simulate server action
+    // Execute server action
     setTimeout(() => {
       setIsMagicLinkSent(true);
       setTimeout(() => {

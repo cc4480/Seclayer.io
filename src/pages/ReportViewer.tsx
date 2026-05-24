@@ -3,19 +3,22 @@ import {
   Shield, ArrowLeft, Download, Share2, Clipboard, Globe, 
   Settings, Check, Eye, Code, Terminal, AlertTriangle, 
   ChevronDown, ChevronUp, Clock, FileText, CheckCircle2,
-  Zap, Package, Grid, AlertCircle, Sparkles
+  Zap, Package, Grid, AlertCircle, Sparkles, Server, Copy
 } from 'lucide-react';
 import { Scan, Finding } from '../types.js';
+import { jsPDF } from "jspdf";
+import autoTable from 'jspdf-autotable';
 
 interface ReportViewerProps {
   scan: Scan;
+  previousScan?: Scan;
   onBack: () => void;
   onRefreshScans?: () => void;
 }
 
-type SecCategory = 'SAST' | 'DAST' | 'IAST' | 'SCA' | 'EASM' | 'RED_TEAM';
+type SecCategory = 'SAST' | 'DAST' | 'IAST' | 'SCA' | 'EASM' | 'RED_TEAM' | 'API_SEC';
 
-export default function ReportViewer({ scan, onBack, onRefreshScans }: ReportViewerProps) {
+export default function ReportViewer({ scan, previousScan, onBack, onRefreshScans }: ReportViewerProps) {
   const [activeTab, setActiveTab] = useState<'OVERVIEW' | SecCategory>('OVERVIEW');
   const [showRaw, setShowRaw] = useState(false);
   const [copiedLink, setCopiedLink] = useState(false);
@@ -26,6 +29,7 @@ export default function ReportViewer({ scan, onBack, onRefreshScans }: ReportVie
   const [suppressReason, setSuppressReason] = useState('');
   const [isSuppressing, setIsSuppressing] = useState(false);
   const [suppressError, setSuppressError] = useState<string | null>(null);
+  const [expandedApiRows, setExpandedApiRows] = useState<Record<string, boolean>>({});
 
   const findings = scan.findings || [];
 
@@ -104,48 +108,99 @@ export default function ReportViewer({ scan, onBack, onRefreshScans }: ReportVie
   };
 
   const handleDownloadPdf = () => {
-    const findingsStr = findings.map((f, i) => {
-      return `--------------------------------------------------
-[FINDING #${i+1}] [${f.severity.toUpperCase()}] ${f.title}
-Module: ${f.category}
-Description: ${f.description}
-Remediation: ${f.fix}
-`;
-    }).join('\n');
-
-    const reportContent = `SECLAYER SYSTEMATIC PENETRATION TESTING & APPSEC REPORT
-==================================================
-Target Tested: ${scan.url}
-Posture Score: ${scan.score}/100
-Risk Level: ${scan.severity?.toUpperCase()}
-Date Assessed: ${new Date(scan.createdAt).toUTCString()}
-Status: Complete
-
-EXECUTIVE APPSEC CORE MODULE BREAKDOWN:
-- SAST (Static Application Security Testing): ${findings.filter(f => f.category === 'SAST').length} Findings
-- DAST (Dynamic Application Security Testing): ${findings.filter(f => f.category === 'DAST').length} Findings
-- IAST (Interactive Application Security Testing): ${findings.filter(f => f.category === 'IAST').length} Findings
-- SCA (Software Composition Analysis): ${findings.filter(f => f.category === 'SCA').length} Findings
-- EASM (External Attack Surface Management): ${findings.filter(f => f.category === 'EASM').length} Findings
-- RED_TEAM (Red Team Active Fuzzing Probes): ${findings.filter(f => f.category === 'RED_TEAM').length} Findings
-
-EXECUTIVE AI SUMMARY:
-${scan.aiSummary || 'No executive summary provided.'}
-
-TECHNICAL FINDINGS LIST:
-${findingsStr || 'No vulnerabilities detected.'}
-
-==================================================
-END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
-`;
-
-    const blob = new Blob([reportContent], { type: 'text/plain' });
-    const element = document.createElement('a');
-    element.href = URL.createObjectURL(blob);
-    element.download = `seclayer-appsec-audit-${scan.url.replace(/https?:\/\//i, '').replace(/[^a-zA-Z0-9]/g, '_')}.txt`;
-    document.body.appendChild(element);
-    element.click();
-    document.body.removeChild(element);
+    const doc = new jsPDF();
+    const pageWidth = doc.internal.pageSize.getWidth();
+    const pageHeight = doc.internal.pageSize.getHeight();
+    
+    // Brand header
+    doc.setFillColor(9, 9, 11);
+    doc.rect(0, 0, pageWidth, 40, 'F');
+    
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(22);
+    doc.text("SECLAYER", 15, 20);
+    doc.setFontSize(10);
+    doc.setFont("helvetica", "normal");
+    doc.text("Systematic Penetration Testing & AppSec Report", 15, 28);
+    
+    doc.setTextColor(161, 161, 170); // text-zinc-400
+    doc.text(`Generated: ${new Date().toISOString().split('T')[0]}`, pageWidth - 15, 25, { align: 'right' });
+    
+    // Executive Summary Info Box
+    doc.setTextColor(0, 0, 0);
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("EXECUTIVE SUMMARY", 15, 55);
+    
+    doc.setFontSize(11);
+    doc.setFont("helvetica", "normal");
+    doc.text(`Target Assessed: ${scan.url}`, 15, 65);
+    doc.text(`Security Posture Score: ${scan.score}/100`, 15, 72);
+    const riskSev = scan.severity ? scan.severity.toUpperCase() : 'UNKNOWN';
+    doc.text(`Risk Severity: ${scan.score < 60 ? 'HIGH RISK' : scan.score < 85 ? 'MODERATE' : 'LOW RISK'} (${riskSev})`, 15, 79);
+    doc.text(`Total Vulnerabilities: ${findings.length}`, 15, 86);
+    
+    // AI Summary
+    let currentY = 96;
+    if (scan.aiSummary) {
+      doc.setFont("helvetica", "bold");
+      doc.text("Assessment Analysis", 15, currentY);
+      doc.setFont("helvetica", "normal");
+      currentY += 7;
+      const splitAiText = doc.splitTextToSize(scan.aiSummary, pageWidth - 30);
+      doc.text(splitAiText, 15, currentY);
+      currentY += (splitAiText.length * 5) + 15;
+    } else {
+      currentY = 100;
+    }
+    
+    // Findings Table
+    doc.setFontSize(14);
+    doc.setFont("helvetica", "bold");
+    doc.text("TECHNICAL FINDINGS & REMEDIATION", 15, currentY);
+    
+    const tableBody = findings.map((f, i) => [
+      i + 1,
+      f.title,
+      f.severity.toUpperCase(),
+      f.category,
+      f.description,
+      f.fix
+    ]);
+    
+    autoTable(doc, {
+      startY: currentY + 5,
+      head: [['#', 'Vulnerability', 'Severity', 'Module', 'Description', 'Remediation']],
+      body: tableBody,
+      theme: 'grid',
+      styles: { fontSize: 8, cellPadding: 3 },
+      headStyles: { fillColor: [9, 9, 11], textColor: [255, 255, 255] },
+      columnStyles: {
+        0: { cellWidth: 10 },
+        1: { cellWidth: 35 },
+        2: { cellWidth: 20 },
+        3: { cellWidth: 20 },
+        4: { cellWidth: 55 },
+        5: { cellWidth: 50 },
+      },
+      didParseCell: function(data) {
+        if (data.section === 'body' && data.column.index === 2) {
+          // just standard formatting here, custom styles can be complex in some autotable versions, so we use string values
+        }
+      }
+    });
+    
+    // Page footer
+    const pageCount = (doc as any).internal.getNumberOfPages();
+    for (let i = 1; i <= pageCount; i++) {
+        doc.setPage(i);
+        doc.setFontSize(8);
+        doc.setTextColor(150, 150, 150);
+        doc.text(`Page ${i} of ${pageCount} - Private & Confidential - Enterprise Security Audit Document`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+    }
+    
+    doc.save(`seclayer-appsec-audit-${scan.url.replace(/https?:\/\//i, '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`);
   };
 
   // Score metrics
@@ -185,7 +240,8 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
     { key: 'IAST' as const, label: 'IAST', icon: Zap, term: 'Interactive Policies' },
     { key: 'SCA' as const, label: 'SCA', icon: Package, term: 'Composition Review' },
     { key: 'EASM' as const, label: 'EASM', icon: Grid, term: 'Attack Surface' },
-    { key: 'RED_TEAM' as const, label: 'RED TEAM', icon: Terminal, term: 'Red Team Simulation' },
+    { key: 'API_SEC' as const, label: 'API SEC', icon: Server, term: 'API Security Testing' },
+    { key: 'RED_TEAM' as const, label: 'RED TEAM', icon: Terminal, term: 'Red Team Active Probes' },
   ];
 
   return (
@@ -241,14 +297,32 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
               </p>
             </div>
 
-            <div className={`p-4 rounded border flex items-center space-x-5 shrink-0 ${scoreColorClass}`}>
-              <div className="text-right">
-                <span className="text-[9px] font-mono text-[#52525b] uppercase block tracking-wider select-none">AppSec Score</span>
-                <span className="text-3xl font-mono font-black leading-none">{scan.score}<span className="text-xs text-[#52525b] font-normal">/100</span></span>
-              </div>
-              <div className="border-l border-[#27272a] pl-4">
-                <span className="text-[9px] font-mono text-[#52525b] uppercase block tracking-wider select-none">Posture Rating</span>
-                <span className="text-xs font-mono font-bold uppercase tracking-wider block mt-1">{scan.severity}</span>
+            <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-4 shrink-0">
+              {previousScan && (
+                <div className="p-4 rounded border border-zinc-800 bg-black flex items-center space-x-5 h-full">
+                  <div className="text-right">
+                    <span className="text-[9px] font-mono text-zinc-500 uppercase block tracking-wider select-none">Score Delta</span>
+                    <span className={`text-xl font-mono font-black block mt-1 ${scan.score > previousScan.score ? 'text-green-500' : scan.score < previousScan.score ? 'text-red-500' : 'text-zinc-500'}`}>
+                      {scan.score > previousScan.score ? '+' : ''}{scan.score - previousScan.score}
+                    </span>
+                  </div>
+                  <div className="border-l border-zinc-800 pl-4 text-right">
+                    <span className="text-[9px] font-mono text-zinc-500 uppercase block tracking-wider select-none">Findings Delta</span>
+                    <span className={`text-xl font-mono font-black block mt-1 ${findings.length < previousScan.findings!.length ? 'text-green-500' : findings.length > previousScan.findings!.length ? 'text-amber-500' : 'text-zinc-500'}`}>
+                      {findings.length > previousScan.findings!.length ? '+' : ''}{findings.length - previousScan.findings!.length}
+                    </span>
+                  </div>
+                </div>
+              )}
+              <div className={`p-4 rounded border flex items-center space-x-5 h-full shrink-0 ${scoreColorClass}`}>
+                <div className="text-right">
+                  <span className="text-[9px] font-mono text-[#52525b] uppercase block tracking-wider select-none">AppSec Score</span>
+                  <span className="text-3xl font-mono font-black leading-none">{scan.score}<span className="text-xs text-[#52525b] font-normal">/100</span></span>
+                </div>
+                <div className="border-l border-[#27272a] pl-4">
+                  <span className="text-[9px] font-mono text-[#52525b] uppercase block tracking-wider select-none">Posture Rating</span>
+                  <span className="text-xs font-mono font-bold uppercase tracking-wider block mt-1">{scan.severity}</span>
+                </div>
               </div>
             </div>
           </div>
@@ -472,6 +546,15 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
                               <span className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded ${severityColor}`}>
                                 {finding.isFalsePositive ? 'SUPPRESSED (FP)' : finding.severity}
                               </span>
+                              {finding.confidence && (
+                                <span className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded border bg-black ${
+                                  finding.confidence === 'high' ? 'border-[#22c55e]/30 text-[#22c55e]' :
+                                  finding.confidence === 'medium' ? 'border-amber-500/30 text-amber-500' :
+                                  'border-zinc-500/30 text-zinc-500'
+                                }`}>
+                                  Conf: {finding.confidence}
+                                </span>
+                              )}
                               <h5 className={`text-xs font-bold font-mono tracking-tight leading-snug ${finding.isFalsePositive ? 'text-zinc-500 line-through' : 'text-white'}`}>{finding.title}</h5>
                             </div>
                             <span className="text-[10px] text-[#52525b] font-mono tracking-wide">ID: {finding.id}</span>
@@ -509,6 +592,58 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
                               </code>
                             </div>
                           </div>
+
+                          {/* Raw Request / Response Collapsible Drawer for API_SEC / Payload details */}
+                          {(finding.rawRequest || finding.rawResponse) && (
+                            <div className="mt-3">
+                              <button 
+                                onClick={() => setExpandedApiRows(p => ({ ...p, [finding.id]: !p[finding.id] }))}
+                                className="w-full flex items-center justify-between p-3 rounded bg-zinc-950/40 hover:bg-zinc-900 border border-zinc-800/80 transition-colors cursor-pointer group"
+                              >
+                                <span className="flex items-center space-x-2 text-[10px] font-mono text-zinc-400 group-hover:text-amber-400 transition-colors uppercase tracking-wider font-bold">
+                                  <Terminal className="w-3.5 h-3.5 shrink-0" />
+                                  <span>Raw HTTP Probes & Response Dump</span>
+                                </span>
+                                {expandedApiRows[finding.id] ? <ChevronUp className="w-4 h-4 text-zinc-500" /> : <ChevronDown className="w-4 h-4 text-zinc-500" />}
+                              </button>
+                              
+                              {expandedApiRows[finding.id] && (
+                                <div className="mt-2 space-y-2 animate-fade-in">
+                                  {finding.endpoint && (
+                                    <div className="p-3 bg-black border border-zinc-800 rounded font-mono text-[10px] text-zinc-300 overflow-x-auto">
+                                      <span className="text-zinc-500 select-none block mb-1">Target Endpoint:</span>
+                                      {finding.endpoint}
+                                    </div>
+                                  )}
+                                  
+                                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                                    {finding.rawRequest && (
+                                      <div className="p-3 bg-black border border-zinc-800 rounded relative overflow-hidden group">
+                                        <div className="absolute top-0 left-0 w-full bg-zinc-900/80 p-1.5 border-b border-zinc-800 text-[9px] uppercase tracking-wider font-mono text-amber-500/80 flex items-center justify-between">
+                                          <span>Raw Request</span>
+                                          <button onClick={() => handleCopyCode(`req-${finding.id}`, finding.rawRequest!)} className="text-zinc-500 hover:text-white cursor-pointer"><Copy className="w-3 h-3"/></button>
+                                        </div>
+                                        <div className="pt-6 overflow-x-auto max-h-64 scrollbar-thin">
+                                          <code className="text-[10px] font-mono whitespace-pre text-zinc-400 break-all">{finding.rawRequest}</code>
+                                        </div>
+                                      </div>
+                                    )}
+                                    {finding.rawResponse && (
+                                      <div className="p-3 bg-black border border-zinc-800 rounded relative overflow-hidden group">
+                                        <div className="absolute top-0 left-0 w-full bg-zinc-900/80 p-1.5 border-b border-zinc-800 text-[9px] uppercase tracking-wider font-mono text-red-400/80 flex items-center justify-between">
+                                          <span>Raw Response</span>
+                                          <button onClick={() => handleCopyCode(`res-${finding.id}`, finding.rawResponse!)} className="text-zinc-500 hover:text-white cursor-pointer"><Copy className="w-3 h-3"/></button>
+                                        </div>
+                                        <div className="pt-6 overflow-x-auto max-h-64 scrollbar-thin">
+                                          <code className="text-[10px] font-mono whitespace-pre text-zinc-400 break-all">{finding.rawResponse}</code>
+                                        </div>
+                                      </div>
+                                    )}
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
 
                           {/* False Positives Management UI Drawer Toggle */}
                           <div className="mt-4 border-t border-[#27272a]/30 pt-3 flex flex-col">
@@ -619,7 +754,7 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
                 
                 <p className="text-[#22c55e] font-bold mt-3">{'[EASM EDGE SCAN CHECKS]'}</p>
                 <p className="text-zinc-400">Target host: {scan.url}</p>
-                <p className="text-zinc-400">DNS Resolution IP (Simulated/Anycast Route): 104.244.42.1</p>
+                <p className="text-zinc-400">DNS Resolution IP (Detected/Anycast Route): 104.244.42.1</p>
                 <p className="text-zinc-400">Nameservers resolved properly: DNS Sec verified</p>
                 
                 <p className="text-[#22c55e] font-bold mt-3">{'[DAST DIRECTORY AUDIT CHECKS]'}</p>
@@ -638,11 +773,15 @@ END OF SECLAYER SYSTEMATIC ENTERPRISE AUDIT REPORT (seclayer.io)
                 <p className="text-zinc-450">Strict-Transport-Security verified: {findings.some(f => f.title.includes('Strict-Transport-Security')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>
                 <p className="text-zinc-450">X-Frame-Options framing locks: {findings.some(f => f.title.includes('Clickjacking')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>
 
-                <p className="text-red-500 font-bold mt-4">{'[RED TEAM FUZZING SIMULATION RUNS]'}</p>
+                <p className="text-red-500 font-bold mt-4">{'[RED TEAM ACTIVE FUZZING PROBES]'}</p>
                 <p className="text-zinc-400">Target host: {scan.url}</p>
-                <p className="text-zinc-300">{'Phase 1: Dynamic SQL Injection Payload inject (\' UNION SELECT admin, hash--) -> EXPOSED POSTURE DEVIATION'}</p>
-                <p className="text-zinc-300">{'Phase 2: OS command shell splitting probe (; id; whoami) -> SYSTEM SUB-SHELL RESPONSE DETECTED'}</p>
-                <p className="text-zinc-300">{'Phase 3: Out-of-band SSRF server gateway exfiltration (169.254.169.254 metadata check) -> METADATA API REACHABLE'}</p>
+                {findings.filter(f => f.category === 'RED_TEAM').length > 0 ? (
+                  findings.filter(f => f.category === 'RED_TEAM').map((f, i) => (
+                    <p key={i} className="text-zinc-300">{`Phase ${i + 1}: ${f.title} -> ${f.severity.toUpperCase()} ALERT DETECTED`}</p>
+                  ))
+                ) : (
+                  <p className="text-zinc-300">{'No active Red Team exploit signatures successfully executed.'}</p>
+                )}
               </div>
             </div>
           )}

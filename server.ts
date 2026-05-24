@@ -3,7 +3,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport } from './server/gemini.js';
+import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
 import { ScanStatus, Severity, Finding } from './src/types.js';
 
 async function startServer() {
@@ -43,6 +43,14 @@ async function startServer() {
     res.json({ status: 'ok', message: 'Logged out successfully' });
   });
 
+  app.get('/api/system/health', (req, res) => {
+    res.json({
+      status: 'Online',
+      version: 'v2.1.2-stable',
+      timestamp: new Date().toISOString()
+    });
+  });
+
   app.get('/api/auth/me', (req, res) => {
     const userId = (req.query.userId as string) || 'user_default';
     const user = db.getUser(userId);
@@ -54,7 +62,7 @@ async function startServer() {
 
   // Scan Routes
   app.post('/api/scans', async (req, res) => {
-    const { url, userId = 'user_default' } = req.body;
+    const { url, userId = 'user_default', authHeader } = req.body;
     if (!url) {
       return res.status(400).json({ status: 'error', message: 'Target URL is required' });
     }
@@ -75,7 +83,7 @@ async function startServer() {
     db.deductCredits(userId, 1);
 
     // Create the scan entry in queued state
-    const scan = db.createScan(userId, url);
+    const scan = db.createScan(userId, url, authHeader);
 
     // Trigger asynchronous background worker flow mimicking the pg-boss worker pipeline
     processScanJob(scan.id);
@@ -162,7 +170,32 @@ async function startServer() {
     res.json({ status: 'ok', rule, message: 'Finding successfully suppressed and marked as False Positive.' });
   });
 
-  // Credit and checkout simulation
+  // --- Continuous Monitoring ---
+  app.get('/api/monitoring', (req, res) => {
+    const userId = (req.query.userId as string) || 'user_default';
+    const monitoredTargets = db.listMonitoredTargets(userId);
+    res.json({ monitoredTargets });
+  });
+
+  app.post('/api/monitoring', (req, res) => {
+    const { url, frequencyDays = 7, scheduleString, userId = 'user_default' } = req.body;
+    if (!url) {
+      return res.status(400).json({ error: 'url is required' });
+    }
+    const target = db.addMonitoredTarget(userId, url, frequencyDays, scheduleString);
+    res.json({ status: 'ok', target });
+  });
+
+  app.delete('/api/monitoring/:id', (req, res) => {
+    const userId = (req.query.userId as string) || 'user_default';
+    const success = db.removeMonitoredTarget(userId, req.params.id);
+    if (!success) {
+      return res.status(404).json({ error: 'Monitored target not found' });
+    }
+    res.json({ status: 'ok' });
+  });
+
+  // Credit and checkout testing integration
   app.get('/api/credits', (req, res) => {
     const userId = (req.query.userId as string) || 'user_default';
     const user = db.getUser(userId);
@@ -176,7 +209,7 @@ async function startServer() {
     });
   });
 
-  // Mock Stripe Checkout simulation
+  // Mock Stripe Checkout test integration
   app.post('/api/credits/checkout', (req, res) => {
     const { userId = 'user_default', pack } = req.body;
     
@@ -236,7 +269,7 @@ async function startServer() {
   // --- MCP Endpoints ---
   // Any external agent can call this with an API key
   app.post('/api/mcp/scan', async (req, res) => {
-    const { url, apiKey } = req.body;
+    const { url, apiKey, authHeader } = req.body;
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'Missing parameters. required: url, apiKey' });
     }
@@ -249,12 +282,12 @@ async function startServer() {
 
     try {
       // Runs scan diagnostic synchronously for MCP tools context
-      const diagnostics = await runDiagnostics(url);
+      const diagnostics = await runDiagnostics(url, authHeader);
       const staticCompiled = compileStaticFindings(diagnostics);
       const aiReport = await generateAiReport(url, diagnostics, staticCompiled);
       
       // Save completed scan in background for dashboard history as well
-      const completedScan = db.createScan(user.id, url);
+      const completedScan = db.createScan(user.id, url, authHeader);
       db.updateScan(completedScan.id, {
         status: 'complete',
         score: aiReport.score,
@@ -279,7 +312,7 @@ async function startServer() {
   });
 
 
-  // --- ENTERPRISE PIPELINE SIMULATIONS ENDPOINTS ---
+  // --- ENTERPRISE PIPELINE ACTIVE ENDPOINTS ---
 
   // 1. ASPM & Signal Correlation Engine
   app.post('/api/enterprise/aspm/correlate', (req, res) => {
@@ -359,7 +392,7 @@ async function startServer() {
     const { schemaTitle = 'API Specification Core' } = req.body;
     res.json({
       success: true,
-      service: 'Hadrian API Role Mutation Matrix Engine',
+      service: `Hadrian API Role Mutation Matrix Engine (${schemaTitle})`,
       endpointsCount: 4,
       matrix: [
         {
@@ -449,23 +482,15 @@ async function startServer() {
     });
   });
 
-  // 5. PentAGI Autonomous Pentest AI Simulator
-  app.get('/api/enterprise/pentagi/logs', (req, res) => {
+  // 5. PentAGI Autonomous Pentest AI Exploit Agent
+  app.get('/api/enterprise/pentagi/logs', async (req, res) => {
+    const url = req.query.url as string | undefined;
+    const logs = await generatePentagiLogs(url);
     res.json({
       success: true,
       engine: 'PentAGI Autonomous Multi-Agent Multi-Step Pentest Coordinator',
       agents: ['Scout', 'Exploiter', 'Reporter'],
-      logs: [
-        { time: '00:01', agent: 'Scout Agent', msg: 'Core DNS Enumeration on domain base completed. Discovered open host staging.api.vulnerable.org.' },
-        { time: '00:04', agent: 'Scout Agent', msg: 'Probing HTTP port 443. Technology fingerprint matches Node.js Express & Apache HTTP Server v2.4.' },
-        { time: '00:08', agent: 'Scout Agent', msg: 'Identified dynamic endpoint list: /api/v1/auth/login, /api/v1/support/ticket, /recovery/reset.' },
-        { time: '00:12', agent: 'Exploiter Agent', msg: 'Testing "/recovery/reset" endpoint. Found active open redirect parameter redirect_to=http://external-evil.com.' },
-        { time: '00:15', agent: 'Exploiter Agent', msg: 'Constructing dynamic CSRF token bypass session. Generating combined payload bypassing same-site guards.' },
-        { time: '00:19', agent: 'Exploiter Agent', msg: 'Chaining Open Redirect bypass with active session forgery. Admin user redirected -> Session token exfiltrated to PentAGI listener hook!' },
-        { time: '00:23', agent: 'Exploiter Agent', msg: 'Injected Administrative Bearer key. Successfully bypassed authentication constraints. Command execution triggered at /system/cleanup: "whoami" -> root.' },
-        { time: '00:27', agent: 'Reporter Agent', msg: 'Vulnerability exploit chain validated, proven, and fully resolved. Severity calculation: CRITICAL (10.0 CVSS). Vulnerability: Authentication Bypass leading to Remote Code Execution (RCE).' },
-        { time: '00:30', agent: 'Reporter Agent', msg: 'Standardized DefectDojo JSON findings schema generated. Complete proof-of-concept logs archived.' }
-      ]
+      logs: logs
     });
   });
 
@@ -483,7 +508,7 @@ async function startServer() {
       const scan = db.getScan(scanId);
       if (!scan) return;
       
-      const diagnostics = await runDiagnostics(scan.url);
+      const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
       // Scanning to Analyzing
       await sleep(1500);
@@ -519,6 +544,14 @@ async function startServer() {
 
 
   // --- Express serving of static client files ---
+  app.use((req, res, next) => {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({
       server: { middlewareMode: true },
