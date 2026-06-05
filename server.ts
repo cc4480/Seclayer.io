@@ -4,7 +4,7 @@ import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
+import { generateAiReport, generatePentagiLogs } from './server/ai.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
 import { createCheckoutSession, handleStripeWebhook } from './server/stripe.js';
 
