@@ -6,7 +6,7 @@ import ReportViewer from './pages/ReportViewer.js';
 import ScanProgress from './pages/ScanProgress.js';
 import LoginModal from './components/LoginModal.js';
 import { User, Scan, ApiKey } from './types.js';
-import { ShieldAlert, RefreshCw } from 'lucide-react';
+import { apiFetch, setToken, clearToken, getToken } from './lib/api.js';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
@@ -14,51 +14,58 @@ export default function App() {
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [credits, setCredits] = useState(0);
   const [transactions, setTransactions] = useState<any[]>([]);
-  
-  // Navigation states
+
   const [currentView, setCurrentView] = useState<'landing' | 'dashboard' | 'progress' | 'report'>('landing');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [isPerformingAction, setIsPerformingAction] = useState(false);
-  
-  // Fetch initial profile & stats (automatically uses user_default out of the box)
+
+  // On mount: restore session from stored token, handle Stripe return
   useEffect(() => {
-    loadUserContext('user_default');
+    const token = getToken();
+    if (token) {
+      loadUserContext();
+    }
+
+    // Handle Stripe checkout success redirect
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('checkout_success') === 'true') {
+      window.history.replaceState({}, '', window.location.pathname);
+      if (token) {
+        // Small delay to ensure webhook has processed
+        setTimeout(() => loadUserContext(), 1500);
+      }
+    }
   }, []);
 
-  const loadUserContext = async (userId: string) => {
+  const loadUserContext = async () => {
     setIsPerformingAction(true);
     try {
-      // 1. Fetch user profile
-      const userRes = await fetch(`/api/auth/me?userId=${userId}`);
-      if (userRes.ok) {
-        const userData = await userRes.json();
-        setUser(userData.user);
-        setCredits(userData.user.credits);
+      const userRes = await apiFetch('/api/auth/me');
+      if (!userRes.ok) {
+        // Token invalid or expired — clear it
+        clearToken();
+        setUser(null);
+        return;
+      }
+      const userData = await userRes.json();
+      setUser(userData.user);
+      setCredits(userData.user.credits);
 
-        // 2. Fetch user's scans list
-        const scansRes = await fetch(`/api/scans?userId=${userId}`);
-        if (scansRes.ok) {
-          const scansData = await scansRes.json();
-          setScans(scansData.scans);
-        }
+      const [scansRes, keysRes, creditsRes] = await Promise.all([
+        apiFetch('/api/scans'),
+        apiFetch('/api/keys'),
+        apiFetch('/api/credits'),
+      ]);
 
-        // 3. Fetch user's developer keys
-        const keysRes = await fetch(`/api/keys?userId=${userId}`);
-        if (keysRes.ok) {
-          const keysData = await keysRes.json();
-          setApiKeys(keysData.keys);
-        }
-
-        // 4. Fetch user credit transactions
-        const creditsRes = await fetch(`/api/credits?userId=${userId}`);
-        if (creditsRes.ok) {
-          const creditsData = await creditsRes.json();
-          setTransactions(creditsData.transactions || []);
-        }
+      if (scansRes.ok) setScans((await scansRes.json()).scans);
+      if (keysRes.ok) setApiKeys((await keysRes.json()).keys);
+      if (creditsRes.ok) {
+        const c = await creditsRes.json();
+        setTransactions(c.transactions || []);
       }
     } catch (err) {
-      console.error('Error loading user dashboard metrics:', err);
+      console.error('Error loading user context:', err);
     } finally {
       setIsPerformingAction(false);
     }
@@ -72,55 +79,41 @@ export default function App() {
       setSelectedScanId(null);
       setCurrentView(view as any);
     }
-    // Scroll smoothly back to top on transitions
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleStartTrial = (initialUrl: string) => {
-    // If guest clicks landing page audit input, we route them into console 
-    // and trigger the scan immediately! Outstanding, frictionless signup flow.
     if (!user) {
       setShowLogin(true);
       return;
     }
     setCurrentView('dashboard');
-    setTimeout(() => {
-      onInitiateScan(initialUrl);
-    }, 400);
+    setTimeout(() => onInitiateScan(initialUrl), 400);
   };
 
   const onInitiateScan = async (url: string, authHeader?: string) => {
-    if (!user) {
-      setShowLogin(true);
-      return;
-    }
+    if (!user) { setShowLogin(true); return; }
 
     setIsPerformingAction(true);
     try {
-      const res = await fetch('/api/scans', {
+      const res = await apiFetch('/api/scans', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, userId: user.id, authHeader })
+        body: JSON.stringify({ url, authHeader }),
       });
 
       if (res.ok) {
         const data = await res.json();
-        // Optimistically deduct credit locally & add scan to list
         setCredits(prev => Math.max(0, prev - 1));
         setScans(prev => [data.scan, ...prev]);
-        
-        // Open scanning terminal screen
         setSelectedScanId(data.scan.id);
         setCurrentView('progress');
-        
-        // Refresh full state background metrics in parallel
-        setTimeout(() => loadUserContext(user.id), 1000);
+        setTimeout(() => loadUserContext(), 1000);
       } else {
         const errData = await res.json();
-        alert(errData.message || 'Scanning initiation failed');
+        alert(errData.message || 'Scan initiation failed');
       }
     } catch (err) {
-      console.error('Core scan launch err:', err);
+      console.error('Scan launch error:', err);
     } finally {
       setIsPerformingAction(false);
     }
@@ -130,15 +123,8 @@ export default function App() {
     if (!user) return;
     setIsPerformingAction(true);
     try {
-      const res = await fetch('/api/keys', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id })
-      });
-      if (res.ok) {
-        // Reload keys listing
-        loadUserContext(user.id);
-      }
+      const res = await apiFetch('/api/keys', { method: 'POST', body: JSON.stringify({}) });
+      if (res.ok) loadUserContext();
     } catch (err) {
       console.error('Key generation error:', err);
     } finally {
@@ -150,71 +136,51 @@ export default function App() {
     if (!user) return;
     setIsPerformingAction(true);
     try {
-      const res = await fetch(`/api/keys/${keyId}?userId=${user.id}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        // Reload keys listing
-        loadUserContext(user.id);
-      }
+      const res = await apiFetch(`/api/keys/${keyId}`, { method: 'DELETE' });
+      if (res.ok) loadUserContext();
     } catch (err) {
-      console.error('Key revoking error:', err);
+      console.error('Key revoke error:', err);
     } finally {
       setIsPerformingAction(false);
     }
   };
 
   const onPurchaseCredits = async (packName: 'single' | 'pack5' | 'pack20') => {
-    if (!user) {
-      setShowLogin(true);
-      return;
-    }
+    if (!user) { setShowLogin(true); return; }
     setIsPerformingAction(true);
     try {
-      const res = await fetch('/api/credits/checkout', {
+      const res = await apiFetch('/api/credits/checkout', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, pack: packName })
+        body: JSON.stringify({ pack: packName }),
       });
       if (res.ok) {
         const data = await res.json();
-        // Immediately reload user credentials containing topped-up values
-        await loadUserContext(user.id);
+        if (data.url) {
+          // Redirect to Stripe hosted checkout
+          window.location.href = data.url;
+        }
+      } else {
+        const err = await res.json();
+        alert(err.message || 'Checkout failed. Please try again.');
       }
     } catch (err) {
-      console.error('Purchase transactions failed:', err);
+      console.error('Purchase error:', err);
     } finally {
       setIsPerformingAction(false);
     }
   };
 
-  const handleLoginSuccess = async (email: string) => {
-    setIsPerformingAction(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setUser(data.user);
-        
-        // Load credits and list scans belonging to this freshly authorized user profile
-        await loadUserContext(data.user.id);
-        setCurrentView('dashboard');
-      }
-    } catch (err) {
-      console.error('Sign-in synchronization failure:', err);
-    } finally {
-      setIsPerformingAction(false);
-    }
+  const handleLoginSuccess = async (token: string, userData: User) => {
+    setToken(token);
+    setUser(userData);
+    setCredits(userData.credits);
+    await loadUserContext();
+    setCurrentView('dashboard');
   };
 
   const handleLogout = async () => {
-    try {
-      await fetch('/api/auth/logout', { method: 'POST' });
-    } catch {}
+    try { await apiFetch('/api/auth/logout', { method: 'POST' }); } catch {}
+    clearToken();
     setUser(null);
     setScans([]);
     setApiKeys([]);
@@ -222,13 +188,10 @@ export default function App() {
     setCurrentView('landing');
   };
 
-  // Find active scan we are polling/viewing
   const activeScan = scans.find(s => s.id === selectedScanId);
 
   return (
     <div className="bg-zinc-950 min-h-screen flex flex-col font-sans">
-      
-      {/* Universal navigation bar */}
       <Navbar
         currentView={currentView}
         onNavigate={handleNavigate}
@@ -238,17 +201,13 @@ export default function App() {
         onLoginClick={() => setShowLogin(true)}
       />
 
-      {/* Primary Page views router mapping */}
       <main className="flex-1">
         {currentView === 'landing' && (
-          <Landing 
+          <Landing
             onStartTrial={handleStartTrial}
             onNavigate={handleNavigate}
             onSelectPack={(pack) => {
-              if (!user) {
-                setShowLogin(true);
-                return;
-              }
+              if (!user) { setShowLogin(true); return; }
               onPurchaseCredits(pack);
               setCurrentView('dashboard');
             }}
@@ -269,7 +228,7 @@ export default function App() {
             onPurchaseCredits={onPurchaseCredits}
             onViewReport={(scanId) => {
               const checkScan = scans.find(s => s.id === scanId);
-              if (checkScan && (checkScan.status === 'queued' || checkScan.status === 'scanning' || checkScan.status === 'analyzing')) {
+              if (checkScan && ['queued', 'scanning', 'analyzing'].includes(checkScan.status)) {
                 setSelectedScanId(scanId);
                 setCurrentView('progress');
               } else {
@@ -284,8 +243,7 @@ export default function App() {
           <ScanProgress
             scanId={selectedScanId}
             onScanFinished={(scanId) => {
-              // Refresh history lists & immediately route to viewer page
-              if (user) loadUserContext(user.id);
+              loadUserContext();
               handleNavigate('report', scanId);
             }}
             onCancel={() => {
@@ -298,21 +256,21 @@ export default function App() {
         {currentView === 'report' && activeScan && (
           <ReportViewer
             scan={activeScan}
-            previousScan={scans.filter(s => s.url === activeScan.url && s.id !== activeScan.id && new Date(s.createdAt).getTime() < new Date(activeScan.createdAt).getTime()).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]}
+            previousScan={scans
+              .filter(s => s.url === activeScan.url && s.id !== activeScan.id && new Date(s.createdAt).getTime() < new Date(activeScan.createdAt).getTime())
+              .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]}
             onBack={() => handleNavigate('dashboard')}
-            onRefreshScans={() => loadUserContext(user?.id || 'user_default')}
+            onRefreshScans={() => loadUserContext()}
           />
         )}
       </main>
 
-      {/* Passwordless Magic Sign-in popup option */}
       {showLogin && (
         <LoginModal
           onClose={() => setShowLogin(false)}
           onLoginSuccess={handleLoginSuccess}
         />
       )}
-
     </div>
   );
 }

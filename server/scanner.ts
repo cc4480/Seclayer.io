@@ -94,8 +94,8 @@ export async function runDiagnostics(
     scaLibraries: [],
     easmPerimeter: {
       subdomains: [],
-      ip: "104.244.42.1", // default fallback, will resolve if possible
-      nameserver: "ns1.seclayer-dns.net",
+      ip: "unknown",
+      nameserver: "unknown",
       protocol: url.startsWith("https://")
         ? "TLS 1.3 / HTTPS"
         : "HTTP/1.1 Cleartext",
@@ -376,15 +376,19 @@ export async function runDiagnostics(
       "pop",
       "imap",
     ];
-    result.easmPerimeter.ip = "104.244.42.1"; // Standard DNS estimation fallback
-
     try {
-      // Need dynamic import to avoid altering the top-level imports significantly or we can just require it
       const dns = await import("dns/promises");
 
-      const ipRecords = await dns.resolve4(hostname).catch(() => []);
-      if (ipRecords && ipRecords.length > 0) {
-        result.easmPerimeter.ip = ipRecords[0];
+      const [ipRecords, nsRecords] = await Promise.allSettled([
+        dns.resolve4(hostname),
+        dns.resolveNs(hostname),
+      ]);
+
+      if (ipRecords.status === 'fulfilled' && ipRecords.value.length > 0) {
+        result.easmPerimeter.ip = ipRecords.value[0];
+      }
+      if (nsRecords.status === 'fulfilled' && nsRecords.value.length > 0) {
+        result.easmPerimeter.nameserver = nsRecords.value[0];
       }
 
       // Check for Wildcard DNS to prevent false positive subdomain bloating
@@ -435,27 +439,28 @@ export async function runDiagnostics(
       const subResults = await Promise.all(subdomainChecks);
       result.easmPerimeter.subdomains = subResults;
     } catch (e) {
-      console.warn(
-        "DNS resolution failed or not supported in this environment.",
-        e,
-      );
-      // Fallback
-      commonSubdomains.slice(0, 10).forEach((sub) => {
-        result.easmPerimeter.subdomains.push({
-          domain: `${sub}.${hostname}`,
-          status: "inactive",
-          port: "0",
-        });
-      });
+      console.warn("DNS resolution failed:", e);
     }
 
     // Sensitive Paths Probing
     const pathsToProbe = [
       "/.env",
+      "/.env.local",
+      "/.env.production",
       "/.git/config",
+      "/.git/HEAD",
       "/admin",
       "/wp-admin",
       "/phpinfo.php",
+      "/server-status",
+      "/actuator",
+      "/actuator/env",
+      "/swagger.json",
+      "/openapi.json",
+      "/api-docs",
+      "/config.php",
+      "/backup.sql",
+      "/dump.sql",
     ];
 
     for (const p of pathsToProbe) {

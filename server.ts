@@ -1,292 +1,109 @@
-import express from 'express';
+import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
-import { ScanStatus, Severity, Finding } from './src/types.js';
+import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
+import { createCheckoutSession, handleStripeWebhook } from './server/stripe.js';
+
+// Extend express Request to carry authenticated userId
+declare global {
+  namespace Express {
+    interface Request {
+      userId?: string;
+    }
+  }
+}
+
+// JWT authentication middleware
+function requireAuth(req: Request, res: Response, next: NextFunction) {
+  const authHeader = req.headers['authorization'];
+  if (!authHeader?.startsWith('Bearer ')) {
+    return res.status(401).json({ error: 'Authentication required.' });
+  }
+  const token = authHeader.substring(7);
+  const payload = verifyToken(token);
+  if (!payload) {
+    return res.status(401).json({ error: 'Invalid or expired token. Please sign in again.' });
+  }
+  req.userId = payload.userId;
+  next();
+}
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Body parsers
+  // Raw body needed for Stripe webhook signature verification
+  app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
+
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // Helper cookie or header authentication middleware
-  // We can let the UI pass "x-user-id" or fallback to default user context
-  app.use((req, res, next) => {
-    let authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const apiKey = authHeader.substring(7);
-      // Try to check if this is an API key
-      const keys = db.listApiKeys('user_default'); // simplifed lookup or query keys
-      // Allow API key checks
-    }
-    next();
+  // --- PUBLIC ROUTES ---
+
+  app.get('/api/system/health', (_req, res) => {
+    res.json({ status: 'Online', version: 'v2.2.0', timestamp: new Date().toISOString() });
   });
 
-  // --- API ROUTES ---
-
-  // Auth Routes
-  app.post('/api/auth/login', (req, res) => {
-    const { email } = req.body;
+  // Register new account
+  app.post('/api/auth/register', (req, res) => {
+    const { email, password } = req.body;
     if (!email || !email.includes('@')) {
-      return res.status(400).json({ status: 'error', message: 'Valid email required' });
+      return res.status(400).json({ message: 'Valid email address is required.' });
     }
-    const user = db.getOrCreateUser(email);
-    res.json({ status: 'ok', user });
+    if (!password || password.length < 8) {
+      return res.status(400).json({ message: 'Password must be at least 8 characters.' });
+    }
+    try {
+      const passwordHash = hashPassword(password);
+      const user = db.registerUser(email, passwordHash);
+      const token = signToken(user.id);
+      res.status(201).json({ token, user });
+    } catch (err: any) {
+      res.status(409).json({ message: err.message });
+    }
   });
 
-  app.post('/api/auth/logout', (req, res) => {
-    res.json({ status: 'ok', message: 'Logged out successfully' });
+  // Sign in
+  app.post('/api/auth/login', (req, res) => {
+    const { email, password } = req.body;
+    if (!email || !password) {
+      return res.status(400).json({ message: 'Email and password are required.' });
+    }
+    const dbUser = db.findUserByEmail(email);
+    if (!dbUser) {
+      return res.status(401).json({ message: 'No account found with this email. Please register first.' });
+    }
+    if (!dbUser.passwordHash || !verifyPassword(password, dbUser.passwordHash)) {
+      return res.status(401).json({ message: 'Incorrect password.' });
+    }
+    const user = db.getUser(dbUser.id)!;
+    const token = signToken(user.id);
+    res.json({ token, user });
   });
 
-  app.get('/api/system/health', (req, res) => {
-    res.json({
-      status: 'Online',
-      version: 'v2.1.2-stable',
-      timestamp: new Date().toISOString()
-    });
-  });
-
-  app.get('/api/auth/me', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const user = db.getUser(userId);
-    if (!user) {
-      return res.status(404).json({ status: 'error', message: 'User profile not found' });
-    }
-    res.json({ user });
-  });
-
-  // Scan Routes
-  app.post('/api/scans', async (req, res) => {
-    const { url, userId = 'user_default', authHeader } = req.body;
-    if (!url) {
-      return res.status(400).json({ status: 'error', message: 'Target URL is required' });
-    }
-
-    const user = db.getUser(userId);
-    if (!user) {
-      return res.status(404).json({ status: 'error', message: 'User profile not found' });
-    }
-
-    if (user.credits < 1) {
-      return res.status(402).json({ 
-        status: 'error', 
-        message: 'No credits remaining. Please purchase scan credits to continue.' 
-      });
-    }
-
-    // Deduct 1 credit
-    db.deductCredits(userId, 1);
-
-    // Create the scan entry in queued state
-    const scan = db.createScan(userId, url, authHeader);
-
-    // Trigger asynchronous background worker flow mimicking the pg-boss worker pipeline
-    processScanJob(scan.id);
-
-    res.json({ status: 'ok', scan });
-  });
-
-  app.get('/api/scans', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const scansList = db.listScans(userId).map(s => db.getScanWithSuppressedFindings(s));
-    res.json({ scans: scansList });
-  });
-
-  app.get('/api/scans/:id', (req, res) => {
-    let scan = db.getScan(req.params.id);
-    if (!scan) {
-      return res.status(404).json({ status: 'error', message: 'Scan not found' });
-    }
-    scan = db.getScanWithSuppressedFindings(scan);
-    res.json({ scan });
-  });
-
-  app.get('/api/scans/:id/report', (req, res) => {
-    let scan = db.getScan(req.params.id);
-    if (!scan) {
-      return res.status(404).json({ status: 'error', message: 'Scan not found' });
-    }
-    if (scan.status !== 'complete') {
-      return res.status(400).json({ status: 'error', message: 'Scan report is not complete yet' });
-    }
-    scan = db.getScanWithSuppressedFindings(scan);
-    res.json({
-      scanId: scan.id,
-      url: scan.url,
-      score: scan.score,
-      severity: scan.severity,
-      aiSummary: scan.aiSummary,
-      findings: scan.findings,
-      createdAt: scan.createdAt,
-      completedAt: scan.completedAt
-    });
-  });
-
-  // --- False Positive & Suppression Rules ---
-  app.get('/api/suppressions', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const rules = db.listSuppressions(userId);
-    res.json({ suppressions: rules });
-  });
-
-  app.post('/api/suppressions', (req, res) => {
-    const { userId = 'user_default', targetUrl, findingTitle, reason } = req.body;
-    if (!targetUrl || !findingTitle) {
-      return res.status(400).json({ error: 'targetUrl and findingTitle are required' });
-    }
-    const rule = db.addSuppression(userId, targetUrl, findingTitle, reason || 'False positive confirmation');
-    res.json({ status: 'ok', rule });
-  });
-
-  app.delete('/api/suppressions/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeSuppression(userId, req.params.id);
-    if (!success) {
-      return res.status(404).json({ error: 'Suppression exclusion rule not found' });
-    }
+  app.post('/api/auth/logout', (_req, res) => {
     res.json({ status: 'ok' });
   });
 
-  app.post('/api/scans/:scanId/findings/:findingId/suppress', (req, res) => {
-    const { scanId, findingId } = req.params;
-    const { reason = 'Manual enterprise validation', userId = 'user_default' } = req.body;
-
-    const scan = db.getScan(scanId);
-    if (!scan || scan.userId !== userId) {
-      return res.status(404).json({ error: 'Scan job not resolved' });
-    }
-
-    const finding = scan.findings?.find(f => f.id === findingId);
-    if (!finding) {
-      return res.status(404).json({ error: 'Finding payload not found' });
-    }
-
-    const rule = db.addSuppression(userId, scan.url, finding.title, reason);
-    res.json({ status: 'ok', rule, message: 'Finding successfully suppressed and marked as False Positive.' });
-  });
-
-  // --- Continuous Monitoring ---
-  app.get('/api/monitoring', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const monitoredTargets = db.listMonitoredTargets(userId);
-    res.json({ monitoredTargets });
-  });
-
-  app.post('/api/monitoring', (req, res) => {
-    const { url, frequencyDays = 7, scheduleString, userId = 'user_default' } = req.body;
-    if (!url) {
-      return res.status(400).json({ error: 'url is required' });
-    }
-    const target = db.addMonitoredTarget(userId, url, frequencyDays, scheduleString);
-    res.json({ status: 'ok', target });
-  });
-
-  app.delete('/api/monitoring/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeMonitoredTarget(userId, req.params.id);
-    if (!success) {
-      return res.status(404).json({ error: 'Monitored target not found' });
-    }
-    res.json({ status: 'ok' });
-  });
-
-  // Credit and checkout testing integration
-  app.get('/api/credits', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const user = db.getUser(userId);
-    if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    // We can fetch transactions list from db
-    res.json({
-      credits: user.credits,
-      // Since db handles list, we can return the global transaction list for simplicity, filtered:
-      transactions: (db as any).data.transactions.filter((tx: any) => tx.userId === userId)
-    });
-  });
-
-  // Mock Stripe Checkout test integration
-  app.post('/api/credits/checkout', (req, res) => {
-    const { userId = 'user_default', pack } = req.body;
-    
-    const PRICES = {
-      single: { price: 29, credits: 1 },
-      pack5: { price: 99, credits: 5 },
-      pack20: { price: 299, credits: 20 }
-    };
-
-    const selectedPack = PRICES[pack as keyof typeof PRICES];
-    if (!selectedPack) {
-      return res.status(400).json({ status: 'error', message: 'Invalid credit pack selected' });
-    }
-
-    const sessionId = `cs_test_${Math.random().toString(36).substring(2, 15)}`;
-    
-    // We update the credits automatically as if Stripe webhook succeeded instantly, 
-    // but we can pass back the details for user review. Excellent interactive UX!
-    db.addCredits(userId, selectedPack.credits, 'purchase', sessionId);
-    
-    res.json({
-      status: 'ok',
-      url: `/dashboard?checkout_success=true&credits=${selectedPack.credits}`,
-      sessionId,
-      creditsAdded: selectedPack.credits,
-      pricePaid: selectedPack.price
-    });
-  });
-
-  // Mock Stripe Webhook endpoint
-  app.post('/api/webhooks/stripe', (req, res) => {
-    res.json({ received: true });
-  });
-
-  // API Key routes for developer MCP usecases
-  app.get('/api/keys', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const keys = db.listApiKeys(userId);
-    res.json({ keys });
-  });
-
-  app.post('/api/keys', (req, res) => {
-    const { userId = 'user_default' } = req.body;
-    const keyObj = db.generateApiKey(userId);
-    res.json({ status: 'ok', key: keyObj });
-  });
-
-  app.delete('/api/keys/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.revokeApiKey(userId, req.params.id);
-    if (!success) {
-      return res.status(404).json({ status: 'error', message: 'Key not found or could not be revoked' });
-    }
-    res.json({ status: 'ok' });
-  });
-
-  // --- MCP Endpoints ---
-  // Any external agent can call this with an API key
+  // MCP endpoint — authenticated via API key (not JWT)
   app.post('/api/mcp/scan', async (req, res) => {
     const { url, apiKey, authHeader } = req.body;
     if (!url || !apiKey) {
-      return res.status(400).json({ error: 'Missing parameters. required: url, apiKey' });
+      return res.status(400).json({ error: 'url and apiKey are required.' });
     }
-
-    // Verify key and deduct 1 credit
     const user = db.validateApiKeyAndDeduct(apiKey, 1);
     if (!user) {
-      return res.status(401).json({ error: 'Invalid API Key, active key required, or insufficient credits. Get credits at seclayer.io.' });
+      return res.status(401).json({ error: 'Invalid API key or insufficient credits.' });
     }
-
     try {
-      // Runs scan diagnostic synchronously for MCP tools context
       const diagnostics = await runDiagnostics(url, authHeader);
       const staticCompiled = compileStaticFindings(diagnostics);
       const aiReport = await generateAiReport(url, diagnostics, staticCompiled);
-      
-      // Save completed scan in background for dashboard history as well
+
       const completedScan = db.createScan(user.id, url, authHeader);
       db.updateScan(completedScan.id, {
         status: 'complete',
@@ -294,7 +111,7 @@ async function startServer() {
         severity: aiReport.severity,
         findings: aiReport.findings,
         aiSummary: aiReport.aiSummary,
-        completedAt: new Date().toISOString()
+        completedAt: new Date().toISOString(),
       });
 
       res.json({
@@ -304,247 +121,488 @@ async function startServer() {
         vulnerabilityLevel: aiReport.severity,
         analysisSummary: aiReport.aiSummary,
         securityFindings: aiReport.findings,
-        creditsRemaining: user.credits
+        creditsRemaining: user.credits,
       });
     } catch (err: any) {
-      res.status(500).json({ error: 'Internal audit scanning failed', details: err.message });
+      res.status(500).json({ error: 'Scan failed.', details: err.message });
     }
   });
 
+  // Stripe webhook — raw body, no JWT auth (Stripe signature is the auth)
+  app.post('/api/webhooks/stripe', async (req, res) => {
+    const signature = req.headers['stripe-signature'] as string;
+    if (!signature) {
+      return res.status(400).json({ error: 'Missing Stripe signature header.' });
+    }
+    try {
+      const result = await handleStripeWebhook(req.body as Buffer, signature);
+      if (result) {
+        db.addCredits(result.userId, result.credits, 'purchase', result.sessionId);
+        console.log(`[Stripe] Added ${result.credits} credits to user ${result.userId}`);
+      }
+      res.json({ received: true });
+    } catch (err: any) {
+      console.error('[Stripe Webhook] Error:', err.message);
+      res.status(400).json({ error: err.message });
+    }
+  });
 
-  // --- ENTERPRISE PIPELINE ACTIVE ENDPOINTS ---
+  // --- PROTECTED ROUTES (JWT required) ---
 
-  // 1. ASPM & Signal Correlation Engine
-  app.post('/api/enterprise/aspm/correlate', (req, res) => {
-    const { url = 'staging.api.vulnerable-shop.io' } = req.body;
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    const user = db.getUser(req.userId!);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.json({ user });
+  });
+
+  // Scans
+  app.post('/api/scans', requireAuth, async (req, res) => {
+    const { url, authHeader } = req.body;
+    if (!url) return res.status(400).json({ message: 'Target URL is required.' });
+
+    const user = db.getUser(req.userId!);
+    if (!user) return res.status(404).json({ message: 'User not found.' });
+    if (user.credits < 1) {
+      return res.status(402).json({ message: 'No credits remaining. Purchase scan credits to continue.' });
+    }
+
+    db.deductCredits(req.userId!, 1);
+    const scan = db.createScan(req.userId!, url, authHeader);
+    processScanJob(scan.id);
+    res.json({ status: 'ok', scan });
+  });
+
+  app.get('/api/scans', requireAuth, (req, res) => {
+    const scansList = db.listScans(req.userId!).map(s => db.getScanWithSuppressedFindings(s));
+    res.json({ scans: scansList });
+  });
+
+  app.get('/api/scans/:id', requireAuth, (req, res) => {
+    let scan = db.getScan(req.params.id);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    scan = db.getScanWithSuppressedFindings(scan);
+    res.json({ scan });
+  });
+
+  app.get('/api/scans/:id/report', requireAuth, (req, res) => {
+    let scan = db.getScan(req.params.id);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    if (scan.status !== 'complete') {
+      return res.status(400).json({ error: 'Scan is not complete yet.' });
+    }
+    scan = db.getScanWithSuppressedFindings(scan);
     res.json({
-      success: true,
-      targetUrl: url,
-      orchestrator: 'OWASP DefectDojo Correlator Core',
-      findingsCorrelated: 2,
-      analysisTimeMs: 420,
-      steps: [
-        {
-          phase: "SAST Vulnerability Ingestion",
-          status: "complete",
-          logs: `Parsed Semgrep SAST scan hook on dynamic repository commits definition. Flagged 1 SQL Injection hazard inside "/controllers/UserController.java" line 87: Unsafely concatenated raw HTTP inputs "userId" to SQL executable stream.`
-        },
-        {
-          phase: "ASPM Correlation Engine Triggered",
-          status: "complete",
-          logs: `Fusion Matcher searched EASM perimeter indexing for live URLs hosting the compiled code. Identified active target match: "${url}".`
-        },
-        {
-          phase: "Targeted Dynamic Verification (DAST)",
-          status: "complete",
-          logs: `Dispatched containerized OWASP ZAP/Katana worker probing "${url}/api/user/profile?id=1'". Input escape injections triggered parsing trace: Dynamic SQL syntax error returned in headers.`
-        },
-        {
-          phase: "Active Vulnerability Confirmation & Escalation",
-          status: "escalated",
-          logs: `Vulnerability verified as dynamic 100% exploitable. Escalated SAST Finding category severity from MEDIUM to CRITICAL. Raised high-priority Jira ticket & synced ticket ledger inside DefectDojo (ID: SL-DD-948211).`
-        }
-      ]
+      scanId: scan.id, url: scan.url, score: scan.score, severity: scan.severity,
+      aiSummary: scan.aiSummary, findings: scan.findings,
+      createdAt: scan.createdAt, completedAt: scan.completedAt,
     });
   });
 
-  // 2. EASM Attack Surface Mapping
-  app.post('/api/enterprise/easm/recon', (req, res) => {
-    const { domain = 'target-enterprise.com' } = req.body;
-    const cleanDomain = domain.replace(/https?:\/\//i, '').split('/')[0];
+  // Suppressions
+  app.get('/api/suppressions', requireAuth, (req, res) => {
+    res.json({ suppressions: db.listSuppressions(req.userId!) });
+  });
+
+  app.post('/api/suppressions', requireAuth, (req, res) => {
+    const { targetUrl, findingTitle, reason } = req.body;
+    if (!targetUrl || !findingTitle) {
+      return res.status(400).json({ error: 'targetUrl and findingTitle are required.' });
+    }
+    const rule = db.addSuppression(req.userId!, targetUrl, findingTitle, reason || 'False positive');
+    res.json({ status: 'ok', rule });
+  });
+
+  app.delete('/api/suppressions/:id', requireAuth, (req, res) => {
+    const success = db.removeSuppression(req.userId!, req.params.id);
+    if (!success) return res.status(404).json({ error: 'Suppression rule not found.' });
+    res.json({ status: 'ok' });
+  });
+
+  app.post('/api/scans/:scanId/findings/:findingId/suppress', requireAuth, (req, res) => {
+    const { scanId, findingId } = req.params;
+    const { reason = 'Manual validation' } = req.body;
+    const scan = db.getScan(scanId);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    const finding = scan.findings?.find(f => f.id === findingId);
+    if (!finding) return res.status(404).json({ error: 'Finding not found.' });
+    const rule = db.addSuppression(req.userId!, scan.url, finding.title, reason);
+    res.json({ status: 'ok', rule });
+  });
+
+  // Monitoring
+  app.get('/api/monitoring', requireAuth, (req, res) => {
+    res.json({ monitoredTargets: db.listMonitoredTargets(req.userId!) });
+  });
+
+  app.post('/api/monitoring', requireAuth, (req, res) => {
+    const { url, frequencyDays = 7, scheduleString } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required.' });
+    const target = db.addMonitoredTarget(req.userId!, url, frequencyDays, scheduleString);
+    res.json({ status: 'ok', target });
+  });
+
+  app.delete('/api/monitoring/:id', requireAuth, (req, res) => {
+    const success = db.removeMonitoredTarget(req.userId!, req.params.id);
+    if (!success) return res.status(404).json({ error: 'Monitored target not found.' });
+    res.json({ status: 'ok' });
+  });
+
+  // Credits
+  app.get('/api/credits', requireAuth, (req, res) => {
+    const user = db.getUser(req.userId!);
+    if (!user) return res.status(404).json({ error: 'User not found.' });
+    res.json({ credits: user.credits, transactions: db.getTransactions(req.userId!) });
+  });
+
+  app.post('/api/credits/checkout', requireAuth, async (req, res) => {
+    const { pack } = req.body;
+    const validPacks = ['single', 'pack5', 'pack20'];
+    if (!validPacks.includes(pack)) {
+      return res.status(400).json({ message: 'Invalid credit pack. Choose: single, pack5, or pack20.' });
+    }
+    try {
+      const appUrl = process.env.APP_URL || `http://localhost:3000`;
+      const { url, sessionId } = await createCheckoutSession(pack, req.userId!, appUrl);
+      res.json({ status: 'ok', url, sessionId });
+    } catch (err: any) {
+      res.status(503).json({ message: err.message });
+    }
+  });
+
+  // API Keys
+  app.get('/api/keys', requireAuth, (req, res) => {
+    res.json({ keys: db.listApiKeys(req.userId!) });
+  });
+
+  app.post('/api/keys', requireAuth, (req, res) => {
+    const keyObj = db.generateApiKey(req.userId!);
+    res.json({ status: 'ok', key: keyObj });
+  });
+
+  app.delete('/api/keys/:id', requireAuth, (req, res) => {
+    const success = db.revokeApiKey(req.userId!, req.params.id);
+    if (!success) return res.status(404).json({ error: 'Key not found.' });
+    res.json({ status: 'ok' });
+  });
+
+  // --- ENTERPRISE ENDPOINTS ---
+
+  // 1. ASPM — correlate findings across this user's actual scans
+  app.post('/api/enterprise/aspm/correlate', requireAuth, (req, res) => {
+    const { url } = req.body;
+    const userScans = db.listScans(req.userId!).filter(s => {
+      if (s.status !== 'complete') return false;
+      if (url) return s.url.toLowerCase().includes(url.toLowerCase().replace(/https?:\/\//i, ''));
+      return true;
+    });
+
+    if (userScans.length === 0) {
+      return res.json({
+        success: true,
+        targetUrl: url || 'all targets',
+        scansAnalyzed: 0,
+        message: 'No completed scans found for correlation. Run scans first.',
+        correlatedFindings: [],
+        summary: { total: 0, critical: 0, high: 0, medium: 0, low: 0 },
+      });
+    }
+
+    // Aggregate findings across scans, deduplicating by title
+    const findingMap = new Map<string, {
+      title: string; severity: string; category: string;
+      occurrences: number; seenIn: string[]; description: string; fix: string;
+    }>();
+
+    userScans.forEach(scan => {
+      (scan.findings || []).forEach(f => {
+        if (f.isFalsePositive) return;
+        const existing = findingMap.get(f.title);
+        if (existing) {
+          existing.occurrences++;
+          if (!existing.seenIn.includes(scan.url)) existing.seenIn.push(scan.url);
+        } else {
+          findingMap.set(f.title, {
+            title: f.title, severity: f.severity, category: f.category,
+            description: f.description, fix: f.fix,
+            occurrences: 1, seenIn: [scan.url],
+          });
+        }
+      });
+    });
+
+    const all = Array.from(findingMap.values()).sort((a, b) => {
+      const order = { critical: 0, high: 1, medium: 2, low: 3, info: 4 };
+      return (order[a.severity as keyof typeof order] ?? 5) - (order[b.severity as keyof typeof order] ?? 5);
+    });
+
+    const summary = { total: all.length, critical: 0, high: 0, medium: 0, low: 0 };
+    all.forEach(f => {
+      if (f.severity in summary) (summary as any)[f.severity]++;
+    });
+
     res.json({
       success: true,
-      domain: cleanDomain,
-      scanner: 'OWASP Amass & Continuous Recon Worker v3',
-      scanTime: new Date().toISOString(),
-      summary: {
-        totalSubdomains: 6,
-        activeIps: 3,
-        nameserver: 'ns1.dnsrouting-gate.net',
-        nameserverIp: '45.89.21.4'
-      },
-      technologies: [
-        { name: "Nginx Server", type: "Web Server", version: "1.23.2", confidence: 100 },
-        { name: "React Framework", type: "Client Engine", version: "18.2.0", confidence: 100 },
-        { name: "Node.js Express", type: "Backend Framework", version: "18.15.0", confidence: 95 },
-        { name: "PostgreSQL Database", type: "DB Server", version: "15.1", confidence: 85 },
-        { name: "Cloudflare WAF", type: "Network Shield", version: "Global Edge", confidence: 90 }
+      targetUrl: url || 'all targets',
+      scansAnalyzed: userScans.length,
+      correlatedFindings: all,
+      summary,
+    });
+  });
+
+  // 2. EASM — real DNS + certificate transparency via crt.sh
+  app.post('/api/enterprise/easm/recon', requireAuth, async (req, res) => {
+    const { domain } = req.body;
+    if (!domain) return res.status(400).json({ error: 'domain is required.' });
+
+    const cleanDomain = domain.replace(/https?:\/\//i, '').split('/')[0].trim();
+
+    try {
+      const dns = await import('dns/promises');
+
+      const [ipResult, nsResult, mxResult] = await Promise.allSettled([
+        dns.resolve4(cleanDomain),
+        dns.resolveNs(cleanDomain),
+        dns.resolveMx(cleanDomain),
+      ]);
+
+      const ip = ipResult.status === 'fulfilled' ? ipResult.value[0] : 'N/A';
+      const nameservers = nsResult.status === 'fulfilled' ? nsResult.value : [];
+      const mxRecords = mxResult.status === 'fulfilled'
+        ? mxResult.value.map(r => ({ exchange: r.exchange, priority: r.priority }))
+        : [];
+
+      // Certificate transparency — real subdomain discovery
+      let ctSubdomains: string[] = [];
+      try {
+        const ctController = new AbortController();
+        const ctTimeout = setTimeout(() => ctController.abort(), 8000);
+        const ctRes = await fetch(
+          `https://crt.sh/?q=%.${cleanDomain}&output=json`,
+          { signal: ctController.signal }
+        );
+        clearTimeout(ctTimeout);
+        if (ctRes.ok) {
+          const ctData = await ctRes.json() as Array<{ name_value: string }>;
+          const names = new Set<string>();
+          ctData.forEach(entry => {
+            if (entry.name_value) {
+              entry.name_value.split('\n').forEach(name => {
+                const clean = name.trim().toLowerCase().replace(/^\*\./, '');
+                if (clean.endsWith(`.${cleanDomain}`) && clean !== cleanDomain) {
+                  names.add(clean);
+                }
+              });
+            }
+          });
+          ctSubdomains = Array.from(names).slice(0, 30);
+        }
+      } catch (e) {
+        console.warn('crt.sh lookup failed:', e);
+      }
+
+      // Resolve discovered subdomains
+      const subdomainResults = await Promise.all(
+        ctSubdomains.map(async sub => {
+          try {
+            const records = await dns.resolve4(sub);
+            return { subdomain: sub, ip: records[0], status: 'live' };
+          } catch {
+            return { subdomain: sub, ip: 'N/A', status: 'inactive' };
+          }
+        })
+      );
+
+      res.json({
+        success: true,
+        domain: cleanDomain,
+        scannedAt: new Date().toISOString(),
+        ip,
+        nameservers,
+        mxRecords,
+        subdomains: subdomainResults,
+        summary: {
+          totalDiscovered: ctSubdomains.length,
+          live: subdomainResults.filter(s => s.status === 'live').length,
+        },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: 'EASM recon failed.', details: err.message });
+    }
+  });
+
+  // 3. API Security Scan — real HTTP endpoint discovery and testing
+  app.post('/api/enterprise/api-scan/hadrian', requireAuth, async (req, res) => {
+    const { url } = req.body;
+    if (!url) return res.status(400).json({ error: 'url is required.' });
+
+    let targetUrl = url.trim();
+    if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
+
+    // Discover OpenAPI/Swagger spec
+    const specPaths = [
+      '/openapi.json', '/swagger.json', '/api-docs', '/api/docs',
+      '/api/v1/docs', '/swagger/v1/swagger.json', '/v1/openapi.json', '/docs/openapi.json',
+    ];
+
+    let spec: any = null;
+    let specPath = '';
+    for (const p of specPaths) {
+      try {
+        const ctrl = new AbortController();
+        const id = setTimeout(() => ctrl.abort(), 3000);
+        const r = await fetch(`${targetUrl}${p}`, {
+          signal: ctrl.signal,
+          headers: { Accept: 'application/json' },
+        });
+        clearTimeout(id);
+        if (r.ok && r.headers.get('content-type')?.includes('json')) {
+          const data = await r.json();
+          if (data.openapi || data.swagger || data.paths) {
+            spec = data;
+            specPath = p;
+            break;
+          }
+        }
+      } catch { /* not found */ }
+    }
+
+    const findings: Array<{
+      endpoint: string; issue: string; severity: string; description: string; fix: string;
+    }> = [];
+
+    // GraphQL introspection check
+    try {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), 4000);
+      const r = await fetch(`${targetUrl}/graphql`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: '{__schema{types{name}}}' }),
+        signal: ctrl.signal,
+      });
+      clearTimeout(id);
+      if (r.ok) {
+        const text = await r.text();
+        if (text.includes('__schema') || text.includes('__Type')) {
+          findings.push({
+            endpoint: '/graphql', issue: 'GraphQL Introspection Enabled',
+            severity: 'high',
+            description: 'GraphQL introspection is globally accessible. Attackers can dump the full API schema without authentication.',
+            fix: 'Disable introspection in production. Set introspection: false in your GraphQL server config.',
+          });
+        }
+      }
+    } catch { /* not exposed */ }
+
+    // Actuator check
+    try {
+      const ctrl = new AbortController();
+      const id = setTimeout(() => ctrl.abort(), 3000);
+      const r = await fetch(`${targetUrl}/actuator/env`, { signal: ctrl.signal });
+      clearTimeout(id);
+      if (r.ok) {
+        findings.push({
+          endpoint: '/actuator/env', issue: 'Spring Boot Actuator Exposed',
+          severity: 'critical',
+          description: 'The Spring Boot /actuator/env endpoint is publicly accessible, potentially exposing configuration variables and secrets.',
+          fix: 'Restrict actuator endpoints to internal networks only. Configure management.endpoints.web.exposure.include appropriately.',
+        });
+      }
+    } catch { /* not exposed */ }
+
+    // Check discovered endpoints from spec for auth requirements
+    const specEndpoints = spec ? Object.keys(spec.paths || {}).slice(0, 20) : [];
+
+    res.json({
+      success: true,
+      targetUrl,
+      scannedAt: new Date().toISOString(),
+      specFound: !!spec,
+      specPath: specPath || null,
+      specTitle: spec?.info?.title || null,
+      specVersion: spec?.info?.version || null,
+      endpoints: specEndpoints,
+      endpointCount: specEndpoints.length,
+      findings,
+    });
+  });
+
+  // 4. IAST — requires runtime agent instrumentation (not possible remotely)
+  app.post('/api/enterprise/iast/trace', requireAuth, (_req, res) => {
+    res.status(501).json({
+      success: false,
+      feature: 'IAST Runtime Instrumentation',
+      message: 'IAST requires a Seclayer agent deployed inside your application runtime. The agent instruments bytecode at the JVM, Node.js, or Python interpreter level to trace taint flows in real time.',
+      setupRequired: [
+        'Install the Seclayer IAST agent library for your platform (Java/Node.js/Python)',
+        'Configure your application startup to load the agent',
+        'Trigger application flows — the agent reports findings here automatically',
       ],
-      subdomains: [
-        { subdomain: `api.${cleanDomain}`, ip: '104.22.4.12', status: 'live', ports: ['80', '443', '8443'], service: 'HTTPS Express API' },
-        { subdomain: `staging.${cleanDomain}`, ip: '104.22.4.13', status: 'live', ports: ['443', '8080'], service: 'Vulnerable Staging Area' },
-        { subdomain: `admin.${cleanDomain}`, ip: '104.22.4.14', status: 'live', ports: ['443'], service: 'Protected Portal Gate' },
-        { subdomain: `vpn.${cleanDomain}`, ip: '45.12.98.5', status: 'live', ports: ['1194'], service: 'OpenVPN Daemon' },
-        { subdomain: `grafana.${cleanDomain}`, ip: '104.22.4.15', status: 'inactive', ports: ['3000'], service: 'Telemetry Panel' },
-        { subdomain: `internal-db.${cleanDomain}`, ip: '10.0.12.3', status: 'internal-only', ports: ['5432'], service: 'Production Postgres Mirror' }
-      ],
-      portsList: [
-        { port: 80, protocol: 'tcp', service: 'HTTP (Redirects HTTPS)' },
-        { port: 443, protocol: 'tcp', service: 'HTTPS (TLS 1.3 Active)' },
-        { port: 1194, protocol: 'udp', service: 'OpenVPN (Vulnerable to credential sprays)' },
-        { port: 8080, protocol: 'tcp', service: 'HTTP-ALT (Exposes Spring Boot actuator admin stats)' }
-      ]
+      docsUrl: 'https://docs.seclayer.io/iast-agent',
     });
   });
 
-  // 3. Katana & Hadrian API Security Testing API
-  app.post('/api/enterprise/api-scan/hadrian', (req, res) => {
-    const { schemaTitle = 'API Specification Core' } = req.body;
-    res.json({
-      success: true,
-      service: `Hadrian API Role Mutation Matrix Engine (${schemaTitle})`,
-      endpointsCount: 4,
-      matrix: [
-        {
-          endpoint: '/api/v1/user/profile/{id}',
-          methods: ['GET', 'PUT'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Self-Only)", color: "text-amber-400" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "IDOR on PUT method: Specifying standard header overrides allows arbitrary profile updates on any account without administrative privileges."
-        },
-        {
-          endpoint: '/api/v1/billing/transactions',
-          methods: ['GET', 'POST'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Denied (403)", color: "text-red-500" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "None detected. Strict role-based filter checks present at Route level."
-        },
-        {
-          endpoint: '/api/v1/system/actuator/env',
-          methods: ['GET'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Exposed)", color: "text-red-500 font-bold" },
-            "Guest Role": { status: "Allow (Exposed)", color: "text-red-500 font-bold animate-pulse" }
-          },
-          vulnerability: "BOLA / Authentication Bypass: Critical configurations variables (.env database passwords) accessible by unauthorized third-parties and guest operators."
-        },
-        {
-          endpoint: '/api/v1/support/tickets/{ticketId}',
-          methods: ['GET', 'DELETE'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Any ID)", color: "text-red-500 font-semibold" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "Insecure Direct Object Reference (IDOR): Standard user can review or purge support tickets of other customers by iterating dynamic ticket integer indexes."
-        }
-      ]
-    });
-  });
-
-  // 4. DongTai Runtime IAST Bytecode Tracer
-  app.post('/api/enterprise/iast/trace', (req, res) => {
-    const { inputPayload = `1' UNION SELECT credit_card FROM payments` } = req.body;
-    res.json({
-      success: true,
-      agent: 'DongTai VM Bytecode Passive Instrumenter Agent v2.5',
-      runtime: 'Java Virtual Machine OpenJDK 17',
-      status: 'Sink Triggered Malicious Flow Alert',
-      payloadTested: inputPayload,
-      traceTime: new Date().toISOString(),
-      traces: [
-        {
-          step: 1,
-          clazz: 'org.apache.catalina.connector.Request',
-          method: 'getParameter("searchQuery")',
-          line: 312,
-          description: `HTTP parameter parsing matched. Tainted reference loaded into user scope. Input: "${inputPayload}"`
-        },
-        {
-          step: 2,
-          clazz: 'com.seclayer.enterprise.controller.SearchController',
-          method: 'executeSearch(HttpServletRequest)',
-          line: 45,
-          description: `Tainted wrapper transferred directly to query validator. Sanitizer bypass occurred (length checks only; regex failed to intercept SQL escape syntax).`
-        },
-        {
-          step: 3,
-          clazz: 'com.seclayer.enterprise.data.RepositoryCore',
-          method: 'unsafeRawSearchBind(String)',
-          line: 104,
-          description: `String concatenation sink assembled: "SELECT * FROM items WHERE name = '" + searchQuery + "'" -> query result: "SELECT * FROM items WHERE name = '1' UNION SELECT credit_card FROM payments'".`
-        },
-        {
-          step: 4,
-          clazz: 'org.postgresql.jdbc.PgStatement',
-          method: 'execute(String)',
-          line: 2190,
-          description: `⚠️ SQL DATA SINK REACHED! Passive IAST hooks intercepted the query parsing executing in real-time. Confirmed attacker payload has mutated query execution logic inside the active running process.`
-        }
-      ]
-    });
-  });
-
-  // 5. PentAGI Autonomous Pentest AI Exploit Agent
-  app.get('/api/enterprise/pentagi/logs', async (req, res) => {
+  // 5. PentAGI — Gemini-powered autonomous pentest simulation
+  app.get('/api/enterprise/pentagi/logs', requireAuth, async (req, res) => {
     const url = req.query.url as string | undefined;
-    const logs = await generatePentagiLogs(url);
-    res.json({
-      success: true,
-      engine: 'PentAGI Autonomous Multi-Agent Multi-Step Pentest Coordinator',
-      agents: ['Scout', 'Exploiter', 'Reporter'],
-      logs: logs
-    });
+    if (!url) {
+      return res.status(400).json({ error: 'Target url query parameter is required.' });
+    }
+    try {
+      const logs = await generatePentagiLogs(url);
+      res.json({
+        success: true,
+        engine: 'PentAGI Autonomous Multi-Agent Pentest Coordinator',
+        agents: ['Scout', 'Exploiter', 'Reporter'],
+        logs,
+      });
+    } catch (err: any) {
+      res.status(503).json({ error: err.message });
+    }
   });
 
-
-  // --- Background scan coordinator queue ---
+  // --- Background scan worker ---
   async function processScanJob(scanId: string) {
     try {
-      console.log(`[Job Worker] Starting pen-test work details for Scan ID: ${scanId}`);
-      
-      // Queued to Scanning
-      await sleep(1500);
+      console.log(`[Scanner] Starting scan ${scanId}`);
       db.updateScan(scanId, { status: 'scanning' });
 
-      // Execute Diagnostic Probes (actual HTTP check)
       const scan = db.getScan(scanId);
       if (!scan) return;
-      
+
       const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
-      // Scanning to Analyzing
-      await sleep(1500);
       db.updateScan(scanId, { status: 'analyzing' });
 
-      // Compile raw data inputs & call AI Generator
       const staticCompiled = compileStaticFindings(diagnostics);
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
-      // Save report in status Complete
       db.updateScan(scanId, {
         status: 'complete',
         score: outputReport.score,
         severity: outputReport.severity,
         findings: outputReport.findings,
         aiSummary: outputReport.aiSummary,
-        completedAt: new Date().toISOString()
+        completedAt: new Date().toISOString(),
       });
-      console.log(`[Job Worker] Successfully finalized security run for Scan ID: ${scanId}`);
-
+      console.log(`[Scanner] Scan ${scanId} complete. Score: ${outputReport.score}`);
     } catch (err: any) {
-      console.error(`[Job Worker] FAILED during pen-testing run of Scan ID ${scanId}:`, err);
+      console.error(`[Scanner] Scan ${scanId} failed:`, err.message);
       db.updateScan(scanId, {
         status: 'failed',
-        error: err.message || 'An unexpected server timeout occurred during scanner diagnostics.'
+        error: err.message || 'Scan failed due to an unexpected error.',
       });
     }
   }
 
-  function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
-  }
-
-
-  // --- Express serving of static client files ---
-  app.use((req, res, next) => {
+  // --- Security headers middleware ---
+  app.use((_req, res, next) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
@@ -552,7 +610,8 @@ async function startServer() {
     next();
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  // --- Static serving ---
+  if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -561,18 +620,17 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT}`);
+    console.log(`[Seclayer] Listening on http://0.0.0.0:${PORT}`);
   });
 }
 
-// Global safety catch
-import fs from 'fs';
-startServer().catch((err) => {
-  console.error("Critical server bootstrap error:", err);
+startServer().catch(err => {
+  console.error('Server bootstrap error:', err);
+  process.exit(1);
 });

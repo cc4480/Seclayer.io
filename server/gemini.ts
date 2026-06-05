@@ -71,7 +71,7 @@ Please return a JSON response containing:
 Ensure the returned output is strictly compliant with the required JSON structure.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -163,23 +163,15 @@ function compileLocalSummary(url: string, sc: { score: number; severity: Severit
 }
 
 export async function generatePentagiLogs(url: string | undefined): Promise<{ time: string; agent: string; msg: string; }[]> {
-  const defaultUrl = url || 'staging.api.vulnerable.org';
+  if (!url) {
+    throw new Error('Target URL is required for PentAGI analysis.');
+  }
+
+  const defaultUrl = url;
   const ai = getAiClient();
-  
-  const fallbackLogs = [
-    { time: '00:01', agent: 'Scout Agent', msg: `Core DNS Enumeration on domain base completed. Discovered open host ${defaultUrl}.` },
-    { time: '00:04', agent: 'Scout Agent', msg: 'Probing HTTP port 443. Technology fingerprint matches Node.js Express & Apache HTTP Server v2.4.' },
-    { time: '00:08', agent: 'Scout Agent', msg: 'Identified dynamic endpoint list: /api/v1/auth/login, /api/v1/support/ticket, /recovery/reset.' },
-    { time: '00:12', agent: 'Exploiter Agent', msg: 'Testing "/recovery/reset" endpoint. Found active open redirect.' },
-    { time: '00:15', agent: 'Exploiter Agent', msg: 'Constructing dynamic CSRF token bypass session.' },
-    { time: '00:19', agent: 'Exploiter Agent', msg: 'Chaining Open Redirect bypass with active session forgery. Admin user redirected -> Session token exfiltrated to PentAGI listener hook!' },
-    { time: '00:23', agent: 'Exploiter Agent', msg: 'Injected Administrative Bearer key. Successfully bypassed authentication constraints.' },
-    { time: '00:27', agent: 'Reporter Agent', msg: 'Vulnerability exploit chain validated. Severity calculation: CRITICAL (10.0 CVSS).' },
-    { time: '00:30', agent: 'Reporter Agent', msg: 'Standardized DefectDojo JSON findings schema generated.' }
-  ];
 
   if (!ai) {
-    return fallbackLogs;
+    throw new Error('GEMINI_API_KEY is required for PentAGI autonomous analysis.');
   }
 
   try {
@@ -198,7 +190,7 @@ Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: "gemini-2.0-flash",
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -235,9 +227,9 @@ Return ONLY valid JSON compliant with the requested schema.`;
     if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
       return data.logs;
     }
-    return fallbackLogs;
+    throw new Error('PentAGI analysis returned empty results.');
   } catch (err: any) {
-    console.warn(`Gemini PentAGI generation failed, using fallback logs: ${err?.message || err}`);
-    return fallbackLogs;
+    console.warn(`Gemini PentAGI generation failed: ${err?.message || err}`);
+    throw err;
   }
 }

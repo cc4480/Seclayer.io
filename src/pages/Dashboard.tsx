@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
-import { 
-  Shield, Play, Plus, Trash2, Key, HelpCircle, 
-  Clock, Coins, Globe, Terminal, RefreshCw, CheckCircle, 
+import {
+  Shield, Play, Plus, Trash2, Key, HelpCircle,
+  Clock, Coins, Globe, Terminal, RefreshCw, CheckCircle,
   ExternalLink, ArrowRight, AlertTriangle, ShieldCheck,
   Code, Copy, FileText
 } from 'lucide-react';
 import { Scan, ApiKey, User } from '../types.js';
+import { apiFetch } from '../lib/api.js';
 
 interface DashboardProps {
   user: User;
@@ -84,15 +85,11 @@ export default function Dashboard({
     setAspmRunning(true);
     setAspmOutput(null);
     try {
-      const res = await fetch('/api/enterprise/aspm/correlate', {
+      const res = await apiFetch('/api/enterprise/aspm/correlate', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: aspmUrl })
+        body: JSON.stringify({ url: aspmUrl }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setAspmOutput(data);
-      }
+      if (res.ok) setAspmOutput(await res.json());
     } catch (err) {
       console.error(err);
     } finally {
@@ -104,15 +101,11 @@ export default function Dashboard({
     setEasmRunning(true);
     setEasmData(null);
     try {
-      const res = await fetch('/api/enterprise/easm/recon', {
+      const res = await apiFetch('/api/enterprise/easm/recon', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: easmDomain })
+        body: JSON.stringify({ domain: easmDomain }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setEasmData(data);
-      }
+      if (res.ok) setEasmData(await res.json());
     } catch (err) {
       console.error(err);
     } finally {
@@ -124,15 +117,11 @@ export default function Dashboard({
     setApiScanRunning(true);
     setApiMatrix(null);
     try {
-      const res = await fetch('/api/enterprise/api-scan/hadrian', {
+      const res = await apiFetch('/api/enterprise/api-scan/hadrian', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaTitle: apiSpecTitle })
+        body: JSON.stringify({ url: apiSpecTitle }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setApiMatrix(data);
-      }
+      if (res.ok) setApiMatrix(await res.json());
     } catch (err) {
       console.error(err);
     } finally {
@@ -144,15 +133,13 @@ export default function Dashboard({
     setIastRunning(true);
     setIastResult(null);
     try {
-      const res = await fetch('/api/enterprise/iast/trace', {
+      const res = await apiFetch('/api/enterprise/iast/trace', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputPayload: iastPayload })
+        body: JSON.stringify({ inputPayload: iastPayload }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setIastResult(data);
-      }
+      // IAST returns 501 — show the setup instructions from the response
+      const data = await res.json();
+      setIastResult(data);
     } catch (err) {
       console.error(err);
     } finally {
@@ -161,14 +148,16 @@ export default function Dashboard({
   };
 
   const runPentagiExploitation = async () => {
+    if (!scanUrl.trim()) {
+      alert('Enter a target URL above before running PentAGI analysis.');
+      return;
+    }
     setPentagiRunning(true);
     setPentagiLogs([]);
     try {
-      const targetUrl = scanUrl || 'staging.api.vulnerable.org';
-      const res = await fetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(targetUrl)}`);
+      const res = await apiFetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(scanUrl.trim())}`);
       if (res.ok) {
         const data = await res.json();
-        // Stagger logs typewriter loading effect
         let idx = 0;
         const interval = setInterval(() => {
           if (idx < data.logs.length) {
@@ -179,6 +168,10 @@ export default function Dashboard({
             setPentagiRunning(false);
           }
         }, 750);
+      } else {
+        const err = await res.json();
+        console.error('PentAGI error:', err);
+        setPentagiRunning(false);
       }
     } catch (err) {
       console.error(err);
@@ -200,11 +193,8 @@ export default function Dashboard({
 
   const fetchSuppressRules = async () => {
     try {
-      const res = await fetch(`/api/suppressions?userId=${user.id || 'user_default'}`);
-      if (res.ok) {
-        const data = await res.json();
-        setSuppressRules(data.suppressions || []);
-      }
+      const res = await apiFetch('/api/suppressions');
+      if (res.ok) setSuppressRules((await res.json()).suppressions || []);
     } catch (err) {
       console.error('Error loading exclusion rules:', err);
     }
@@ -212,11 +202,8 @@ export default function Dashboard({
 
   const fetchMonitoredTargets = async () => {
     try {
-      const res = await fetch(`/api/monitoring?userId=${user.id || 'user_default'}`);
-      if (res.ok) {
-        const data = await res.json();
-        setMonitoredTargets(data.monitoredTargets || []);
-      }
+      const res = await apiFetch('/api/monitoring');
+      if (res.ok) setMonitoredTargets((await res.json()).monitoredTargets || []);
     } catch (err) {
       console.error('Error loading monitoring targets:', err);
     }
@@ -240,10 +227,9 @@ export default function Dashboard({
     }
 
     try {
-      const res = await fetch('/api/monitoring', {
+      const res = await apiFetch('/api/monitoring', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString, userId: user.id })
+        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString }),
       });
       if (res.ok) {
         setMonitorUrl('');
@@ -256,12 +242,8 @@ export default function Dashboard({
 
   const handleDeleteMonitor = async (id: string) => {
     try {
-      const res = await fetch(`/api/monitoring/${id}?userId=${user.id || 'user_default'}`, {
-        method: 'DELETE'
-      });
-      if (res.ok) {
-        fetchMonitoredTargets();
-      }
+      const res = await apiFetch(`/api/monitoring/${id}`, { method: 'DELETE' });
+      if (res.ok) fetchMonitoredTargets();
     } catch (err) {
       console.error(err);
     }
@@ -295,11 +277,11 @@ export default function Dashboard({
 
   const handleBuyCredits = async () => {
     setIsBuying(true);
-    // Mimic the full stripe checkout redirect loop
-    setTimeout(() => {
-      onPurchaseCredits(buyPack);
+    try {
+      await onPurchaseCredits(buyPack);
+    } finally {
       setIsBuying(false);
-    }, 1200);
+    }
   };
 
   const handleCopyKey = (keyText: string, keyId: string) => {
@@ -1457,9 +1439,7 @@ export default function Dashboard({
                         onClick={async () => {
                           setIsDeletingRule(rule.id);
                           try {
-                            const delRes = await fetch(`/api/suppressions/${rule.id}?userId=${user.id || 'user_default'}`, {
-                              method: 'DELETE'
-                            });
+                            const delRes = await apiFetch(`/api/suppressions/${rule.id}`, { method: 'DELETE' });
                             if (delRes.ok) {
                               fetchSuppressRules();
                             }
