@@ -370,7 +370,7 @@ export default function Landing({ onStartTrial, onNavigate, userEmail }: Landing
                   High Risk Posture
                 </span>
               </div>
-              <p className="text-[#52525b] text-xs mt-1.5 font-mono">Assessed: 2026-05-24 • 1 Credit Consumed</p>
+              <p className="text-[#52525b] text-xs mt-1.5 font-mono">Assessed: {new Date(Date.now() - 13 * 86400000).toISOString().split('T')[0]} • 1 Credit Consumed</p>
             </div>
             <div className="flex items-center space-x-3 shrink-0">
               <div className="text-right">
