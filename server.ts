@@ -1,12 +1,13 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
+import cors from 'cors';
+import { rateLimit } from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { db, LocalFileDb } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/ai.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
 
-// Extend express Request to carry authenticated userId
 declare global {
   namespace Express {
     interface Request {
@@ -15,7 +16,6 @@ declare global {
   }
 }
 
-// JWT authentication middleware
 function requireAuth(req: Request, res: Response, next: NextFunction) {
   const authHeader = req.headers['authorization'];
   if (!authHeader?.startsWith('Bearer ')) {
@@ -30,26 +30,54 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
+const scanLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
+
 export function createApp(dbInstance: LocalFileDb) {
   const app = express();
 
+  app.use(cors({ origin: true, credentials: true }));
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
 
-  // --- Background scan worker ---
+  // Security headers applied globally
+  app.use((_req, res, next) => {
+    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    next();
+  });
+
   async function processScanJob(scanId: string) {
     try {
-      console.log(`[Scanner] Starting scan ${scanId}`);
+      dbInstance.appendScanLog(scanId, '[SYSTEM] Scan job started');
       dbInstance.updateScan(scanId, { status: 'scanning' });
 
       const scan = dbInstance.getScan(scanId);
       if (!scan) return;
 
+      dbInstance.appendScanLog(scanId, `[SCANNER] Running diagnostics against ${scan.url}`);
       const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
+      dbInstance.appendScanLog(scanId, `[SCANNER] HTTP ${diagnostics.responseStatus} — SSL: ${diagnostics.sslSecure ? 'valid' : 'insecure'}`);
+      if (diagnostics.missingHeaders.length > 0) {
+        dbInstance.appendScanLog(scanId, `[HEADERS] Missing security headers: ${diagnostics.missingHeaders.join(', ')}`);
+      }
+      if (diagnostics.techLeaked.length > 0) {
+        dbInstance.appendScanLog(scanId, `[EASM] Technology signatures exposed: ${diagnostics.techLeaked.join(', ')}`);
+      }
+      if (diagnostics.probedPaths.some(p => p.exposed)) {
+        const exposed = diagnostics.probedPaths.filter(p => p.exposed).map(p => p.path);
+        dbInstance.appendScanLog(scanId, `[DAST] Exposed sensitive paths: ${exposed.join(', ')}`);
+      }
+
+      dbInstance.appendScanLog(scanId, '[AI] Compiling static findings and scoring...');
+      const staticCompiled = compileStaticFindings(diagnostics);
+
+      dbInstance.appendScanLog(scanId, '[AI] Forwarding diagnostics to DeepSeek for analysis...');
       dbInstance.updateScan(scanId, { status: 'analyzing' });
 
-      const staticCompiled = compileStaticFindings(diagnostics);
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
       dbInstance.updateScan(scanId, {
@@ -60,9 +88,10 @@ export function createApp(dbInstance: LocalFileDb) {
         aiSummary: outputReport.aiSummary,
         completedAt: new Date().toISOString(),
       });
-      console.log(`[Scanner] Scan ${scanId} complete. Score: ${outputReport.score}`);
+      dbInstance.appendScanLog(scanId, `[COMPLETE] Score: ${outputReport.score}/100 — ${outputReport.findings.length} findings`);
     } catch (err: any) {
       console.error(`[Scanner] Scan ${scanId} failed:`, err.message);
+      dbInstance.appendScanLog(scanId, `[ERROR] Scan failed: ${err.message}`);
       dbInstance.updateScan(scanId, {
         status: 'failed',
         error: err.message || 'Scan failed due to an unexpected error.',
@@ -76,8 +105,7 @@ export function createApp(dbInstance: LocalFileDb) {
     res.json({ status: 'Online', version: 'v2.2.0', timestamp: new Date().toISOString() });
   });
 
-  // Register new account
-  app.post('/api/auth/register', (req, res) => {
+  app.post('/api/auth/register', authLimiter, (req, res) => {
     const { email, password } = req.body;
     if (!email || !email.includes('@')) {
       return res.status(400).json({ message: 'Valid email address is required.' });
@@ -95,8 +123,7 @@ export function createApp(dbInstance: LocalFileDb) {
     }
   });
 
-  // Sign in
-  app.post('/api/auth/login', (req, res) => {
+  app.post('/api/auth/login', authLimiter, (req, res) => {
     const { email, password } = req.body;
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required.' });
@@ -118,7 +145,7 @@ export function createApp(dbInstance: LocalFileDb) {
   });
 
   // MCP endpoint — authenticated via API key (not JWT)
-  app.post('/api/mcp/scan', async (req, res) => {
+  app.post('/api/mcp/scan', scanLimiter, async (req, res) => {
     const { url, apiKey, authHeader } = req.body;
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'url and apiKey are required.' });
@@ -159,7 +186,7 @@ export function createApp(dbInstance: LocalFileDb) {
     }
   });
 
-  // --- PROTECTED ROUTES (JWT required) ---
+  // --- PROTECTED ROUTES ---
 
   app.get('/api/auth/me', requireAuth, (req, res) => {
     const user = dbInstance.getUser(req.userId!);
@@ -168,7 +195,7 @@ export function createApp(dbInstance: LocalFileDb) {
   });
 
   // Scans
-  app.post('/api/scans', requireAuth, async (req, res) => {
+  app.post('/api/scans', scanLimiter, requireAuth, async (req, res) => {
     const { url, authHeader } = req.body;
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
 
@@ -192,6 +219,14 @@ export function createApp(dbInstance: LocalFileDb) {
     }
     scan = dbInstance.getScanWithSuppressedFindings(scan);
     res.json({ scan });
+  });
+
+  app.get('/api/scans/:id/logs', requireAuth, (req, res) => {
+    const scan = dbInstance.getScan(req.params.id);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    res.json({ logs: dbInstance.getScanLogs(req.params.id) });
   });
 
   app.get('/api/scans/:id/report', requireAuth, (req, res) => {
@@ -279,7 +314,7 @@ export function createApp(dbInstance: LocalFileDb) {
 
   // --- ENTERPRISE ENDPOINTS ---
 
-  // 1. ASPM — correlate findings across this user's actual scans
+  // 1. ASPM — correlate findings across user's completed scans
   app.post('/api/enterprise/aspm/correlate', requireAuth, (req, res) => {
     const { url } = req.body;
     const userScans = dbInstance.listScans(req.userId!).filter(s => {
@@ -327,9 +362,7 @@ export function createApp(dbInstance: LocalFileDb) {
     });
 
     const summary = { total: all.length, critical: 0, high: 0, medium: 0, low: 0 };
-    all.forEach(f => {
-      if (f.severity in summary) (summary as any)[f.severity]++;
-    });
+    all.forEach(f => { if (f.severity in summary) (summary as any)[f.severity]++; });
 
     res.json({
       success: true,
@@ -546,13 +579,10 @@ export function createApp(dbInstance: LocalFileDb) {
     }
   });
 
-  // --- Security headers ---
-  app.use((_req, res, next) => {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
+  // Centralized error handler
+  app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    console.error('[Error]', err);
+    res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error.' });
   });
 
   return app;
@@ -580,7 +610,6 @@ async function startServer() {
   });
 }
 
-// Skip startup when imported by the test runner
 if (!process.env.VITEST) {
   startServer().catch(err => {
     console.error('Server bootstrap error:', err);

@@ -22,6 +22,7 @@ interface DbSchema {
 export class LocalFileDb {
   private data: DbSchema;
   private readonly dbFilePath: string;
+  private readonly scanLogs = new Map<string, string[]>();
 
   constructor(dbFilePath: string = DEFAULT_DB_FILE) {
     this.dbFilePath = dbFilePath;
@@ -329,6 +330,16 @@ export class LocalFileDb {
     const removed = this.data.monitoredTargets.length !== before;
     if (removed) this.save();
     return removed;
+  }
+
+  appendScanLog(scanId: string, message: string): void {
+    if (!this.scanLogs.has(scanId)) this.scanLogs.set(scanId, []);
+    const ts = new Date().toISOString();
+    this.scanLogs.get(scanId)!.push(`[${ts}] ${message}`);
+  }
+
+  getScanLogs(scanId: string): string[] {
+    return this.scanLogs.get(scanId) ?? [];
   }
 
   getScanWithSuppressedFindings(scan: Scan): Scan {
