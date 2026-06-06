@@ -34,6 +34,25 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
 const scanLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
 
+const PRIVATE_IP_RE = /^(localhost|127\.|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.|::1|0\.0\.0\.0)/i;
+
+/** Returns null when the URL is valid, or an error message string when it should be rejected. */
+function validateTargetUrl(raw: string): string | null {
+  let parsed: URL;
+  try {
+    parsed = new URL(raw.startsWith('http') ? raw : `https://${raw}`);
+  } catch {
+    return 'Invalid URL format.';
+  }
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    return 'Only http and https targets are allowed.';
+  }
+  if (PRIVATE_IP_RE.test(parsed.hostname)) {
+    return 'Scanning private/local addresses is not allowed.';
+  }
+  return null;
+}
+
 export function createApp(dbInstance: LocalFileDb) {
   const app = express();
 
@@ -151,6 +170,7 @@ export function createApp(dbInstance: LocalFileDb) {
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'url and apiKey are required.' });
     }
+    const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
     const apiKeyObj = dbInstance.findApiKey(apiKey);
     if (!apiKeyObj || !apiKeyObj.active) {
       return res.status(401).json({ error: 'Invalid or revoked API key.' });
@@ -199,6 +219,7 @@ export function createApp(dbInstance: LocalFileDb) {
   app.post('/api/scans', scanLimiter, requireAuth, async (req, res) => {
     const { url, authHeader } = req.body;
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
+    const urlMsg = validateTargetUrl(url); if (urlMsg) return res.status(400).json({ message: urlMsg });
 
     const user = dbInstance.getUser(req.userId!);
     if (!user) return res.status(404).json({ message: 'User not found.' });
@@ -292,6 +313,7 @@ export function createApp(dbInstance: LocalFileDb) {
   app.post('/api/monitoring', requireAuth, (req, res) => {
     const { url, frequencyDays = 7, scheduleString } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required.' });
+    const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
     const target = dbInstance.addMonitoredTarget(req.userId!, url, frequencyDays, scheduleString);
     res.json({ status: 'ok', target });
   });
@@ -462,6 +484,7 @@ export function createApp(dbInstance: LocalFileDb) {
   app.post('/api/enterprise/api-scan/hadrian', requireAuth, async (req, res) => {
     const { url } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required.' });
+    const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
 
     let targetUrl = url.trim();
     if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
@@ -572,6 +595,7 @@ export function createApp(dbInstance: LocalFileDb) {
     if (!url) {
       return res.status(400).json({ error: 'Target url query parameter is required.' });
     }
+    const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
     try {
       const logs = await runPentagiExploit(url);
       res.json({
