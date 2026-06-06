@@ -1,12 +1,11 @@
 import React, { useState, useEffect } from 'react';
-import { Shield, Key, Coins, LogOut, ArrowRight, User } from 'lucide-react';
+import { Shield, LogOut, ArrowRight, User } from 'lucide-react';
 import { motion } from 'motion/react';
 
 interface NavbarProps {
   currentView: string;
   onNavigate: (view: string, arg?: string) => void;
   userEmail: string;
-  credits: number;
   onLogout: () => void;
   onLoginClick: () => void;
 }
@@ -15,7 +14,6 @@ export default function Navbar({
   currentView,
   onNavigate,
   userEmail,
-  credits,
   onLogout,
   onLoginClick
 }: NavbarProps) {
@@ -88,18 +86,6 @@ export default function Navbar({
         <div className="flex items-center space-x-4">
           {userEmail ? (
             <>
-              {/* Credits Indicator */}
-              <div 
-                onClick={() => onNavigate('dashboard')}
-                className="flex items-center space-x-2 bg-[#0c0c0e] border border-[#27272a] hover:border-[#22c55e]/45 rounded-md px-3 py-1.5 transition-all text-[#a1a1aa] cursor-pointer text-xs font-mono"
-                id="navbar-credits-pill"
-              >
-                <Coins className="w-3.5 h-3.5 text-[#22c55e]" />
-                <span>
-                  Credits: <strong className="text-[#22c55e]">{credits}</strong>
-                </span>
-              </div>
-
               {/* User Email Info / Sign Out */}
               <div className="flex items-center space-x-3 border-l border-[#27272a] pl-4">
                 <div className="hidden lg:flex flex-col items-end text-right">

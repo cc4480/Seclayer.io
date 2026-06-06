@@ -24,7 +24,6 @@
     "openai": "^6.42.0",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
-    "stripe": "^22.2.0",
     "vite": "^6.2.3"
   },
   "devDependencies": {

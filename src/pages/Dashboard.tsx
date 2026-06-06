@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import {
   Shield, Play, Plus, Trash2, Key, HelpCircle,
-  Clock, Coins, Globe, Terminal, RefreshCw, CheckCircle,
+  Clock, Globe, Terminal, RefreshCw, CheckCircle,
   ExternalLink, ArrowRight, AlertTriangle, ShieldCheck,
   Code, Copy, FileText
 } from 'lucide-react';
@@ -12,12 +12,9 @@ interface DashboardProps {
   user: User;
   scans: Scan[];
   apiKeys: ApiKey[];
-  credits: number;
-  transactions: any[];
   onInitiateScan: (url: string, authHeader?: string) => void;
   onGenerateKey: () => void;
   onRevokeKey: (keyId: string) => void;
-  onPurchaseCredits: (packName: 'single' | 'pack5' | 'pack20') => void;
   onViewReport: (scanId: string) => void;
   isPerformingAction: boolean;
 }
@@ -26,30 +23,24 @@ export default function Dashboard({
   user,
   scans,
   apiKeys,
-  credits,
-  transactions,
   onInitiateScan,
   onGenerateKey,
   onRevokeKey,
-  onPurchaseCredits,
   onViewReport,
   isPerformingAction
 }: DashboardProps) {
   const [scanUrl, setScanUrl] = useState('');
   const [authHeader, setAuthHeader] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
-  const [buyPack, setBuyPack] = useState<'single' | 'pack5' | 'pack20'>('pack5');
-  const [isBuying, setIsBuying] = useState(false);
   const [errorText, setErrorText] = useState('');
 
   // Production-ready addition state variables
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
   const [revealKeyId, setRevealKeyId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'scans' | 'billing' | 'exclusions' | 'orchestrator' | 'monitoring' | 'api-docs'>('orchestrator');
+  const [activeTab, setActiveTab] = useState<'scans' | 'exclusions' | 'orchestrator' | 'monitoring' | 'api-docs'>('orchestrator');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
-  const [prevCredits, setPrevCredits] = useState(credits);
   const [showToast, setShowToast] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
 
@@ -249,39 +240,15 @@ export default function Dashboard({
     }
   };
 
-  // Toast notifier for balance changes
-  useEffect(() => {
-    if (credits > prevCredits) {
-      setToastMsg(`Sandbox Top-up Successful! Added ${credits - prevCredits} scan credits.`);
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 4000);
-    }
-    setPrevCredits(credits);
-  }, [credits, prevCredits]);
-
   const handleScanSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setErrorText('');
     const urlStr = scanUrl.trim();
     if (!urlStr) return;
 
-    if (credits < 1) {
-      setErrorText('Insufficient balances available. Please top-up credits to run a scan.');
-      return;
-    }
-
     onInitiateScan(urlStr, authHeader.trim() || undefined);
     setScanUrl('');
     setAuthHeader('');
-  };
-
-  const handleBuyCredits = async () => {
-    setIsBuying(true);
-    try {
-      await onPurchaseCredits(buyPack);
-    } finally {
-      setIsBuying(false);
-    }
   };
 
   const handleCopyKey = (keyText: string, keyId: string) => {
@@ -345,20 +312,13 @@ export default function Dashboard({
               <ArrowRight className="w-4 h-4 text-[#52525b] group-hover:text-[#22c55e] transition-colors absolute right-4 opacity-0 group-hover:opacity-100 hidden sm:block" />
             </button>
 
-            <div className="text-right flex items-center justify-between w-full md:w-auto md:block pt-4 border-t border-[#27272a]/40 md:pt-0 md:border-0">
-              <span className="text-[10px] font-mono text-[#52525b] uppercase block md:mb-0.5">Available Balance</span>
-              <span className="text-2xl font-mono font-black text-[#22c55e] flex items-center space-x-2">
-                <Coins className="w-5 h-5 text-[#22c55e] shrink-0" />
-                <span>{credits} <span className="text-xs font-normal text-[#52525b] font-mono">scans</span></span>
-              </span>
-            </div>
           </div>
         </div>
 
         {/* Bento Grid Layer */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
-          
-          {/* Left Block: quick scan launcher & pricing booster (col span 7) */}
+
+          {/* Left Block: quick scan launcher (col span 7) */}
           <div className="lg:col-span-7 space-y-8">
             
             {/* Quick Scan Launcher */}
@@ -445,62 +405,6 @@ export default function Dashboard({
               </form>
             </div>
 
-            {/* Price Pack Booster */}
-            <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-6">
-              <div className="flex items-center space-x-2.5 mb-4">
-                <div className="p-1.5 bg-black border border-[#27272a] rounded text-[#22c55e]">
-                  <Coins className="w-4 h-4" />
-                </div>
-                <h2 className="text-sm font-bold font-mono text-white">Purchase Credits (Stripe Sandbox)</h2>
-              </div>
-              <p className="text-[#a1a1aa] text-xs font-mono mb-6">
-                Need more scan capacity? To top up scan credits, choose a credit volume package below. We've set up a preconfigured Stripe test integration that performs instant top-ups dynamically.
-              </p>
-
-              <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-6">
-                {[
-                  { id: 'single', name: '1 Scan Credit', price: '$29', label: '$29/Scan' },
-                  { id: 'pack5', name: '5-Scan Pack', price: '$99', label: 'Save 30%' },
-                  { id: 'pack20', name: '20-Scan Pack', price: '$299', label: 'Save 50%' }
-                ].map((pack) => (
-                  <div
-                    key={pack.id}
-                    onClick={() => setBuyPack(pack.id as any)}
-                    className={`p-4 rounded border text-center cursor-pointer transition-all ${
-                      buyPack === pack.id 
-                        ? 'border-[#22c55e] bg-[#22c55e]/5' 
-                        : 'border-[#27272a] hover:border-[#3f3f46] bg-black'
-                    }`}
-                  >
-                    <span className="text-[10px] font-mono text-[#52525b] block uppercase mb-1">{pack.name}</span>
-                    <strong className="text-lg font-mono text-white block">{pack.price}</strong>
-                    <span className={`text-[9px] font-mono px-1.5 py-0.5 rounded inline-block mt-1 ${
-                      buyPack === pack.id ? 'bg-[#22c55e]/20 text-[#22c55e]' : 'bg-[#18181b] text-[#52525b]'
-                    }`}>{pack.label}</span>
-                  </div>
-                ))}
-              </div>
-
-              <button
-                onClick={handleBuyCredits}
-                disabled={isBuying || isPerformingAction}
-                className="w-full py-3 bg-[#18181b] hover:bg-[#27272a] border border-[#27272a] text-white hover:text-[#22c55e] text-xs font-mono font-bold uppercase tracking-widest rounded transition-all flex items-center justify-center space-x-2 cursor-pointer"
-                id="buy-credits-btn"
-              >
-                {isBuying ? (
-                  <>
-                    <RefreshCw className="w-4 h-4 text-[#22c55e] animate-spin" />
-                    <span>Redirecting to stripe checkout...</span>
-                  </>
-                ) : (
-                  <>
-                    <span>Acquire {buyPack === 'single' ? '1 scan credit' : buyPack === 'pack5' ? '5 credits pack' : '20 credits pack'}</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </>
-                )}
-              </button>
-            </div>
-
           </div>
 
           {/* Right Block: API Keys (MCP client setup) (col span 5) */}
@@ -525,7 +429,7 @@ export default function Dashboard({
                 </button>
               </div>
               <p className="text-[#a1a1aa] text-xs font-mono mb-6">
-                Generate API key headers for your AI agents (Cursor, Claude Code, Windsurf) to query the MCP tool. Consumes credits from your main balance.
+                Generate API key headers for your AI agents (Cursor, Claude Code, Windsurf) to query the MCP tool.
               </p>
 
               {apiKeys.length === 0 ? (
@@ -663,16 +567,6 @@ export default function Dashboard({
               }`}
             >
               [+] Risk Exclusions & FP Rules ({suppressRules.length})
-            </button>
-            <button
-              onClick={() => setActiveTab('billing')}
-              className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
-                activeTab === 'billing'
-                  ? 'border-[#22c55e] text-white font-bold'
-                  : 'border-transparent text-[#52525b] hover:text-[#a1a1aa]'
-              }`}
-            >
-              [+] Billing & Receipts Log ({transactions.length})
             </button>
             <button
               onClick={() => setActiveTab('api-docs')}
@@ -852,7 +746,7 @@ export default function Dashboard({
                 <div className="space-y-1">
                   <h4 className="text-white text-xs uppercase font-bold">Continuous Security Monitoring</h4>
                   <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
-                    Set up automated, recurring scans for your critical infrastructure. Monitoring tasks will automatically deduct credits from your balance per execution.
+                    Set up automated, recurring scans for your critical infrastructure. Monitoring tasks run on schedule against your registered targets.
                   </p>
                 </div>
               </div>
@@ -1461,61 +1355,6 @@ export default function Dashboard({
             </div>
           )}
 
-          {activeTab === 'billing' && (
-            <div className="space-y-4">
-              {transactions.length === 0 ? (
-                <div className="text-center py-12 bg-black rounded border border-dashed border-[#27272a]">
-                  <span className="text-xs text-[#52525b] font-mono block mb-2">No billing transactions recorded yet</span>
-                  <p className="text-[11px] text-[#52525b] max-w-sm mx-auto font-mono">Transactions appear here when credits are added or debited during evaluation scans.</p>
-                </div>
-              ) : (
-                <div className="overflow-x-auto">
-                  <table className="w-full text-left border-collapse">
-                    <thead>
-                      <tr className="border-b border-[#27272a] text-[#52525b] font-mono text-[10px] uppercase tracking-wider pb-3">
-                        <th className="py-3 px-4">Transaction ID</th>
-                        <th className="py-3 px-4">Action Type</th>
-                        <th className="py-3 px-4">Amount</th>
-                        <th className="py-3 px-4">Reference Reference ID</th>
-                        <th className="py-3 px-4 text-right font-mono">Timestamp</th>
-                      </tr>
-                    </thead>
-                    <tbody className="divide-y divide-[#27272a]/20 text-xs font-mono">
-                      {transactions.map((tx) => {
-                        const isCreditAdded = tx.amount > 0;
-                        return (
-                          <tr key={tx.id} className="hover:bg-black/60 transition-colors">
-                            <td className="py-3.5 px-4 font-mono font-bold text-white uppercase">{tx.id || "tx_system"}</td>
-                            <td className="py-3.5 px-4">
-                              {tx.type === 'purchase' ? (
-                                <span className="bg-[#22c55e]/10 border border-[#22c55e]/25 text-[#22c55e] px-2 py-0.5 rounded font-mono text-[9px] uppercase">
-                                  Purchased Credits
-                                </span>
-                              ) : (
-                                <span className="bg-amber-950/40 border border-[#27272a] text-amber-400 px-2 py-0.5 rounded font-mono text-[9px] uppercase">
-                                  Audit Cost Deducted
-                                </span>
-                              )}
-                            </td>
-                            <td className={`py-3.5 px-4 font-bold ${isCreditAdded ? 'text-[#22c55e]' : 'text-rose-400'}`}>
-                              {isCreditAdded ? `+${tx.amount}` : tx.amount} credits
-                            </td>
-                            <td className="py-3.5 px-4 text-[#a1a1aa] max-w-xs truncate font-mono text-[10px]">
-                              {tx.stripeSessionId || tx.scanId || 'System Provision'}
-                            </td>
-                            <td className="py-3.5 px-4 text-right text-[#52525b] font-mono text-[11px]">
-                              {new Date(tx.createdAt).toLocaleString()}
-                            </td>
-                          </tr>
-                        );
-                      })}
-                    </tbody>
-                  </table>
-                </div>
-              )}
-            </div>
-          )}
-
           {activeTab === 'api-docs' && (
             <div className="space-y-6 animate-fade-in text-xs font-mono">
               <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
@@ -1612,14 +1451,13 @@ export default function Dashboard({
       "description": "An active API endpoint probe discovered...",
       "fix": "Disable introspection blocks in the production backend..."
     }
-  ],
-  "creditsRemaining": 90
+  ]
 }`}
                         </pre>
                         <button 
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
-                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
+                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ]\n}`);
                             setToastMsg('Response envelope snippet copied to clipboard');
                             setShowToast(true);
                             setTimeout(() => setShowToast(false), 3000);

@@ -12,29 +12,16 @@ export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [scans, setScans] = useState<Scan[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
-  const [credits, setCredits] = useState(0);
-  const [transactions, setTransactions] = useState<any[]>([]);
-
   const [currentView, setCurrentView] = useState<'landing' | 'dashboard' | 'progress' | 'report'>('landing');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [isPerformingAction, setIsPerformingAction] = useState(false);
 
-  // On mount: restore session from stored token, handle Stripe return
+  // On mount: restore session from stored token
   useEffect(() => {
     const token = getToken();
     if (token) {
       loadUserContext();
-    }
-
-    // Handle Stripe checkout success redirect
-    const params = new URLSearchParams(window.location.search);
-    if (params.get('checkout_success') === 'true') {
-      window.history.replaceState({}, '', window.location.pathname);
-      if (token) {
-        // Small delay to ensure webhook has processed
-        setTimeout(() => loadUserContext(), 1500);
-      }
     }
   }, []);
 
@@ -50,20 +37,14 @@ export default function App() {
       }
       const userData = await userRes.json();
       setUser(userData.user);
-      setCredits(userData.user.credits);
 
-      const [scansRes, keysRes, creditsRes] = await Promise.all([
+      const [scansRes, keysRes] = await Promise.all([
         apiFetch('/api/scans'),
         apiFetch('/api/keys'),
-        apiFetch('/api/credits'),
       ]);
 
       if (scansRes.ok) setScans((await scansRes.json()).scans);
       if (keysRes.ok) setApiKeys((await keysRes.json()).keys);
-      if (creditsRes.ok) {
-        const c = await creditsRes.json();
-        setTransactions(c.transactions || []);
-      }
     } catch (err) {
       console.error('Error loading user context:', err);
     } finally {
@@ -103,7 +84,6 @@ export default function App() {
 
       if (res.ok) {
         const data = await res.json();
-        setCredits(prev => Math.max(0, prev - 1));
         setScans(prev => [data.scan, ...prev]);
         setSelectedScanId(data.scan.id);
         setCurrentView('progress');
@@ -145,35 +125,9 @@ export default function App() {
     }
   };
 
-  const onPurchaseCredits = async (packName: 'single' | 'pack5' | 'pack20') => {
-    if (!user) { setShowLogin(true); return; }
-    setIsPerformingAction(true);
-    try {
-      const res = await apiFetch('/api/credits/checkout', {
-        method: 'POST',
-        body: JSON.stringify({ pack: packName }),
-      });
-      if (res.ok) {
-        const data = await res.json();
-        if (data.url) {
-          // Redirect to Stripe hosted checkout
-          window.location.href = data.url;
-        }
-      } else {
-        const err = await res.json();
-        alert(err.message || 'Checkout failed. Please try again.');
-      }
-    } catch (err) {
-      console.error('Purchase error:', err);
-    } finally {
-      setIsPerformingAction(false);
-    }
-  };
-
   const handleLoginSuccess = async (token: string, userData: User) => {
     setToken(token);
     setUser(userData);
-    setCredits(userData.credits);
     await loadUserContext();
     setCurrentView('dashboard');
   };
@@ -184,7 +138,6 @@ export default function App() {
     setUser(null);
     setScans([]);
     setApiKeys([]);
-    setCredits(0);
     setCurrentView('landing');
   };
 
@@ -196,7 +149,6 @@ export default function App() {
         currentView={currentView}
         onNavigate={handleNavigate}
         userEmail={user?.email || ''}
-        credits={credits}
         onLogout={handleLogout}
         onLoginClick={() => setShowLogin(true)}
       />
@@ -206,11 +158,6 @@ export default function App() {
           <Landing
             onStartTrial={handleStartTrial}
             onNavigate={handleNavigate}
-            onSelectPack={(pack) => {
-              if (!user) { setShowLogin(true); return; }
-              onPurchaseCredits(pack);
-              setCurrentView('dashboard');
-            }}
             userEmail={user?.email || ''}
           />
         )}
@@ -220,12 +167,9 @@ export default function App() {
             user={user}
             scans={scans}
             apiKeys={apiKeys}
-            credits={credits}
-            transactions={transactions}
             onInitiateScan={onInitiateScan}
             onGenerateKey={onGenerateKey}
             onRevokeKey={onRevokeKey}
-            onPurchaseCredits={onPurchaseCredits}
             onViewReport={(scanId) => {
               const checkScan = scans.find(s => s.id === scanId);
               if (checkScan && ['queued', 'scanning', 'analyzing'].includes(checkScan.status)) {

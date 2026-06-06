@@ -6,7 +6,6 @@ import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/ai.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
-import { createCheckoutSession, handleStripeWebhook } from './server/stripe.js';
 
 // Extend express Request to carry authenticated userId
 declare global {
@@ -35,9 +34,6 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
 async function startServer() {
   const app = express();
   const PORT = 3000;
-
-  // Raw body needed for Stripe webhook signature verification
-  app.use('/api/webhooks/stripe', express.raw({ type: 'application/json' }));
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
@@ -95,9 +91,13 @@ async function startServer() {
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'url and apiKey are required.' });
     }
-    const user = db.validateApiKeyAndDeduct(apiKey, 1);
+    const apiKeyObj = db.findApiKey(apiKey);
+    if (!apiKeyObj || !apiKeyObj.active) {
+      return res.status(401).json({ error: 'Invalid or revoked API key.' });
+    }
+    const user = db.getUser(apiKeyObj.userId);
     if (!user) {
-      return res.status(401).json({ error: 'Invalid API key or insufficient credits.' });
+      return res.status(401).json({ error: 'API key owner not found.' });
     }
     try {
       const diagnostics = await runDiagnostics(url, authHeader);
@@ -121,29 +121,9 @@ async function startServer() {
         vulnerabilityLevel: aiReport.severity,
         analysisSummary: aiReport.aiSummary,
         securityFindings: aiReport.findings,
-        creditsRemaining: user.credits,
       });
     } catch (err: any) {
       res.status(500).json({ error: 'Scan failed.', details: err.message });
-    }
-  });
-
-  // Stripe webhook — raw body, no JWT auth (Stripe signature is the auth)
-  app.post('/api/webhooks/stripe', async (req, res) => {
-    const signature = req.headers['stripe-signature'] as string;
-    if (!signature) {
-      return res.status(400).json({ error: 'Missing Stripe signature header.' });
-    }
-    try {
-      const result = await handleStripeWebhook(req.body as Buffer, signature);
-      if (result) {
-        db.addCredits(result.userId, result.credits, 'purchase', result.sessionId);
-        console.log(`[Stripe] Added ${result.credits} credits to user ${result.userId}`);
-      }
-      res.json({ received: true });
-    } catch (err: any) {
-      console.error('[Stripe Webhook] Error:', err.message);
-      res.status(400).json({ error: err.message });
     }
   });
 
@@ -162,11 +142,7 @@ async function startServer() {
 
     const user = db.getUser(req.userId!);
     if (!user) return res.status(404).json({ message: 'User not found.' });
-    if (user.credits < 1) {
-      return res.status(402).json({ message: 'No credits remaining. Purchase scan credits to continue.' });
-    }
 
-    db.deductCredits(req.userId!, 1);
     const scan = db.createScan(req.userId!, url, authHeader);
     processScanJob(scan.id);
     res.json({ status: 'ok', scan });
@@ -251,28 +227,6 @@ async function startServer() {
     const success = db.removeMonitoredTarget(req.userId!, req.params.id);
     if (!success) return res.status(404).json({ error: 'Monitored target not found.' });
     res.json({ status: 'ok' });
-  });
-
-  // Credits
-  app.get('/api/credits', requireAuth, (req, res) => {
-    const user = db.getUser(req.userId!);
-    if (!user) return res.status(404).json({ error: 'User not found.' });
-    res.json({ credits: user.credits, transactions: db.getTransactions(req.userId!) });
-  });
-
-  app.post('/api/credits/checkout', requireAuth, async (req, res) => {
-    const { pack } = req.body;
-    const validPacks = ['single', 'pack5', 'pack20'];
-    if (!validPacks.includes(pack)) {
-      return res.status(400).json({ message: 'Invalid credit pack. Choose: single, pack5, or pack20.' });
-    }
-    try {
-      const appUrl = process.env.APP_URL || `http://localhost:3000`;
-      const { url, sessionId } = await createCheckoutSession(pack, req.userId!, appUrl);
-      res.json({ status: 'ok', url, sessionId });
-    } catch (err: any) {
-      res.status(503).json({ message: err.message });
-    }
   });
 
   // API Keys
