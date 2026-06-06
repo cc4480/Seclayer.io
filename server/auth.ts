@@ -1,8 +1,13 @@
 import jwt from 'jsonwebtoken';
 import bcrypt from 'bcryptjs';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'seclayer-dev-secret-change-in-production';
+const DEV_SECRET = 'seclayer-dev-secret-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || DEV_SECRET;
 const JWT_EXPIRES_IN = '7d';
+
+if (process.env.NODE_ENV === 'production' && JWT_SECRET === DEV_SECRET) {
+  throw new Error('JWT_SECRET must be set to a strong random value in production. Set the JWT_SECRET environment variable.');
+}
 
 export function hashPassword(password: string): string {
   return bcrypt.hashSync(password, 12);

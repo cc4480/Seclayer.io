@@ -11,37 +11,45 @@ export default function OrchestratorTab() {
   const [aspmUrl, setAspmUrl] = useState('');
   const [aspmRunning, setAspmRunning] = useState(false);
   const [aspmOutput, setAspmOutput] = useState<any | null>(null);
+  const [aspmError, setAspmError] = useState<string | null>(null);
 
   // EASM
   const [easmDomain, setEasmDomain] = useState('');
   const [easmRunning, setEasmRunning] = useState(false);
   const [easmData, setEasmData] = useState<any | null>(null);
+  const [easmError, setEasmError] = useState<string | null>(null);
 
   // API Scan / Hadrian
   const [apiScanUrl, setApiScanUrl] = useState('');
   const [apiScanRunning, setApiScanRunning] = useState(false);
   const [apiScanResult, setApiScanResult] = useState<any | null>(null);
+  const [apiScanError, setApiScanError] = useState<string | null>(null);
 
   // IAST
   const [iastRunning, setIastRunning] = useState(false);
   const [iastResult, setIastResult] = useState<any | null>(null);
+  const [iastError, setIastError] = useState<string | null>(null);
 
   // PentAGI
   const [pentagiUrl, setPentagiUrl] = useState('');
   const [pentagiRunning, setPentagiRunning] = useState(false);
   const [pentagiLogs, setPentagiLogs] = useState<any[]>([]);
+  const [pentagiError, setPentagiError] = useState<string | null>(null);
 
   const runAspmCorrelation = async () => {
     setAspmRunning(true);
     setAspmOutput(null);
+    setAspmError(null);
     try {
       const res = await apiFetch('/api/enterprise/aspm/correlate', {
         method: 'POST',
         body: JSON.stringify({ url: aspmUrl || undefined }),
       });
-      if (res.ok) setAspmOutput(await res.json());
-    } catch (err) {
-      console.error(err);
+      const data = await res.json();
+      if (res.ok) setAspmOutput(data);
+      else setAspmError(data.error || 'Correlation failed.');
+    } catch (err: any) {
+      setAspmError(err.message || 'Network error.');
     } finally {
       setAspmRunning(false);
     }
@@ -50,14 +58,17 @@ export default function OrchestratorTab() {
   const runEasmRecon = async () => {
     setEasmRunning(true);
     setEasmData(null);
+    setEasmError(null);
     try {
       const res = await apiFetch('/api/enterprise/easm/recon', {
         method: 'POST',
         body: JSON.stringify({ domain: easmDomain }),
       });
-      if (res.ok) setEasmData(await res.json());
-    } catch (err) {
-      console.error(err);
+      const data = await res.json();
+      if (res.ok) setEasmData(data);
+      else setEasmError(data.error || 'EASM recon failed.');
+    } catch (err: any) {
+      setEasmError(err.message || 'Network error.');
     } finally {
       setEasmRunning(false);
     }
@@ -66,14 +77,17 @@ export default function OrchestratorTab() {
   const runHadrianScan = async () => {
     setApiScanRunning(true);
     setApiScanResult(null);
+    setApiScanError(null);
     try {
       const res = await apiFetch('/api/enterprise/api-scan/hadrian', {
         method: 'POST',
         body: JSON.stringify({ url: apiScanUrl }),
       });
-      if (res.ok) setApiScanResult(await res.json());
-    } catch (err) {
-      console.error(err);
+      const data = await res.json();
+      if (res.ok) setApiScanResult(data);
+      else setApiScanError(data.error || 'API scan failed.');
+    } catch (err: any) {
+      setApiScanError(err.message || 'Network error.');
     } finally {
       setApiScanRunning(false);
     }
@@ -82,11 +96,14 @@ export default function OrchestratorTab() {
   const runIastTrace = async () => {
     setIastRunning(true);
     setIastResult(null);
+    setIastError(null);
     try {
       const res = await apiFetch('/api/enterprise/iast/trace', { method: 'POST', body: JSON.stringify({}) });
-      setIastResult(await res.json());
-    } catch (err) {
-      console.error(err);
+      const data = await res.json();
+      if (res.ok || res.status === 501) setIastResult(data);
+      else setIastError(data.error || 'IAST trace failed.');
+    } catch (err: any) {
+      setIastError(err.message || 'Network error.');
     } finally {
       setIastRunning(false);
     }
@@ -94,11 +111,12 @@ export default function OrchestratorTab() {
 
   const runPentagiExploitation = async () => {
     if (!pentagiUrl.trim()) {
-      alert('Enter a target URL to run PentAGI analysis.');
+      setPentagiError('Enter a target URL before running PentAGI.');
       return;
     }
     setPentagiRunning(true);
     setPentagiLogs([]);
+    setPentagiError(null);
     try {
       const res = await apiFetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(pentagiUrl.trim())}`);
       if (res.ok) {
@@ -114,10 +132,12 @@ export default function OrchestratorTab() {
           }
         }, 750);
       } else {
+        const data = await res.json();
+        setPentagiError(data.error || 'PentAGI run failed.');
         setPentagiRunning(false);
       }
-    } catch (err) {
-      console.error(err);
+    } catch (err: any) {
+      setPentagiError(err.message || 'Network error.');
       setPentagiRunning(false);
     }
   };
@@ -202,6 +222,12 @@ export default function OrchestratorTab() {
             </button>
           </div>
 
+          {aspmError && (
+            <div className="flex items-center gap-2 text-[#f87171] bg-[#f87171]/5 border border-[#f87171]/20 rounded p-3 text-[11px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{aspmError}
+            </div>
+          )}
+
           {aspmOutput && (
             <div className="space-y-4 pt-2">
               <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
@@ -285,6 +311,12 @@ export default function OrchestratorTab() {
               )}
             </button>
           </div>
+
+          {easmError && (
+            <div className="flex items-center gap-2 text-[#f87171] bg-[#f87171]/5 border border-[#f87171]/20 rounded p-3 text-[11px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{easmError}
+            </div>
+          )}
 
           {easmData && (
             <div className="space-y-6 pt-2">
@@ -398,6 +430,12 @@ export default function OrchestratorTab() {
             </button>
           </div>
 
+          {apiScanError && (
+            <div className="flex items-center gap-2 text-[#f87171] bg-[#f87171]/5 border border-[#f87171]/20 rounded p-3 text-[11px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{apiScanError}
+            </div>
+          )}
+
           {apiScanResult && (
             <div className="space-y-4 pt-2">
               <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
@@ -490,6 +528,12 @@ export default function OrchestratorTab() {
             )}
           </button>
 
+          {iastError && (
+            <div className="flex items-center gap-2 text-[#f87171] bg-[#f87171]/5 border border-[#f87171]/20 rounded p-3 text-[11px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{iastError}
+            </div>
+          )}
+
           {iastResult && (
             <div className="space-y-4 pt-2">
               <div className="p-4 bg-amber-950/10 border border-amber-900/30 rounded space-y-3">
@@ -554,6 +598,12 @@ export default function OrchestratorTab() {
               )}
             </button>
           </div>
+
+          {pentagiError && (
+            <div className="flex items-center gap-2 text-[#f87171] bg-[#f87171]/5 border border-[#f87171]/20 rounded p-3 text-[11px]">
+              <AlertTriangle className="w-4 h-4 shrink-0" />{pentagiError}
+            </div>
+          )}
 
           {pentagiLogs.length > 0 && (
             <div className="space-y-2">

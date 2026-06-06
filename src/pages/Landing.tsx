@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { Shield, ArrowRight, Zap, Globe, Key, Terminal, Code, Clock, Eye, Download, Play, CheckCircle } from 'lucide-react';
 import { motion } from 'motion/react';
+import { apiFetch } from '../lib/api.js';
 
 interface LandingProps {
   onStartTrial: (initialUrl: string) => void;
@@ -25,12 +26,17 @@ export default function Landing({ onStartTrial, onNavigate, userEmail }: Landing
 
   const runLandingPentagi = async () => {
     if (!pentagiTargetUrl.trim()) return;
+    if (!userEmail) {
+      setPentagiLogs([{ time: '00:00', agent: 'System', msg: 'Sign in to run live PentAGI analysis against your own targets.' }]);
+      setPentagiComplete(true);
+      return;
+    }
     setPentagiRunning(true);
     setPentagiLogs([]);
     setPentagiComplete(false);
-    
+
     try {
-      const res = await fetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(pentagiTargetUrl.trim())}`);
+      const res = await apiFetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(pentagiTargetUrl.trim())}`);
       if (res.ok) {
         const data = await res.json();
         let idx = 0;
@@ -45,7 +51,10 @@ export default function Landing({ onStartTrial, onNavigate, userEmail }: Landing
           }
         }, 1200);
       } else {
+        const errData = await res.json().catch(() => ({}));
+        setPentagiLogs([{ time: '00:00', agent: 'System', msg: errData.error || 'Probe failed — check target URL and try again.' }]);
         setPentagiRunning(false);
+        setPentagiComplete(true);
       }
     } catch (err) {
       setPentagiRunning(false);

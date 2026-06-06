@@ -2,7 +2,7 @@ import React, { useState } from 'react';
 import { Play, Globe, ArrowRight, AlertTriangle } from 'lucide-react';
 
 interface ScanLauncherProps {
-  onInitiateScan: (url: string, authHeader?: string) => void;
+  onInitiateScan: (url: string, authHeader?: string) => Promise<void>;
   isPerformingAction: boolean;
 }
 
@@ -12,14 +12,18 @@ export default function ScanLauncher({ onInitiateScan, isPerformingAction }: Sca
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [errorText, setErrorText] = useState('');
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorText('');
     const urlStr = scanUrl.trim();
     if (!urlStr) return;
-    onInitiateScan(urlStr, authHeader.trim() || undefined);
-    setScanUrl('');
-    setAuthHeader('');
+    try {
+      await onInitiateScan(urlStr, authHeader.trim() || undefined);
+      setScanUrl('');
+      setAuthHeader('');
+    } catch (err: any) {
+      setErrorText(err.message || 'Scan initiation failed.');
+    }
   };
 
   return (

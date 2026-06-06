@@ -13,7 +13,7 @@ interface DashboardProps {
   user: User;
   scans: Scan[];
   apiKeys: ApiKey[];
-  onInitiateScan: (url: string, authHeader?: string) => void;
+  onInitiateScan: (url: string, authHeader?: string) => Promise<void>;
   onGenerateKey: () => void;
   onRevokeKey: (keyId: string) => void;
   onViewReport: (scanId: string) => void;

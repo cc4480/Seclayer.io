@@ -90,10 +90,8 @@ export default function App() {
         setTimeout(() => loadUserContext(), 1000);
       } else {
         const errData = await res.json();
-        alert(errData.message || 'Scan initiation failed');
+        throw new Error(errData.message || 'Scan initiation failed.');
       }
-    } catch (err) {
-      console.error('Scan launch error:', err);
     } finally {
       setIsPerformingAction(false);
     }

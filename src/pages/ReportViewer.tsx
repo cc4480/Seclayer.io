@@ -6,6 +6,7 @@ import {
   Zap, Package, Grid, AlertCircle, Sparkles, Server, Copy
 } from 'lucide-react';
 import { Scan, Finding } from '../types.js';
+import { apiFetch } from '../lib/api.js';
 import { jsPDF } from "jspdf";
 import autoTable from 'jspdf-autotable';
 
@@ -37,20 +38,16 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
     setIsSuppressing(true);
     setSuppressError(null);
     try {
-      const res = await fetch(`/api/scans/${scan.id}/findings/${finding.id}/suppress`, {
+      const res = await apiFetch(`/api/scans/${scan.id}/findings/${finding.id}/suppress`, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: scan.userId || 'user_default',
           reason: suppressReason.trim() || 'Verified acceptable risk / false positive audit confirmation.'
         })
       });
       if (res.ok) {
         setSuppressInputId(null);
         setSuppressReason('');
-        if (onRefreshScans) {
-          onRefreshScans();
-        }
+        if (onRefreshScans) onRefreshScans();
       } else {
         const data = await res.json();
         setSuppressError(data.error || 'Failed to apply suppression rule');
@@ -64,32 +61,26 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
 
   const handleRemoveSuppressionDirectly = async (findingTitle: string) => {
     setIsSuppressing(true);
+    setSuppressError(null);
     try {
-      const listRes = await fetch(`/api/suppressions?userId=${scan.userId || 'user_default'}`);
-      if (!listRes.ok) throw new Error('Could not read exclusion lists');
+      const listRes = await apiFetch('/api/suppressions');
+      if (!listRes.ok) throw new Error('Could not read exclusion list');
       const listData = await listRes.json();
-      const matchingRule = (listData.suppressions || []).find((s: any) => 
-        s.findingTitle === findingTitle && 
-        s.targetUrl.toLowerCase().replace(/https?:\/\//i, '').replace(/\/+$/, '') === scan.url.toLowerCase().replace(/https?:\/\//i, '').replace(/\/+$/, '')
+      const cleanUrl = (u: string) => u.toLowerCase().replace(/https?:\/\//i, '').replace(/\/+$/, '');
+      const matchingRule = (listData.suppressions || []).find((s: any) =>
+        s.findingTitle === findingTitle && cleanUrl(s.targetUrl) === cleanUrl(scan.url)
       );
+      if (!matchingRule) throw new Error('Suppression rule for this finding was not found.');
 
-      if (!matchingRule) {
-        throw new Error('Suppression rule on this target was not found in database.');
-      }
-
-      const delRes = await fetch(`/api/suppressions/${matchingRule.id}?userId=${scan.userId || 'user_default'}`, {
-        method: 'DELETE'
-      });
+      const delRes = await apiFetch(`/api/suppressions/${matchingRule.id}`, { method: 'DELETE' });
       if (delRes.ok) {
-        if (onRefreshScans) {
-          onRefreshScans();
-        }
+        if (onRefreshScans) onRefreshScans();
       } else {
         const delData = await delRes.json();
         throw new Error(delData.error || 'Failed to remove exclusion rule');
       }
     } catch (err: any) {
-      alert(err.message || 'Failed to restore original findings status.');
+      setSuppressError(err.message || 'Failed to restore finding status.');
     } finally {
       setIsSuppressing(false);
     }
@@ -378,7 +369,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                 <div className="bg-black/40 p-5 rounded border border-[#27272a] relative">
                   <div className="absolute right-4 top-4 font-mono text-[9px] text-[#22c55e] uppercase border border-[#22c55e]/30 px-2 py-0.5 rounded flex items-center space-x-1 select-none">
                     <Sparkles className="w-3 h-3" />
-                    <span>Gemini AI Analyst Verified</span>
+                    <span>AI-Powered Analysis</span>
                   </div>
                   <h3 className="text-xs font-bold font-mono text-white mb-2 uppercase tracking-wider flex items-center space-x-1.5">
                     <span>Executive Summary</span>
@@ -421,45 +412,47 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                 {/* Additional Technical Metadata parameters bento box */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5 space-y-3">
-                    <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Network & Active Attack Surface Perimeter (EASM)</h5>
+                    <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Network & Attack Surface (EASM)</h5>
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Resolved Target IP:</span>
-                        <span className="text-zinc-300">104.244.42.1 (Anycast Route)</span>
+                        <span className="text-[#52525b]">Target Host:</span>
+                        <span className="text-zinc-300 truncate max-w-[180px]">{(() => { try { return new URL(scan.url.startsWith('http') ? scan.url : `https://${scan.url}`).hostname; } catch { return scan.url; } })()}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Nameservers Detected:</span>
-                        <span className="text-zinc-300">ns1.seclayer-dns.net</span>
+                        <span className="text-[#52525b]">Transport Security:</span>
+                        <span className={findings.some(f => f.category === 'EASM' && /ssl|tls|https/i.test(f.title)) ? 'text-[#f87171]' : 'text-[#22c55e]'}>
+                          {findings.some(f => f.category === 'EASM' && /ssl|tls|https/i.test(f.title)) ? 'Issues detected' : 'Secure (HTTPS)'}
+                        </span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">TLS Connection standard:</span>
-                        <span className="text-zinc-300">{scan.score && scan.score >= 80 ? 'TLS 1.3 Secure ECC-Curve' : 'HTTP plaintext link standard'}</span>
+                        <span className="text-[#52525b]">EASM Findings:</span>
+                        <span className="text-zinc-300">{findings.filter(f => f.category === 'EASM').length} issue{findings.filter(f => f.category === 'EASM').length !== 1 ? 's' : ''} detected</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-[#52525b]">Scanned Subdomains:</span>
-                        <span className="text-amber-400">api.${scan.url.replace(/https?:\/\//i, '')}</span>
+                        <span className="text-[#52525b]">DNS / Subdomains:</span>
+                        <span className="text-[#52525b] italic">Run EASM tab for full recon</span>
                       </div>
                     </div>
                   </div>
 
                   <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5 space-y-3">
-                    <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Dynamic Test Parameters Checked (DAST)</h5>
+                    <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Dynamic Probes Executed (DAST)</h5>
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Sensitive Probed Paths:</span>
-                        <span className="text-zinc-300">/.env, /.git/config, /admin</span>
+                        <span className="text-[#52525b]">Injection probes:</span>
+                        <span className="text-zinc-300">SQLi, XSS, SSTI, CRLF, LFI</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Unsecured Form Post actions:</span>
-                        <span className="text-zinc-300">No token form methods scrutinized</span>
+                        <span className="text-[#52525b]">Header analysis:</span>
+                        <span className="text-zinc-300">HSTS, CSP, X-Frame, CORS, Referrer</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Static Javascript payloads scanned:</span>
-                        <span className="text-zinc-300">Inline HTML blocks, script assets</span>
+                        <span className="text-[#52525b]">Redirect / CORS:</span>
+                        <span className="text-zinc-300">Open redirect, origin reflection</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-[#52525b]">Technology Composition:</span>
-                        <span className="text-zinc-300">Bootstrap, jQuery version reviews</span>
+                        <span className="text-[#52525b]">DAST findings:</span>
+                        <span className="text-zinc-300">{findings.filter(f => f.category === 'DAST').length} issue{findings.filter(f => f.category === 'DAST').length !== 1 ? 's' : ''} detected</span>
                       </div>
                     </div>
                   </div>
