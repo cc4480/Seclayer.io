@@ -231,3 +231,49 @@ describe('recalculateScore', () => {
     expect(score).toBe(100);
   });
 });
+
+// ─── Monitoring scheduler helpers ────────────────────────────────────────────
+
+describe('getDueMonitoringTargets', () => {
+  it('returns targets whose nextScanAt is in the past', () => {
+    const user = db.registerUser('m@example.com', hashPassword('pass1234'));
+    const past = new Date(Date.now() - 1000).toISOString();
+    const future = new Date(Date.now() + 86400000).toISOString();
+
+    const t = db.addMonitoredTarget(user.id, 'https://example.com', 7);
+    // Manually back-date nextScanAt
+    (db as any).data.monitoredTargets.find((m: any) => m.id === t.id).nextScanAt = past;
+
+    const t2 = db.addMonitoredTarget(user.id, 'https://other.com', 1);
+    (db as any).data.monitoredTargets.find((m: any) => m.id === t2.id).nextScanAt = future;
+
+    const due = db.getDueMonitoringTargets();
+    expect(due.map(d => d.id)).toContain(t.id);
+    expect(due.map(d => d.id)).not.toContain(t2.id);
+  });
+
+  it('returns empty array when nothing is due', () => {
+    const user = db.registerUser('n@example.com', hashPassword('pass1234'));
+    db.addMonitoredTarget(user.id, 'https://example.com', 7);
+    expect(db.getDueMonitoringTargets()).toHaveLength(0);
+  });
+});
+
+describe('touchMonitoredTarget', () => {
+  it('updates lastScannedAt and advances nextScanAt beyond now', () => {
+    const user = db.registerUser('t@example.com', hashPassword('pass1234'));
+    const target = db.addMonitoredTarget(user.id, 'https://example.com', 3);
+
+    // Back-date to simulate overdue
+    const pastTime = new Date(Date.now() - 1000).toISOString();
+    (db as any).data.monitoredTargets.find((m: any) => m.id === target.id).nextScanAt = pastTime;
+
+    db.touchMonitoredTarget(target.id);
+
+    const updated = db.listMonitoredTargets(user.id)[0];
+    expect(updated.lastScannedAt).toBeDefined();
+    // nextScanAt must now be well in the future (≥ 2 days from now)
+    const twoDaysFromNow = new Date(Date.now() + 2 * 86400000).toISOString();
+    expect(updated.nextScanAt! > twoDaysFromNow).toBe(true);
+  });
+});

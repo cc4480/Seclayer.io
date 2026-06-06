@@ -332,6 +332,20 @@ export class LocalFileDb {
     return removed;
   }
 
+  getDueMonitoringTargets(): MonitoredTarget[] {
+    const now = new Date().toISOString();
+    return this.data.monitoredTargets.filter(t => t.nextScanAt && t.nextScanAt <= now);
+  }
+
+  touchMonitoredTarget(id: string): void {
+    const target = this.data.monitoredTargets.find(t => t.id === id);
+    if (target) {
+      target.lastScannedAt = new Date().toISOString();
+      target.nextScanAt = new Date(Date.now() + target.frequencyDays * 86400000).toISOString();
+      this.save();
+    }
+  }
+
   appendScanLog(scanId: string, message: string): void {
     if (!this.scanLogs.has(scanId)) this.scanLogs.set(scanId, []);
     const ts = new Date().toISOString();

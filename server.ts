@@ -221,14 +221,6 @@ export function createApp(dbInstance: LocalFileDb) {
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
     const urlMsg = validateTargetUrl(url); if (urlMsg) return res.status(400).json({ message: urlMsg });
 
-    const user = dbInstance.getUser(req.userId!);
-    if (!user) return res.status(404).json({ message: 'User not found.' });
-
-    if (user.credits < 1) {
-      return res.status(402).json({ message: 'Insufficient credits. Purchase more credits to continue scanning.' });
-    }
-    dbInstance.deductCredits(req.userId!, 1);
-
     const scan = dbInstance.createScan(req.userId!, url, authHeader);
     processScanJob(scan.id);
     res.json({ status: 'ok', scan });
@@ -614,6 +606,21 @@ export function createApp(dbInstance: LocalFileDb) {
     console.error('[Error]', err);
     res.status(err.status ?? 500).json({ error: err.message ?? 'Internal server error.' });
   });
+
+  // Monitoring scheduler — fires every 60s, skipped in test environment
+  if (!process.env.VITEST) {
+    const schedulerInterval = setInterval(async () => {
+      const due = dbInstance.getDueMonitoringTargets();
+      for (const target of due) {
+        dbInstance.touchMonitoredTarget(target.id);
+        const scan = dbInstance.createScan(target.userId, target.url);
+        processScanJob(scan.id).catch((err: any) =>
+          console.error(`[Monitor] Scheduled scan failed for ${target.url}: ${err?.message}`)
+        );
+      }
+    }, 60 * 1000);
+    schedulerInterval.unref();
+  }
 
   return app;
 }

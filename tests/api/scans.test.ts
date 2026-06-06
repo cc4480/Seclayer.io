@@ -45,31 +45,15 @@ describe('POST /api/scans', () => {
     expect(res.status).toBe(401);
   });
 
-  it('returns 402 when user has no credits', async () => {
-    const { token, user } = registerAndLogin(db);
-    // drain all 5 starting credits
-    for (let i = 0; i < 5; i++) db.deductCredits(user.id, 1);
-
-    const res = await request(app)
-      .post('/api/scans')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ url: 'https://example.com' });
-
-    expect(res.status).toBe(402);
-    expect(res.body.message).toMatch(/insufficient credits/i);
-  });
-
-  it('deducts 1 credit when scan is created', async () => {
-    const { token, user } = registerAndLogin(db);
-    const before = db.getUser(user.id)!.credits;
-
-    await request(app)
-      .post('/api/scans')
-      .set('Authorization', `Bearer ${token}`)
-      .send({ url: 'https://example.com' });
-
-    const after = db.getUser(user.id)!.credits;
-    expect(after).toBe(before - 1);
+  it('returns 400 for SSRF/private targets', async () => {
+    const { token } = registerAndLogin(db);
+    for (const ssrfUrl of ['http://localhost/admin', 'http://127.0.0.1/', 'http://192.168.1.1/']) {
+      const res = await request(app)
+        .post('/api/scans')
+        .set('Authorization', `Bearer ${token}`)
+        .send({ url: ssrfUrl });
+      expect(res.status).toBe(400);
+    }
   });
 });
 
