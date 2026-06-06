@@ -6,6 +6,7 @@ interface NavbarProps {
   currentView: string;
   onNavigate: (view: string, arg?: string) => void;
   userEmail: string;
+  userCredits?: number;
   onLogout: () => void;
   onLoginClick: () => void;
 }
@@ -14,6 +15,7 @@ export default function Navbar({
   currentView,
   onNavigate,
   userEmail,
+  userCredits,
   onLogout,
   onLoginClick
 }: NavbarProps) {
@@ -88,11 +90,16 @@ export default function Navbar({
             <>
               {/* User Email Info / Sign Out */}
               <div className="flex items-center space-x-3 border-l border-[#27272a] pl-4">
-                <div className="hidden lg:flex flex-col items-end text-right">
+                <div className="hidden lg:flex flex-col items-end text-right gap-0.5">
                   <span className="text-xs text-[#a1a1aa] font-mono flex items-center space-x-1.5">
                     <User className="w-3 h-3 text-[#52525b]" />
                     <span>{userEmail}</span>
                   </span>
+                  {userCredits !== undefined && (
+                    <span className={`text-[10px] font-mono font-bold ${userCredits === 0 ? 'text-[#f87171]' : 'text-[#22c55e]'}`}>
+                      {userCredits} credit{userCredits !== 1 ? 's' : ''}
+                    </span>
+                  )}
                 </div>
                 <button
                   onClick={onLogout}

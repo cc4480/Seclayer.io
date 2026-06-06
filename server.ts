@@ -203,6 +203,11 @@ export function createApp(dbInstance: LocalFileDb) {
     const user = dbInstance.getUser(req.userId!);
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
+    if (user.credits < 1) {
+      return res.status(402).json({ message: 'Insufficient credits. Purchase more credits to continue scanning.' });
+    }
+    dbInstance.deductCredits(req.userId!, 1);
+
     const scan = dbInstance.createScan(req.userId!, url, authHeader);
     processScanJob(scan.id);
     res.json({ status: 'ok', scan });

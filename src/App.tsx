@@ -149,6 +149,7 @@ export default function App() {
         currentView={currentView}
         onNavigate={handleNavigate}
         userEmail={user?.email || ''}
+        userCredits={user?.credits}
         onLogout={handleLogout}
         onLoginClick={() => setShowLogin(true)}
       />
