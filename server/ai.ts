@@ -92,7 +92,7 @@ Return a JSON object with exactly these three keys:
 }`;
 
     const completion = await client.chat.completions.create({
-      model: 'deepseek-chat',
+      model: 'deepseek-v4-flash',
       messages: [
         {
           role: 'system',
@@ -152,7 +152,7 @@ export async function generatePentagiLogs(url: string): Promise<{ time: string; 
 
   try {
     const completion = await client.chat.completions.create({
-      model: 'deepseek-chat',
+      model: 'deepseek-v4-pro',
       messages: [
         {
           role: 'system',
