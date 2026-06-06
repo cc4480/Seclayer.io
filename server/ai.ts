@@ -21,7 +21,7 @@ function getClient(): OpenAI | null {
   return aiClient;
 }
 
-function normalizeCategory(raw: string): string {
+export function normalizeCategory(raw: string): string {
   const cat = String(raw || '').toUpperCase().replace(/[\s-]/g, '_');
   if ((VALID_CATEGORIES as readonly string[]).includes(cat)) return cat;
   if (cat.includes('RED') || cat.includes('TEAM') || cat.includes('FUZZ') || cat.includes('EXPLOIT')) return 'RED_TEAM';

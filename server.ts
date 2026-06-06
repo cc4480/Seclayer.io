@@ -1,8 +1,7 @@
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
-import fs from 'fs';
 import { createServer as createViteServer } from 'vite';
-import { db } from './server/db.js';
+import { db, LocalFileDb } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/ai.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
@@ -31,12 +30,45 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
-async function startServer() {
+export function createApp(dbInstance: LocalFileDb) {
   const app = express();
-  const PORT = 3000;
 
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+
+  // --- Background scan worker ---
+  async function processScanJob(scanId: string) {
+    try {
+      console.log(`[Scanner] Starting scan ${scanId}`);
+      dbInstance.updateScan(scanId, { status: 'scanning' });
+
+      const scan = dbInstance.getScan(scanId);
+      if (!scan) return;
+
+      const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
+
+      dbInstance.updateScan(scanId, { status: 'analyzing' });
+
+      const staticCompiled = compileStaticFindings(diagnostics);
+      const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
+
+      dbInstance.updateScan(scanId, {
+        status: 'complete',
+        score: outputReport.score,
+        severity: outputReport.severity,
+        findings: outputReport.findings,
+        aiSummary: outputReport.aiSummary,
+        completedAt: new Date().toISOString(),
+      });
+      console.log(`[Scanner] Scan ${scanId} complete. Score: ${outputReport.score}`);
+    } catch (err: any) {
+      console.error(`[Scanner] Scan ${scanId} failed:`, err.message);
+      dbInstance.updateScan(scanId, {
+        status: 'failed',
+        error: err.message || 'Scan failed due to an unexpected error.',
+      });
+    }
+  }
 
   // --- PUBLIC ROUTES ---
 
@@ -55,7 +87,7 @@ async function startServer() {
     }
     try {
       const passwordHash = hashPassword(password);
-      const user = db.registerUser(email, passwordHash);
+      const user = dbInstance.registerUser(email, passwordHash);
       const token = signToken(user.id);
       res.status(201).json({ token, user });
     } catch (err: any) {
@@ -69,14 +101,14 @@ async function startServer() {
     if (!email || !password) {
       return res.status(400).json({ message: 'Email and password are required.' });
     }
-    const dbUser = db.findUserByEmail(email);
+    const dbUser = dbInstance.findUserByEmail(email);
     if (!dbUser) {
       return res.status(401).json({ message: 'No account found with this email. Please register first.' });
     }
     if (!dbUser.passwordHash || !verifyPassword(password, dbUser.passwordHash)) {
       return res.status(401).json({ message: 'Incorrect password.' });
     }
-    const user = db.getUser(dbUser.id)!;
+    const user = dbInstance.getUser(dbUser.id)!;
     const token = signToken(user.id);
     res.json({ token, user });
   });
@@ -91,11 +123,11 @@ async function startServer() {
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'url and apiKey are required.' });
     }
-    const apiKeyObj = db.findApiKey(apiKey);
+    const apiKeyObj = dbInstance.findApiKey(apiKey);
     if (!apiKeyObj || !apiKeyObj.active) {
       return res.status(401).json({ error: 'Invalid or revoked API key.' });
     }
-    const user = db.getUser(apiKeyObj.userId);
+    const user = dbInstance.getUser(apiKeyObj.userId);
     if (!user) {
       return res.status(401).json({ error: 'API key owner not found.' });
     }
@@ -104,8 +136,8 @@ async function startServer() {
       const staticCompiled = compileStaticFindings(diagnostics);
       const aiReport = await generateAiReport(url, diagnostics, staticCompiled);
 
-      const completedScan = db.createScan(user.id, url, authHeader);
-      db.updateScan(completedScan.id, {
+      const completedScan = dbInstance.createScan(user.id, url, authHeader);
+      dbInstance.updateScan(completedScan.id, {
         status: 'complete',
         score: aiReport.score,
         severity: aiReport.severity,
@@ -130,7 +162,7 @@ async function startServer() {
   // --- PROTECTED ROUTES (JWT required) ---
 
   app.get('/api/auth/me', requireAuth, (req, res) => {
-    const user = db.getUser(req.userId!);
+    const user = dbInstance.getUser(req.userId!);
     if (!user) return res.status(404).json({ error: 'User not found.' });
     res.json({ user });
   });
@@ -140,37 +172,37 @@ async function startServer() {
     const { url, authHeader } = req.body;
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
 
-    const user = db.getUser(req.userId!);
+    const user = dbInstance.getUser(req.userId!);
     if (!user) return res.status(404).json({ message: 'User not found.' });
 
-    const scan = db.createScan(req.userId!, url, authHeader);
+    const scan = dbInstance.createScan(req.userId!, url, authHeader);
     processScanJob(scan.id);
     res.json({ status: 'ok', scan });
   });
 
   app.get('/api/scans', requireAuth, (req, res) => {
-    const scansList = db.listScans(req.userId!).map(s => db.getScanWithSuppressedFindings(s));
+    const scansList = dbInstance.listScans(req.userId!).map(s => dbInstance.getScanWithSuppressedFindings(s));
     res.json({ scans: scansList });
   });
 
   app.get('/api/scans/:id', requireAuth, (req, res) => {
-    let scan = db.getScan(req.params.id);
+    let scan = dbInstance.getScan(req.params.id);
     if (!scan || scan.userId !== req.userId) {
       return res.status(404).json({ error: 'Scan not found.' });
     }
-    scan = db.getScanWithSuppressedFindings(scan);
+    scan = dbInstance.getScanWithSuppressedFindings(scan);
     res.json({ scan });
   });
 
   app.get('/api/scans/:id/report', requireAuth, (req, res) => {
-    let scan = db.getScan(req.params.id);
+    let scan = dbInstance.getScan(req.params.id);
     if (!scan || scan.userId !== req.userId) {
       return res.status(404).json({ error: 'Scan not found.' });
     }
     if (scan.status !== 'complete') {
       return res.status(400).json({ error: 'Scan is not complete yet.' });
     }
-    scan = db.getScanWithSuppressedFindings(scan);
+    scan = dbInstance.getScanWithSuppressedFindings(scan);
     res.json({
       scanId: scan.id, url: scan.url, score: scan.score, severity: scan.severity,
       aiSummary: scan.aiSummary, findings: scan.findings,
@@ -180,7 +212,7 @@ async function startServer() {
 
   // Suppressions
   app.get('/api/suppressions', requireAuth, (req, res) => {
-    res.json({ suppressions: db.listSuppressions(req.userId!) });
+    res.json({ suppressions: dbInstance.listSuppressions(req.userId!) });
   });
 
   app.post('/api/suppressions', requireAuth, (req, res) => {
@@ -188,12 +220,12 @@ async function startServer() {
     if (!targetUrl || !findingTitle) {
       return res.status(400).json({ error: 'targetUrl and findingTitle are required.' });
     }
-    const rule = db.addSuppression(req.userId!, targetUrl, findingTitle, reason || 'False positive');
+    const rule = dbInstance.addSuppression(req.userId!, targetUrl, findingTitle, reason || 'False positive');
     res.json({ status: 'ok', rule });
   });
 
   app.delete('/api/suppressions/:id', requireAuth, (req, res) => {
-    const success = db.removeSuppression(req.userId!, req.params.id);
+    const success = dbInstance.removeSuppression(req.userId!, req.params.id);
     if (!success) return res.status(404).json({ error: 'Suppression rule not found.' });
     res.json({ status: 'ok' });
   });
@@ -201,46 +233,46 @@ async function startServer() {
   app.post('/api/scans/:scanId/findings/:findingId/suppress', requireAuth, (req, res) => {
     const { scanId, findingId } = req.params;
     const { reason = 'Manual validation' } = req.body;
-    const scan = db.getScan(scanId);
+    const scan = dbInstance.getScan(scanId);
     if (!scan || scan.userId !== req.userId) {
       return res.status(404).json({ error: 'Scan not found.' });
     }
     const finding = scan.findings?.find(f => f.id === findingId);
     if (!finding) return res.status(404).json({ error: 'Finding not found.' });
-    const rule = db.addSuppression(req.userId!, scan.url, finding.title, reason);
+    const rule = dbInstance.addSuppression(req.userId!, scan.url, finding.title, reason);
     res.json({ status: 'ok', rule });
   });
 
   // Monitoring
   app.get('/api/monitoring', requireAuth, (req, res) => {
-    res.json({ monitoredTargets: db.listMonitoredTargets(req.userId!) });
+    res.json({ monitoredTargets: dbInstance.listMonitoredTargets(req.userId!) });
   });
 
   app.post('/api/monitoring', requireAuth, (req, res) => {
     const { url, frequencyDays = 7, scheduleString } = req.body;
     if (!url) return res.status(400).json({ error: 'url is required.' });
-    const target = db.addMonitoredTarget(req.userId!, url, frequencyDays, scheduleString);
+    const target = dbInstance.addMonitoredTarget(req.userId!, url, frequencyDays, scheduleString);
     res.json({ status: 'ok', target });
   });
 
   app.delete('/api/monitoring/:id', requireAuth, (req, res) => {
-    const success = db.removeMonitoredTarget(req.userId!, req.params.id);
+    const success = dbInstance.removeMonitoredTarget(req.userId!, req.params.id);
     if (!success) return res.status(404).json({ error: 'Monitored target not found.' });
     res.json({ status: 'ok' });
   });
 
   // API Keys
   app.get('/api/keys', requireAuth, (req, res) => {
-    res.json({ keys: db.listApiKeys(req.userId!) });
+    res.json({ keys: dbInstance.listApiKeys(req.userId!) });
   });
 
   app.post('/api/keys', requireAuth, (req, res) => {
-    const keyObj = db.generateApiKey(req.userId!);
+    const keyObj = dbInstance.generateApiKey(req.userId!);
     res.json({ status: 'ok', key: keyObj });
   });
 
   app.delete('/api/keys/:id', requireAuth, (req, res) => {
-    const success = db.revokeApiKey(req.userId!, req.params.id);
+    const success = dbInstance.revokeApiKey(req.userId!, req.params.id);
     if (!success) return res.status(404).json({ error: 'Key not found.' });
     res.json({ status: 'ok' });
   });
@@ -250,7 +282,7 @@ async function startServer() {
   // 1. ASPM — correlate findings across this user's actual scans
   app.post('/api/enterprise/aspm/correlate', requireAuth, (req, res) => {
     const { url } = req.body;
-    const userScans = db.listScans(req.userId!).filter(s => {
+    const userScans = dbInstance.listScans(req.userId!).filter(s => {
       if (s.status !== 'complete') return false;
       if (url) return s.url.toLowerCase().includes(url.toLowerCase().replace(/https?:\/\//i, ''));
       return true;
@@ -267,7 +299,6 @@ async function startServer() {
       });
     }
 
-    // Aggregate findings across scans, deduplicating by title
     const findingMap = new Map<string, {
       title: string; severity: string; category: string;
       occurrences: number; seenIn: string[]; description: string; fix: string;
@@ -331,7 +362,6 @@ async function startServer() {
         ? mxResult.value.map(r => ({ exchange: r.exchange, priority: r.priority }))
         : [];
 
-      // Certificate transparency — real subdomain discovery
       let ctSubdomains: string[] = [];
       try {
         const ctController = new AbortController();
@@ -360,7 +390,6 @@ async function startServer() {
         console.warn('crt.sh lookup failed:', e);
       }
 
-      // Resolve discovered subdomains
       const subdomainResults = await Promise.all(
         ctSubdomains.map(async sub => {
           try {
@@ -398,7 +427,6 @@ async function startServer() {
     let targetUrl = url.trim();
     if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
 
-    // Discover OpenAPI/Swagger spec
     const specPaths = [
       '/openapi.json', '/swagger.json', '/api-docs', '/api/docs',
       '/api/v1/docs', '/swagger/v1/swagger.json', '/v1/openapi.json', '/docs/openapi.json',
@@ -430,7 +458,6 @@ async function startServer() {
       endpoint: string; issue: string; severity: string; description: string; fix: string;
     }> = [];
 
-    // GraphQL introspection check
     try {
       const ctrl = new AbortController();
       const id = setTimeout(() => ctrl.abort(), 4000);
@@ -454,7 +481,6 @@ async function startServer() {
       }
     } catch { /* not exposed */ }
 
-    // Actuator check
     try {
       const ctrl = new AbortController();
       const id = setTimeout(() => ctrl.abort(), 3000);
@@ -470,7 +496,6 @@ async function startServer() {
       }
     } catch { /* not exposed */ }
 
-    // Check discovered endpoints from spec for auth requirements
     const specEndpoints = spec ? Object.keys(spec.paths || {}).slice(0, 20) : [];
 
     res.json({
@@ -487,7 +512,7 @@ async function startServer() {
     });
   });
 
-  // 4. IAST — requires runtime agent instrumentation (not possible remotely)
+  // 4. IAST — requires runtime agent instrumentation
   app.post('/api/enterprise/iast/trace', requireAuth, (_req, res) => {
     res.status(501).json({
       success: false,
@@ -502,7 +527,7 @@ async function startServer() {
     });
   });
 
-  // 5. PentAGI — Gemini-powered autonomous pentest simulation
+  // 5. PentAGI — DeepSeek-powered autonomous pentest simulation
   app.get('/api/enterprise/pentagi/logs', requireAuth, async (req, res) => {
     const url = req.query.url as string | undefined;
     if (!url) {
@@ -521,41 +546,7 @@ async function startServer() {
     }
   });
 
-  // --- Background scan worker ---
-  async function processScanJob(scanId: string) {
-    try {
-      console.log(`[Scanner] Starting scan ${scanId}`);
-      db.updateScan(scanId, { status: 'scanning' });
-
-      const scan = db.getScan(scanId);
-      if (!scan) return;
-
-      const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
-
-      db.updateScan(scanId, { status: 'analyzing' });
-
-      const staticCompiled = compileStaticFindings(diagnostics);
-      const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
-
-      db.updateScan(scanId, {
-        status: 'complete',
-        score: outputReport.score,
-        severity: outputReport.severity,
-        findings: outputReport.findings,
-        aiSummary: outputReport.aiSummary,
-        completedAt: new Date().toISOString(),
-      });
-      console.log(`[Scanner] Scan ${scanId} complete. Score: ${outputReport.score}`);
-    } catch (err: any) {
-      console.error(`[Scanner] Scan ${scanId} failed:`, err.message);
-      db.updateScan(scanId, {
-        status: 'failed',
-        error: err.message || 'Scan failed due to an unexpected error.',
-      });
-    }
-  }
-
-  // --- Security headers middleware ---
+  // --- Security headers ---
   app.use((_req, res, next) => {
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     res.setHeader('X-Frame-Options', 'DENY');
@@ -564,7 +555,12 @@ async function startServer() {
     next();
   });
 
-  // --- Static serving ---
+  return app;
+}
+
+async function startServer() {
+  const app = createApp(db);
+
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -579,12 +575,15 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Seclayer] Listening on http://0.0.0.0:${PORT}`);
+  app.listen(3000, '0.0.0.0', () => {
+    console.log(`[Seclayer] Listening on http://0.0.0.0:3000`);
   });
 }
 
-startServer().catch(err => {
-  console.error('Server bootstrap error:', err);
-  process.exit(1);
-});
+// Skip startup when imported by the test runner
+if (!process.env.VITEST) {
+  startServer().catch(err => {
+    console.error('Server bootstrap error:', err);
+    process.exit(1);
+  });
+}

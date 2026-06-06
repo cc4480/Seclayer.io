@@ -3,7 +3,7 @@ import path from 'path';
 import crypto from 'crypto';
 import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
 
-const DB_FILE = path.join(process.cwd(), 'db.json');
+const DEFAULT_DB_FILE = path.join(process.cwd(), 'db.json');
 
 // Server-only user record — passwordHash is never sent to the client
 interface DbUser extends Omit<User, never> {
@@ -19,10 +19,12 @@ interface DbSchema {
   monitoredTargets: MonitoredTarget[];
 }
 
-class LocalFileDb {
+export class LocalFileDb {
   private data: DbSchema;
+  private readonly dbFilePath: string;
 
-  constructor() {
+  constructor(dbFilePath: string = DEFAULT_DB_FILE) {
+    this.dbFilePath = dbFilePath;
     this.data = {
       users: {},
       scans: {},
@@ -36,8 +38,8 @@ class LocalFileDb {
 
   private load() {
     try {
-      if (fs.existsSync(DB_FILE)) {
-        const raw = fs.readFileSync(DB_FILE, 'utf8');
+      if (fs.existsSync(this.dbFilePath)) {
+        const raw = fs.readFileSync(this.dbFilePath, 'utf8');
         const parsed = JSON.parse(raw) as DbSchema;
         this.data = {
           suppressions: [],
@@ -52,7 +54,7 @@ class LocalFileDb {
 
   private save() {
     try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.writeFileSync(this.dbFilePath, JSON.stringify(this.data, null, 2), 'utf8');
     } catch (err) {
       console.error('Error saving DB file:', err);
     }
