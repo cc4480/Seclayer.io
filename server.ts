@@ -5,7 +5,8 @@ import { rateLimit } from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { db, LocalFileDb } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/ai.js';
+import { generateAiReport } from './server/ai.js';
+import { runPentagiExploit } from './server/pentagi.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
 
 declare global {
@@ -560,22 +561,22 @@ export function createApp(dbInstance: LocalFileDb) {
     });
   });
 
-  // 5. PentAGI — DeepSeek-powered autonomous pentest simulation
+  // 5. PentAGI — real multi-stage automated exploit runner
   app.get('/api/enterprise/pentagi/logs', requireAuth, async (req, res) => {
     const url = req.query.url as string | undefined;
     if (!url) {
       return res.status(400).json({ error: 'Target url query parameter is required.' });
     }
     try {
-      const logs = await generatePentagiLogs(url);
+      const logs = await runPentagiExploit(url);
       res.json({
         success: true,
         engine: 'PentAGI Autonomous Multi-Agent Pentest Coordinator',
-        agents: ['Scout', 'Exploiter', 'Reporter'],
+        agents: ['Scout Agent', 'Exploiter Agent', 'Reporter Agent'],
         logs,
       });
     } catch (err: any) {
-      res.status(503).json({ error: err.message });
+      res.status(500).json({ error: err.message });
     }
   });
 
