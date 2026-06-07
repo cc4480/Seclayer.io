@@ -378,7 +378,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                 <div className="bg-black/40 p-5 rounded border border-[#27272a] relative">
                   <div className="absolute right-4 top-4 font-mono text-[9px] text-[#22c55e] uppercase border border-[#22c55e]/30 px-2 py-0.5 rounded flex items-center space-x-1 select-none">
                     <Sparkles className="w-3 h-3" />
-                    <span>Gemini AI Analyst Verified</span>
+                    <span>DeepSeek AI Analyst Verified</span>
                   </div>
                   <h3 className="text-xs font-bold font-mono text-white mb-2 uppercase tracking-wider flex items-center space-x-1.5">
                     <span>Executive Summary</span>

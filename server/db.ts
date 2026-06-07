@@ -235,6 +235,10 @@ class LocalFileDb {
     return user;
   }
 
+  listTransactions(userId: string): CreditTransaction[] {
+    return this.data.transactions.filter(tx => tx.userId === userId);
+  }
+
   deductCredits(userId: string, amount: number): boolean {
     const user = this.data.users[userId];
     if (!user || user.credits < amount) return false;

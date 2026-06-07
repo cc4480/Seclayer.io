@@ -1,26 +1,54 @@
-import { GoogleGenAI, Type } from "@google/genai";
+import crypto from "crypto";
 import { Finding, Severity } from '../src/types.js';
 
-let aiInstance: GoogleGenAI | null = null;
+// DeepSeek exposes an OpenAI-compatible chat completions API, so we talk to it
+// directly over fetch and avoid pulling in a heavyweight SDK dependency.
+const DEEPSEEK_BASE_URL = process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com';
 
-function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
-    // Graceful check, let's keep it silent unless a call is made
+// Model routing: the "pro" tier handles the deep security report reasoning,
+// while the faster "flash" tier drives the lighter PentAGI log narration.
+const MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO || 'deepseek-v4-pro';
+const MODEL_FLASH = process.env.DEEPSEEK_MODEL_FLASH || 'deepseek-v4-flash';
+
+function getApiKey(): string | null {
+  const apiKey = process.env.DEEPSEEK_API_KEY;
+  if (!apiKey || apiKey === 'MY_DEEPSEEK_API_KEY' || apiKey.trim() === '') {
     return null;
   }
-  
-  if (!aiInstance) {
-    aiInstance = new GoogleGenAI({
-      apiKey: apiKey,
-      httpOptions: {
-        headers: {
-          'User-Agent': 'aistudio-build',
-        }
-      }
-    });
+  return apiKey;
+}
+
+// Calls the DeepSeek chat completions endpoint in JSON mode and returns the raw
+// model message content. Returns null when no API key is configured so callers
+// can gracefully fall back to local generation.
+async function callDeepSeek(model: string, prompt: string, temperature: number): Promise<string | null> {
+  const apiKey = getApiKey();
+  if (!apiKey) return null;
+
+  const response = await fetch(`${DEEPSEEK_BASE_URL}/chat/completions`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({
+      model,
+      messages: [{ role: 'user', content: prompt }],
+      response_format: { type: 'json_object' },
+      temperature,
+      max_tokens: 4096,
+      stream: false,
+    }),
+  });
+
+  if (!response.ok) {
+    const errBody = await response.text().catch(() => '');
+    throw new Error(`DeepSeek API error ${response.status}: ${errBody}`);
   }
-  return aiInstance;
+
+  const data = await response.json();
+  const content = data?.choices?.[0]?.message?.content;
+  return typeof content === 'string' ? content : null;
 }
 
 export async function generateAiReport(
@@ -28,10 +56,9 @@ export async function generateAiReport(
   diagnostics: any,
   staticCompiled: { score: number; severity: Severity; findings: Finding[] }
 ): Promise<{ score: number; severity: Severity; findings: Finding[]; aiSummary: string }> {
-  
-  const ai = getAiClient();
-  if (!ai) {
-    console.log("No valid GEMINI_API_KEY set. Generating elegant local-mode executive summary.");
+
+  if (!getApiKey()) {
+    console.log("No valid DEEPSEEK_API_KEY set. Generating elegant local-mode executive summary.");
     const defaultSecSummary = compileLocalSummary(url, staticCompiled);
     return {
       ...staticCompiled,
@@ -41,7 +68,7 @@ export async function generateAiReport(
 
   try {
     const findingsSummaryText = staticCompiled.findings.map(f => `- [${f.severity.toUpperCase()}] ${f.title}: ${f.description} (Fix: ${f.fix})`).join('\n');
-    
+
     const prompt = `You are Seclayer's automated penetration testing AI.
 Analyze the following black-box scanner diagnostics for target web url: "${url}" and the compiled issues listed below.
 Generate a structured penetration testing report output in JSON format.
@@ -63,44 +90,19 @@ FALSE POSITIVE FILTERING (CRITICAL):
 - Consolidate multiple similar issues into a single actionable finding.
 - Do NOT hallucinate vulnerabilities that are not supported by the DIAGNOSTIC DATA or DETECTED ISSUES.
 
-Please return a JSON response containing:
+Please return a JSON object containing exactly these keys:
 1. "aiSummary": A direct, plain-English, professional executive summary paragraph (3-5 sentences) summarizing overall posture, potential risks, and urgency level. Speak with the authority of an active principal cybersecurity assessor. Do NOT use fake placeholders like "example.com", you MUST explicitly mention the target url "${url}" in your summary. Do NOT use markdown links.
-2. "adjustedScore": A safety score from 0 to 100 based on the severity of the findings (e.g. critical items lower score near 10-30, high items live around 40-60, clean sites get 90+).
-3. "findings": An array corresponding to the detected issues, but written or enriched with clearer titles/descriptions of how an attacker would exploit the issue and exactly how a developer would fix it. Maintain the fields: title, description, severity, fix, category. The "category" field MUST be strictly one of the following 6 AppSec categories: "DAST", "SAST", "IAST", "SCA", "EASM", "RED_TEAM". Replace any generic placeholder domains (like example.com) with the real target "${url}".
+2. "adjustedScore": An integer safety score from 0 to 100 based on the severity of the findings (e.g. critical items lower score near 10-30, high items live around 40-60, clean sites get 90+).
+3. "findings": An array corresponding to the detected issues, but written or enriched with clearer titles/descriptions of how an attacker would exploit the issue and exactly how a developer would fix it. Each item MUST have the fields: "title", "description", "severity", "fix", "category". The "severity" field MUST be one of: "info", "low", "medium", "high", "critical". The "category" field MUST be strictly one of the following 6 AppSec categories: "DAST", "SAST", "IAST", "SCA", "EASM", "RED_TEAM". Replace any generic placeholder domains (like example.com) with the real target "${url}".
 
-Ensure the returned output is strictly compliant with the required JSON structure.`;
+Ensure the returned output is strictly valid JSON compliant with the required structure.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: ["aiSummary", "adjustedScore", "findings"],
-          properties: {
-            aiSummary: { type: Type.STRING, description: "Penetration testing executive summary in active cybersecurity voice." },
-            adjustedScore: { type: Type.INTEGER, description: "Score between 10 and 100." },
-            findings: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                required: ["title", "description", "severity", "fix", "category"],
-                properties: {
-                  title: { type: Type.STRING },
-                  description: { type: Type.STRING, description: "Exploit path explainers." },
-                  severity: { type: Type.STRING, description: "info, low, medium, high, critical" },
-                  fix: { type: Type.STRING },
-                  category: { type: Type.STRING, description: "MUST be one of: DAST, SAST, IAST, SCA, EASM, RED_TEAM" }
-                }
-              }
-            }
-          }
-        }
-      }
-    });
+    const bodyTextRaw = await callDeepSeek(MODEL_PRO, prompt, 0.4);
+    if (!bodyTextRaw) {
+      return { ...staticCompiled, aiSummary: compileLocalSummary(url, staticCompiled) };
+    }
 
-    let bodyText = response.text.trim();
+    let bodyText = bodyTextRaw.trim();
     try {
         const u = url.startsWith('http') ? url : `https://${url}`;
         const parsedUrl = new URL(u);
@@ -144,7 +146,7 @@ Ensure the returned output is strictly compliant with the required JSON structur
     };
 
   } catch (err: any) {
-    console.warn(`Gemini API call or parsing failed, using high-quality local summary: ${err?.message || err}`);
+    console.warn(`DeepSeek API call or parsing failed, using high-quality local summary: ${err?.message || err}`);
     return {
       ...staticCompiled,
       aiSummary: compileLocalSummary(url, staticCompiled)
@@ -164,8 +166,7 @@ function compileLocalSummary(url: string, sc: { score: number; severity: Severit
 
 export async function generatePentagiLogs(url: string | undefined): Promise<{ time: string; agent: string; msg: string; }[]> {
   const defaultUrl = url || 'staging.api.vulnerable.org';
-  const ai = getAiClient();
-  
+
   const fallbackLogs = [
     { time: '00:01', agent: 'Scout Agent', msg: `Core DNS Enumeration on domain base completed. Discovered open host ${defaultUrl}.` },
     { time: '00:04', agent: 'Scout Agent', msg: 'Probing HTTP port 443. Technology fingerprint matches Node.js Express & Apache HTTP Server v2.4.' },
@@ -178,7 +179,7 @@ export async function generatePentagiLogs(url: string | undefined): Promise<{ ti
     { time: '00:30', agent: 'Reporter Agent', msg: 'Standardized DefectDojo JSON findings schema generated.' }
   ];
 
-  if (!ai) {
+  if (!getApiKey()) {
     return fallbackLogs;
   }
 
@@ -189,7 +190,7 @@ The target is "${defaultUrl}".
 
 Generate an array of 6 to 9 log messages that sequentially describe a successful multi-stage attack simulation ending with a report generation.
 
-Please return a JSON response containing a single "logs" array. Each log object MUST have:
+Please return a JSON object containing a single "logs" array. Each log object MUST have:
 1. "time": a string formatted as "MM:SS" (e.g. "00:01", "00:15", "01:30") showing elapsed time in the operation. Ensure the time progresses chronologically.
 2. "agent": strictly one of "Scout Agent", "Exploiter Agent", or "Reporter Agent".
 3. "msg": the log message describing what the agent is doing or has found. Make it sound highly technical, professional, and cyber-security focused. Mention the target url "${defaultUrl}" in the first Scout log.
@@ -197,33 +198,12 @@ Please return a JSON response containing a single "logs" array. Each log object 
 Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
-    const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
-      contents: prompt,
-      config: {
-        responseMimeType: "application/json",
-        responseSchema: {
-          type: Type.OBJECT,
-          required: ["logs"],
-          properties: {
-            logs: {
-              type: Type.ARRAY,
-              items: {
-                type: Type.OBJECT,
-                required: ["time", "agent", "msg"],
-                properties: {
-                  time: { type: Type.STRING, description: "MM:SS" },
-                  agent: { type: Type.STRING },
-                  msg: { type: Type.STRING }
-                }
-              }
-            }
-          }
-        }
-      }
-    });
+    const bodyTextRaw = await callDeepSeek(MODEL_FLASH, prompt, 0.8);
+    if (!bodyTextRaw) {
+      return fallbackLogs;
+    }
 
-    let bodyText = response.text.trim();
+    let bodyText = bodyTextRaw.trim();
     try {
         const u = defaultUrl.startsWith('http') ? defaultUrl : `https://${defaultUrl}`;
         const parsedUrl = new URL(u);
@@ -231,13 +211,13 @@ Return ONLY valid JSON compliant with the requested schema.`;
         bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
     } catch(e) {}
     const data = JSON.parse(bodyText);
-    
+
     if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
       return data.logs;
     }
     return fallbackLogs;
   } catch (err: any) {
-    console.warn(`Gemini PentAGI generation failed, using fallback logs: ${err?.message || err}`);
+    console.warn(`DeepSeek PentAGI generation failed, using fallback logs: ${err?.message || err}`);
     return fallbackLogs;
   }
 }

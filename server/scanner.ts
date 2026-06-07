@@ -817,8 +817,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
     score -= sf.severity === "critical" ? 35 : sf.severity === "high" ? 25 : 15;
   });
 
-  // Fallback SAST removed to reduce noise
-
   // 4. SCA (Software Composition Analysis) checks
   diag.scaLibraries.forEach((sca) => {
     findings.push({
@@ -832,8 +830,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
     });
     score -= sca.severity === "high" ? 25 : 15;
   });
-
-  // Fallback SCA removed to reduce noise
 
   // 5. DAST (Dynamic Application Security Probes) checks
   diag.dastInputs.forEach((dast) => {
@@ -866,8 +862,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
     });
     score -= 35;
   });
-
-  // Default DAST baseline finding removed to decrease informational noise
 
   // Compile Red Team aggressive probing findings
   if (diag.redTeamFindings && diag.redTeamFindings.length > 0) {

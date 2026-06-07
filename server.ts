@@ -3,8 +3,7 @@ import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
-import { ScanStatus, Severity, Finding } from './src/types.js';
+import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
 
 async function startServer() {
   const app = express();
@@ -13,19 +12,6 @@ async function startServer() {
   // Body parsers
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
-
-  // Helper cookie or header authentication middleware
-  // We can let the UI pass "x-user-id" or fallback to default user context
-  app.use((req, res, next) => {
-    let authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const apiKey = authHeader.substring(7);
-      // Try to check if this is an API key
-      const keys = db.listApiKeys('user_default'); // simplifed lookup or query keys
-      // Allow API key checks
-    }
-    next();
-  });
 
   // --- API ROUTES ---
 
@@ -204,8 +190,7 @@ async function startServer() {
     // We can fetch transactions list from db
     res.json({
       credits: user.credits,
-      // Since db handles list, we can return the global transaction list for simplicity, filtered:
-      transactions: (db as any).data.transactions.filter((tx: any) => tx.userId === userId)
+      transactions: db.listTransactions(userId)
     });
   });
 
@@ -572,7 +557,6 @@ async function startServer() {
 }
 
 // Global safety catch
-import fs from 'fs';
 startServer().catch((err) => {
   console.error("Critical server bootstrap error:", err);
 });

@@ -1,20 +1,29 @@
-<div align="center">
-<img width="1200" height="475" alt="GHBanner" src="https://ai.google.dev/static/site-assets/images/share-ais-513315318.png" />
-</div>
+# Seclayer
 
-# Run and deploy your AI Studio app
+Pay-Per-Scan Black-Box Penetration Testing SaaS & MCP Server.
 
-This contains everything you need to run your app locally.
-
-View your app in AI Studio: https://ai.studio/apps/f8b7e05c-a4a3-4315-90c9-bbfe6fc47f0f
+Seclayer scans a target URL, runs a battery of black-box security checks
+(headers, TLS, cookies, subdomain/EASM recon, sensitive-path probing, and active
+SQLi/XSS/command-injection/SSRF/API fuzzing), then enriches the results with a
+DeepSeek-generated executive report and severity score.
 
 ## Run Locally
 
-**Prerequisites:**  Node.js
-
+**Prerequisites:** Node.js
 
 1. Install dependencies:
    `npm install`
-2. Set the `GEMINI_API_KEY` in [.env.local](.env.local) to your Gemini API key
+2. (Optional) Set `DEEPSEEK_API_KEY` in `.env.local` to enable AI-generated
+   reports. Without it, the app falls back to high-quality local summaries.
+   See [.env.example](.env.example) for optional model/endpoint overrides.
 3. Run the app:
    `npm run dev`
+
+The server (Express + Vite middleware) listens on http://localhost:3000.
+
+## AI Models
+
+Reports are generated via DeepSeek's OpenAI-compatible API:
+
+- **deepseek-v4-pro** — deep security report reasoning (`DEEPSEEK_MODEL_PRO`)
+- **deepseek-v4-flash** — fast PentAGI log narration (`DEEPSEEK_MODEL_FLASH`)
