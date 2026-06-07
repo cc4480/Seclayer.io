@@ -186,4 +186,20 @@ describe('GET /api/enterprise/pentagi/logs', () => {
       .set('Authorization', `Bearer ${token}`);
     expect(res.status).toBe(400);
   });
+
+  it('returns 400 for SSRF/private targets', async () => {
+    const { token } = registerAndLogin(db);
+    for (const ssrfUrl of [
+      'http://localhost/admin',
+      'http://127.0.0.1:8080/secret',
+      'http://192.168.0.1/',
+      'http://10.0.0.1/internal',
+      'http://169.254.169.254/latest/meta-data/',
+    ]) {
+      const res = await request(app)
+        .get(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(ssrfUrl)}`)
+        .set('Authorization', `Bearer ${token}`);
+      expect(res.status, `Expected 400 for SSRF target: ${ssrfUrl}`).toBe(400);
+    }
+  });
 });

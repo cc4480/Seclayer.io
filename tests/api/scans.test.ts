@@ -128,6 +128,50 @@ describe('GET /api/scans/:id', () => {
   });
 });
 
+// ─── GET /api/scans/:id/logs ─────────────────────────────────────────────────
+
+describe('GET /api/scans/:id/logs', () => {
+  it('returns empty logs array for a scan with no logs', async () => {
+    const { token, user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/logs`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(Array.isArray(res.body.logs)).toBe(true);
+    expect(res.body.logs).toHaveLength(0);
+  });
+
+  it('returns 404 for a scan owned by a different user', async () => {
+    const { token } = registerAndLogin(db, 'u1@example.com');
+    const { user: u2 } = registerAndLogin(db, 'u2@example.com');
+    const scan = db.createScan(u2.id, 'https://private.example.com');
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/logs`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 404 for a non-existent scan', async () => {
+    const { token } = registerAndLogin(db);
+    const res = await request(app)
+      .get('/api/scans/scan_doesnotexist/logs')
+      .set('Authorization', `Bearer ${token}`);
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 401 without auth', async () => {
+    const { user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    const res = await request(app).get(`/api/scans/${scan.id}/logs`);
+    expect(res.status).toBe(401);
+  });
+});
+
 // ─── GET /api/scans/:id/report ───────────────────────────────────────────────
 
 describe('GET /api/scans/:id/report', () => {
@@ -161,5 +205,57 @@ describe('GET /api/scans/:id/report', () => {
       .set('Authorization', `Bearer ${token}`);
 
     expect(res.status).toBe(400);
+  });
+
+  it('returns the full report shape for a completed scan with findings', async () => {
+    const { token, user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    db.updateScan(scan.id, {
+      status: 'complete',
+      score: 62,
+      severity: 'high',
+      aiSummary: 'Executive summary text.',
+      findings: [
+        { id: 'f1', title: 'SQL Injection', description: 'Error-based SQLi', severity: 'critical', fix: 'Use parameterised queries', category: 'DAST' },
+        { id: 'f2', title: 'Missing HSTS', description: 'No HSTS header', severity: 'medium', fix: 'Add Strict-Transport-Security header', category: 'IAST' },
+      ],
+      completedAt: new Date().toISOString(),
+    });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/report`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      scanId: scan.id,
+      url: 'https://example.com',
+      score: 62,
+      severity: 'high',
+      aiSummary: 'Executive summary text.',
+    });
+    expect(Array.isArray(res.body.findings)).toBe(true);
+    expect(res.body.findings).toHaveLength(2);
+    expect(res.body.findings[0]).toMatchObject({ id: 'f1', severity: 'critical' });
+  });
+
+  it('returns 404 for a report belonging to another user', async () => {
+    const { token } = registerAndLogin(db, 'u1@example.com');
+    const { user: u2 } = registerAndLogin(db, 'u2@example.com');
+    const scan = db.createScan(u2.id, 'https://secret.example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 100, findings: [], completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/report`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 401 without auth', async () => {
+    const { user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    const res = await request(app).get(`/api/scans/${scan.id}/report`);
+    expect(res.status).toBe(401);
   });
 });
