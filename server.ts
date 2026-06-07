@@ -8,6 +8,7 @@ import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport } from './server/ai.js';
 import { runPentagiExploit } from './server/pentagi.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
+import { recordInteraction } from './server/oast.js';
 
 declare global {
   namespace Express {
@@ -120,6 +121,12 @@ export function createApp(dbInstance: LocalFileDb) {
   }
 
   // --- PUBLIC ROUTES ---
+
+  // OAST callback receiver — no auth, must respond instantly
+  app.all('/oast/:token', (req, res) => {
+    recordInteraction(req.params.token, req.ip || '', req.path, req.method);
+    res.status(200).send('');
+  });
 
   app.get('/api/system/health', (_req, res) => {
     res.json({ status: 'Online', version: 'v2.2.0', timestamp: new Date().toISOString() });
