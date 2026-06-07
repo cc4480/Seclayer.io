@@ -1,4 +1,5 @@
 import { Finding, Severity } from "../src/types.js";
+import { scoreFindings } from "./scoring.js";
 import crypto from "crypto";
 import net from "net";
 import * as dns from "dns/promises";
@@ -800,7 +801,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
   findings: Finding[];
 } {
   const findings: Finding[] = [];
-  let score = 100;
 
   // 1. EASM (External Attack Surface Management) checks
   if (!diag.sslSecure) {
@@ -813,7 +813,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Deploy a valid SSL/TLS certificate and configure permanent rewrite rules on port 80 to redirect HTTP traffic securely to HTTPS.",
       category: "EASM",
     });
-    score -= 30;
   }
 
   if (diag.techLeaked.length > 0) {
@@ -826,24 +825,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Disable verbose Server headers in nginx.conf or web.config and strip x-powered-by settings globally.",
       category: "EASM",
     });
-    score -= 5;
-  }
-
-  // Target live subdomains listed under external attack surface boundaries
-  const liveSubs = diag.easmPerimeter.subdomains.filter(
-    (s) => s.status === "live",
-  );
-  if (liveSubs.length > 0) {
-    findings.push({
-      id: "f_" + crypto.randomBytes(4).toString("hex"),
-      title: `Subdomain Attack Surface Discovery (${liveSubs.length} Hosts found)`,
-      description: `Discovered active subdomains resolving external services: ${liveSubs.map((s) => s.domain).join(", ")}. Unmonitored staging or development servers pose significant inventory leak risks.`,
-      severity: "medium",
-      confidence: "low",
-      fix: "Implement robust EASM continuous inventory. Shield staging environment credentials behind VPN access control policies.",
-      category: "EASM",
-    });
-    score -= 10;
   }
 
   // 2. IAST (Interactive Application Security / Defensive Rules) checks
@@ -858,7 +839,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Deploy restrictive CSP header directives like \"Content-Security-Policy: default-src 'self'; script-src 'self' https://trusted-origin.com\".",
       category: "IAST",
     });
-    score -= 20;
   }
 
   if (diag.missingHeaders.includes("strict-transport-security")) {
@@ -872,7 +852,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: 'Transmit the header: "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload" over all HTTPS targets.',
       category: "IAST",
     });
-    score -= 10;
   }
 
   if (diag.missingHeaders.includes("x-frame-options")) {
@@ -886,7 +865,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: 'Enforce "X-Frame-Options: DENY" or deploy CSP "frame-ancestors \'none\'" instructions.',
       category: "IAST",
     });
-    score -= 10;
   }
 
   diag.cookieIssues.forEach((issue) => {
@@ -899,7 +877,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Incorporate HttpOnly, Secure, and SameSite=Lax (or SameSite=Strict) properties inside set-cookie headers.",
       category: "IAST",
     });
-    score -= 10;
   });
 
   // 3. SAST (Static Code Security Analysis) checks
@@ -913,7 +890,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: sf.fix,
       category: "SAST",
     });
-    score -= sf.severity === "critical" ? 35 : sf.severity === "high" ? 25 : 15;
   });
 
   // 4. SCA (Software Composition Analysis) checks
@@ -927,7 +903,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: sca.fix,
       category: "SCA",
     });
-    score -= sca.severity === "high" ? 25 : 15;
   });
 
   // 5. DAST (Dynamic Application Security Probes) checks
@@ -941,7 +916,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: dast.fix,
       category: "DAST",
     });
-    score -= dast.severity === "high" ? 20 : 10;
   });
 
   // Probed Paths exposures check
@@ -959,7 +933,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: `Immediately strip dynamic routes to ${exp.path} inside server rewrite engines or configure .htaccess rules to return 403 blocks.`,
       category: "DAST",
     });
-    score -= 35;
   });
 
   // Compile Red Team aggressive probing findings
@@ -974,8 +947,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         fix: rt.fix,
         category: "RED_TEAM",
       });
-      // Deduct score dynamically based on aggressive vulnerability findings
-      score -= rt.severity === "critical" ? 25 : 15;
     });
   }
 
@@ -994,19 +965,11 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         rawRequest: api.rawRequest,
         rawResponse: api.rawResponse,
       });
-      score -= api.severity === "critical" ? 25 : 15;
     });
   }
 
-  // Cap score limits
-  score = Math.max(12, Math.min(100, score));
-
-  // Highest severity calculation
-  let severity: Severity = "low";
-  if (findings.some((f) => f.severity === "critical")) severity = "critical";
-  else if (findings.some((f) => f.severity === "high")) severity = "high";
-  else if (findings.some((f) => f.severity === "medium")) severity = "medium";
-  else if (findings.some((f) => f.severity === "low")) severity = "low";
-
+  // Score via the shared scoring module so the initial score and any later
+  // recalculation (after suppression) always use identical weights.
+  const { score, severity } = scoreFindings(findings);
   return { score, severity, findings };
 }
