@@ -1,6 +1,7 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { Shield, ShieldAlert, Terminal, RefreshCw, Key, ChevronRight, Activity, Cpu } from 'lucide-react';
+import { Terminal, RefreshCw, Cpu, AlertTriangle, ArrowLeft } from 'lucide-react';
 import { Scan } from '../types.js';
+import { apiFetch } from '../lib/api.js';
 
 interface ScanProgressProps {
   scanId: string;
@@ -11,52 +12,44 @@ interface ScanProgressProps {
 export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanProgressProps) {
   const [scan, setScan] = useState<Scan | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
-  const [pollCount, setPollCount] = useState(0);
   const [progressPercent, setProgressPercent] = useState(10);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Micro-event telemetry config mapping
+  // Micro-event activity feed
   const microEventsConfig: Record<string, string[]> = {
     initial: [
-      "Establishing system control loop metrics...",
-      "Validating credential token authorization...",
-      "Provisioning safe worker environments on Kubernetes clusters..."
+      'Establishing system control loop metrics...',
+      'Validating credential token authorization...',
+      'Provisioning safe worker environments...',
     ],
     queued: [
-      "Querying target perimeter socket state and port matrices...",
-      "Amass network asset discovery worker enqueued in background...",
-      "Resolving public Domain & DNS records structure...",
-      "Pre-fetching certificate transparency logs ledger..."
+      'Querying target perimeter socket state...',
+      'Resolving public Domain & DNS records structure...',
+      'Pre-fetching certificate transparency logs ledger...',
     ],
     scanning: [
-      "Katana crawler starting up headless browser subprocess...",
-      "Injecting raw SQL validation payloads into input elements...",
-      "Hadrian rotating authentication roles for BOLA matrices...",
-      "APISCAN sending Swagger-defined validation parameters...",
-      "Evaluating Strict-Transport-Security policy headers..."
+      'Checking SSL protocol schemas on host connection...',
+      'Evaluating Strict-Transport-Security policy headers...',
+      'Probing common sensitive paths for exposures...',
     ],
     analyzing: [
-      "DongTai passive tracer agent hooked inside backend JVM/Python...",
-      "Tracing user input taint variables in query executors...",
-      "DefectDojo parser validating static vs dynamic findings...",
-      "Deploying PentAGI autonomous exploitation agents...",
-      "Calculating posture weights and severity metrics..."
+      'Forwarding diagnostics to DeepSeek AI...',
+      'Calculating posture weights and severity metrics...',
+      'Compiling developer-readable remediation guidance...',
     ],
     complete: [
-      "Syncing defect ledger entries inside DefectDojo controller...",
-      "All sandbox diagnostic endpoints completely cleared...",
-      "Safely tearing down ephemeral agent runtimes...",
-      "Vulnerability signatures archived. Scan complete."
-    ]
+      'All diagnostic endpoints cleared...',
+      'Vulnerability signatures archived.',
+      'Report compiled successfully.',
+    ],
   };
 
   const [activeEvents, setActiveEvents] = useState<{ time: string; msg: string }[]>([]);
 
-  // Ticker for micro-events real-time feed
   useEffect(() => {
     const t = new Date().toLocaleTimeString();
     const currentStatus = scan?.status || 'initial';
-    const firstEvent = microEventsConfig[currentStatus]?.[0] || 'Provisioning security pipeline daemon...';
+    const firstEvent = microEventsConfig[currentStatus]?.[0] || 'Provisioning security pipeline...';
     setActiveEvents([{ time: t, msg: firstEvent }]);
 
     let idx = 1;
@@ -65,11 +58,7 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
       const list = microEventsConfig[statusGroup] || [];
       if (list.length > 0) {
         const tNow = new Date().toLocaleTimeString();
-        const eventText = list[idx % list.length];
-        setActiveEvents(prev => [
-          { time: tNow, msg: eventText },
-          ...prev.slice(0, 4)
-        ]);
+        setActiveEvents(prev => [{ time: tNow, msg: list[idx % list.length] }, ...prev.slice(0, 4)]);
         idx++;
       }
     }, 1800);
@@ -77,111 +66,115 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
     return () => clearInterval(interval);
   }, [scan?.status]);
 
-  // Poll for scan status
+  // Poll scan status
   useEffect(() => {
     let active = true;
     let pollTimer: NodeJS.Timeout;
 
     const fetchStatus = async () => {
       try {
-        const res = await fetch(`/api/scans/${scanId}`);
+        const res = await apiFetch(`/api/scans/${scanId}`);
         const data = await res.json();
-        
         if (!active) return;
-        
+
         if (data.scan) {
           const currentScan = data.scan as Scan;
           setScan(currentScan);
 
-          // Complete route
           if (currentScan.status === 'complete') {
             setProgressPercent(100);
-            addLog(`[SYSTEM] Executive scan complete. Security score compiled: ${currentScan.score || 'N/A'}/100.`);
-            addLog(`[SYSTEM] Report ready for review.`);
-            
-            // Auto-trigger completion after brief delay
-            setTimeout(() => {
-              if (active) onScanFinished(scanId);
-            }, 1000);
+            setTimeout(() => { if (active) onScanFinished(scanId); }, 1000);
             return;
           }
-
           if (currentScan.status === 'failed') {
             setProgressPercent(100);
-            addLog(`[FATAL] Scanner terminated unexpectedly: ${currentScan.error || 'Connection Timeout'}`);
             return;
           }
 
-          // Advance progression bar corresponding to state
-          if (currentScan.status === 'queued') {
-            setProgressPercent(20);
-          } else if (currentScan.status === 'scanning') {
-            setProgressPercent(50);
-          } else if (currentScan.status === 'analyzing') {
-            setProgressPercent(80);
-          }
+          setProgressPercent(
+            currentScan.status === 'queued' ? 20 :
+            currentScan.status === 'scanning' ? 50 :
+            currentScan.status === 'analyzing' ? 80 : 10
+          );
         }
       } catch (err) {
         console.error('Error polling scan status:', err);
       }
-
-      setPollCount(p => p + 1);
     };
 
     fetchStatus();
     pollTimer = setInterval(fetchStatus, 3000);
+    return () => { active = false; clearInterval(pollTimer); };
+  }, [scanId]);
 
-    return () => {
-      active = false;
-      clearInterval(pollTimer);
-    };
-  }, [scanId, pollCount]);
-
-  // Handle UI scrolling logs to visualize scanning mechanics relative to progression
+  // Poll real logs from backend
   useEffect(() => {
-    if (!scan) return;
-    
-    const logsList: string[] = [];
-    const timestamp = () => new Date().toLocaleTimeString();
+    let active = true;
+    let logTimer: NodeJS.Timeout;
 
-    logsList.push(`[${timestamp()}] [SYSTEM] Enqueued target url: ${scan.url}`);
-    logsList.push(`[${timestamp()}] [SYSTEM] Provisioned security daemon pipeline.`);
+    const fetchLogs = async () => {
+      try {
+        const res = await apiFetch(`/api/scans/${scanId}/logs`);
+        if (res.ok) {
+          const data = await res.json();
+          if (active && data.logs?.length > 0) {
+            setLogs(data.logs);
+          }
+        }
+      } catch (err) {
+        console.error('Error polling scan logs:', err);
+      }
+    };
 
-    if (scan.status === 'scanning' || scan.status === 'analyzing' || scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [DAEMON] Checking SSL protocol schemas on host connection...`);
-      logsList.push(`[${timestamp()}] [DAEMON] Established socket on port 443.`);
-      logsList.push(`[${timestamp()}] [HEADERS] Requesting GET on root host location...`);
-      logsList.push(`[${timestamp()}] [HEADERS] Response code: 200. Parsing key security signatures...`);
-    }
-
-    if (scan.status === 'analyzing' || scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [AUDIT] Analyzing standard HTTP headers checklist...`);
-      logsList.push(`[${timestamp()}] [AUDIT] Cross-checking Cookie flag parameters: HttpOnly, Secure, SameSite.`);
-      logsList.push(`[${timestamp()}] [PROBES] Testing typical site exposures: /.env, /.git/config, /admin, /wp-admin, /phpinfo.php...`);
-      logsList.push(`[${timestamp()}] [DEEPSEEK] Forwarding parsed diagnostic elements to DeepSeek Intelligence...`);
-      logsList.push(`[${timestamp()}] [DEEPSEEK] Compiling plain-English analysis and developer fixes...`);
-    }
-
-    if (scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [SYSTEM] Report successfully persisted.`);
-    }
-
-    setLogs(logsList);
-  }, [scan?.status]);
+    fetchLogs();
+    logTimer = setInterval(fetchLogs, 2000);
+    return () => { active = false; clearInterval(logTimer); };
+  }, [scanId]);
 
   useEffect(() => {
     logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [logs]);
 
-  const addLog = (msg: string) => {
-    setLogs(prev => [...prev, `[${new Date().toLocaleTimeString()}] ${msg}`]);
-  };
+  if (scan?.status === 'failed') {
+    return (
+      <div className="min-h-screen bg-[#09090b] text-[#a1a1aa] py-20 px-6 flex items-center justify-center">
+        <div className="max-w-2xl w-full bg-[#0c0c0e] border border-[#f87171]/30 p-8 rounded shadow-2xl space-y-6">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-full bg-[#f87171]/10 border border-[#f87171]/20 flex items-center justify-center shrink-0">
+              <AlertTriangle className="w-6 h-6 text-[#f87171]" />
+            </div>
+            <div>
+              <p className="text-xs font-mono text-[#f87171] uppercase tracking-widest font-bold">Scan Failed</p>
+              <h2 className="text-white font-mono font-bold text-lg truncate">{scan.url}</h2>
+            </div>
+          </div>
+
+          <div className="bg-black border border-[#27272a] rounded p-4 font-mono text-sm text-[#f87171]">
+            {scan.error || 'An unexpected error occurred during the scan. The target may be unreachable or blocked our probes.'}
+          </div>
+
+          {logs.length > 0 && (
+            <div className="bg-black border border-[#27272a] rounded p-4 max-h-40 overflow-y-auto space-y-1 font-mono text-[11px] text-[#a1a1aa]">
+              {logs.map((log, i) => <div key={i} className={log.includes('[ERROR]') ? 'text-[#f87171]' : ''}>{log}</div>)}
+            </div>
+          )}
+
+          <button
+            onClick={onCancel}
+            className="flex items-center gap-2 text-xs font-mono text-[#52525b] hover:text-white transition-colors cursor-pointer"
+          >
+            <ArrowLeft className="w-4 h-4" />
+            Back to dashboard
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-[#09090b] text-[#a1a1aa] py-20 px-6 flex items-center justify-center">
       <div className="max-w-2xl w-full space-y-8 bg-[#0c0c0e] border border-[#27272a] p-8 rounded shadow-2xl relative overflow-hidden">
-        
-        {/* Background visual highlight */}
+
         <div className="absolute right-0 top-0 bg-[#22c55e]/5 w-96 h-96 rounded-full blur-3xl pointer-events-none" />
 
         <div className="text-center space-y-4">
@@ -200,32 +193,30 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
           </div>
         </div>
 
-        {/* Dynamic progression loader */}
+        {/* Progression bar */}
         <div className="space-y-3">
           <div className="flex justify-between items-baseline font-mono text-xs">
             <span className="text-[#52525b]">Scan Pipeline Progression</span>
             <span className="text-[#22c55e] font-bold">{progressPercent}%</span>
           </div>
-          <div className="w-full bg-black h-2.5 rounded overflow-hidden border border-[#27272a] relative after:absolute after:inset-0 after:bg-gradient-to-r after:from-transparent after:via-[#22c55e]/15 after:to-transparent after:animate-shimmer after:pointer-events-none">
-            <div 
+          <div className="w-full bg-black h-2.5 rounded overflow-hidden border border-[#27272a]">
+            <div
               className="bg-gradient-to-r from-[#22c55e] to-emerald-400 h-full transition-all duration-700 rounded-full relative"
               style={{ width: `${progressPercent}%` }}
             >
-              {/* Pulsing shadow tip emitter */}
               <span className="absolute right-0 top-0 bottom-0 w-3 bg-white/45 blur-[1.5px] rounded-full animate-pulse" />
             </div>
           </div>
 
-          {/* Secondary Non-Animated Buffer Status Bar */}
           <div className="pt-1.5 pb-2.5 space-y-1 border-t border-[#27272a]/20 mt-1">
             <div className="flex justify-between items-center text-[10px] font-mono text-[#52525b] uppercase tracking-wider">
               <span className="flex items-center gap-1.5">
                 <span className="w-1 h-1 rounded-full bg-[#22c55e] inline-block animate-pulse" />
-                <span>Buffer Sub-Task: <span className="text-zinc-350 normal-case font-bold">{
-                  scan?.status === 'queued' ? 'Pre-execution checklist & Docker orchestration' :
-                  scan?.status === 'scanning' ? 'DAST probing / Dynamic multi-stage payload injection' :
-                  scan?.status === 'analyzing' ? 'ASPM analyzing & DongTai IAST trace correlation' :
-                  scan?.status === 'complete' ? 'Report compiled / Synchronizing database findings' :
+                <span>Sub-Task: <span className="text-zinc-350 normal-case font-bold">{
+                  scan?.status === 'queued' ? 'Pre-execution checklist & infrastructure provisioning' :
+                  scan?.status === 'scanning' ? 'DAST probing / dynamic payload injection' :
+                  scan?.status === 'analyzing' ? 'AI analysis & severity scoring' :
+                  scan?.status === 'complete' ? 'Report compiled / database sync' :
                   'Initializing target pipeline...'
                 }</span></span>
               </span>
@@ -233,19 +224,17 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
                 scan?.status === 'queued' ? '40%' :
                 scan?.status === 'scanning' ? '70%' :
                 scan?.status === 'analyzing' ? '92%' :
-                scan?.status === 'complete' ? '100%' :
-                '0%'
+                scan?.status === 'complete' ? '100%' : '0%'
               }</span>
             </div>
             <div className="w-full bg-black h-1 rounded overflow-hidden border border-[#27272a]/60">
-              <div 
+              <div
                 className="bg-[#22c55e]/60 h-full transition-all duration-500 rounded-full"
-                style={{ 
+                style={{
                   width: scan?.status === 'queued' ? '40%' :
                          scan?.status === 'scanning' ? '70%' :
                          scan?.status === 'analyzing' ? '92%' :
-                         scan?.status === 'complete' ? '100%' :
-                         '0%' 
+                         scan?.status === 'complete' ? '100%' : '0%',
                 }}
               />
             </div>
@@ -262,45 +251,41 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
           </div>
         </div>
 
-        {/* Terminal logs component */}
+        {/* Terminal logs — real events from backend */}
         <div className="bg-black border border-[#27272a] rounded p-5 overflow-hidden">
           <div className="flex items-center space-x-2 border-b border-[#27272a]/40 pb-3 mb-4">
             <Terminal className="w-4 h-4 text-[#22c55e] shrink-0" />
-            <span className="text-[10px] font-mono text-[#52525b] uppercase tracking-widest">Scanner Console outputs</span>
+            <span className="text-[10px] font-mono text-[#52525b] uppercase tracking-widest">Scanner Console</span>
           </div>
 
           <div className="space-y-1.5 max-h-48 overflow-y-auto font-mono text-[11px] leading-relaxed text-[#a1a1aa] select-all scrollbar-thin">
-            {logs.map((log, index) => {
-              let textClass = 'text-[#a1a1aa]';
-              if (log.includes('[SYSTEM]')) textClass = 'text-[#22c55e] font-semibold';
-              if (log.includes('[DAEMON]')) textClass = 'text-purple-400';
-              if (log.includes('[DEEPSEEK]')) textClass = 'text-amber-400';
-              if (log.includes('[FATAL]')) textClass = 'text-[#f87171] font-bold';
-              return (
-                <div key={index} className={textClass}>
-                  {log}
-                </div>
-              );
-            })}
+            {logs.length === 0 ? (
+              <div className="text-[#52525b] animate-pulse">Connecting to scanner daemon...</div>
+            ) : (
+              logs.map((log, index) => {
+                let textClass = 'text-[#a1a1aa]';
+                if (log.includes('[SYSTEM]') || log.includes('[COMPLETE]')) textClass = 'text-[#22c55e] font-semibold';
+                if (log.includes('[SCANNER]') || log.includes('[DAST]') || log.includes('[HEADERS]') || log.includes('[EASM]')) textClass = 'text-purple-400';
+                if (log.includes('[AI]')) textClass = 'text-amber-400';
+                if (log.includes('[ERROR]')) textClass = 'text-[#f87171] font-bold';
+                return <div key={index} className={textClass}>{log}</div>;
+              })
+            )}
             <div ref={logsEndRef} />
           </div>
         </div>
 
-        {/* Actions panel */}
-        <div 
-          id="cancel-scan-btn-container" 
-          className="border-t border-[#27272a] pt-5 space-y-4 font-mono text-xs text-[#52525b]"
-        >
-          {/* Micro-Event Telemetry Activity Feed */}
+        {/* Actions panel with micro-event activity feed */}
+        <div className="border-t border-[#27272a] pt-5 space-y-4 font-mono text-xs text-[#52525b]">
           <div className="space-y-2">
             <div className="flex items-center justify-between border-b border-[#27272a]/20 pb-1.5">
               <span className="text-[10px] font-mono text-[#22c55e] uppercase tracking-widest flex items-center gap-1.5 font-bold">
                 <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] inline-block animate-ping" />
-                <span>Live Pipeline Microcheck Activity</span>
+                <span>Live Pipeline Activity</span>
               </span>
               <span className="text-[9px] text-[#52525b] font-bold">REAL-TIME FEED</span>
             </div>
-            
+
             <div className="bg-black/80 border border-[#27272a]/60 rounded p-3 h-28 overflow-y-auto space-y-1.5 scrollbar-thin select-all">
               {activeEvents.length === 0 ? (
                 <div className="text-[#52525b] text-[10px] animate-pulse">Establishing pipeline trace stream...</div>

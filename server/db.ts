@@ -1,157 +1,55 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
+import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget, AuthProfile } from '../src/types.js';
 
-const DB_FILE = path.join(process.cwd(), 'db.json');
+const DEFAULT_DB_FILE = path.join(process.cwd(), 'db.json');
+
+// Server-only user record — passwordHash is never sent to the client
+interface DbUser extends Omit<User, never> {
+  passwordHash?: string;
+}
 
 interface DbSchema {
-  users: Record<string, User>;
+  users: Record<string, DbUser>;
   scans: Record<string, Scan>;
   transactions: CreditTransaction[];
   apiKeys: Record<string, ApiKey>;
-  suppressions?: SuppressionRule[];
-  monitoredTargets?: MonitoredTarget[];
+  suppressions: SuppressionRule[];
+  monitoredTargets: MonitoredTarget[];
+  authProfiles: Record<string, AuthProfile>;
 }
 
-// Initial seed data to make the app look stunning and populated out-of-the-box
-const INITIAL_DEMO_SCANS: Record<string, Scan> = {
-  'demo-scan-1': {
-    id: 'demo-scan-1',
-    userId: 'user_default',
-    url: 'https://seclayer.io',
-    status: 'complete',
-    score: 94,
-    severity: 'low',
-    createdAt: new Date(Date.now() - 3600000 * 48).toISOString(), // 2 days ago
-    completedAt: new Date(Date.now() - 3600000 * 47.9).toISOString(),
-    aiSummary: "The target website is exceptionally well-secured. All standard security headers are present with secure configurations. SSL/TLS is modern and correctly configured. The server does not leak technological implementations, which limits vector fingerprinting. Minor adjustments are suggested for Subresource Integrity (SRI) on external scripts.",
-    findings: [
-      {
-        id: 'finding-1',
-        title: 'Missing Subresource Integrity (SRI) on external vendor assets',
-        description: 'Several script tags loaded from third-party CDNs (including analytical resources) do not feature integrity hashes. If these vendors are compromised, malicious code could run in visitors\' browser context.',
-        severity: 'low',
-        fix: 'Add the integrity="" attribute with correct SHA-384 hashes and crossorigin="anonymous" to all external script and stylesheet links.',
-        category: 'Client-side Security'
-      },
-      {
-        id: 'finding-2',
-        title: 'TLS 1.2 Suite with mild preference for CBC ciphers',
-        description: 'The server supports TLS 1.2 with certain Cipher-Block Chaining (CBC) suites enabled. While not actively exploitable, transitioning to fully authenticated AEAD ciphers represents superior hygiene.',
-        severity: 'info',
-        fix: 'Update the server TLS cipher string to prefer GCM/CHACHA20 suites and deprecate CBC-mode ciphers where legacy client compatibility allows.',
-        category: 'Cryptography'
-      }
-    ]
-  },
-  'demo-scan-2': {
-    id: 'demo-scan-2',
-    userId: 'user_default',
-    url: 'https://vulnerable-test-shop.org',
-    status: 'complete',
-    score: 41,
-    severity: 'high',
-    createdAt: new Date(Date.now() - 3600000 * 120).toISOString(), // 5 days ago
-    completedAt: new Date(Date.now() - 3600000 * 119.8).toISOString(),
-    aiSummary: "The application exhibits severe perimeter exposures. Multiple critical issues were uncovered, including high-risk directory listing, sensitive file leakage (.env containing database credentials), and completely missing anti-framing and modern script protection policies (missing Content-Security-Policy). Remediation represents an urgent requirement to avoid data exfiltration or site hijacking.",
-    findings: [
-      {
-        id: 'finding-3',
-        title: 'Exposed Environment Configuration File (.env)',
-        description: 'A raw /.env configuration file was detected and read via root directory probing. This file contains active credentials, including database passwords, Stripe private keys, and SMTP server logins.',
-        severity: 'critical',
-        fix: 'Immediately change all leaked credentials. Move the .env file completely out of the public serving directory (web root) and verify server configuration rules block requests to dotfiles.',
-        category: 'Information Leakage'
-      },
-      {
-        id: 'finding-4',
-        title: 'Directory Listing Enabled on /uploads',
-        description: 'Requesting /uploads returns a directory index listing all raw filenames. This allows unauthorized exploration of customer assets, user attachments, and server filesystem details.',
-        severity: 'medium',
-        fix: 'Disable index lists globally in the HTTP server configuration (e.g., `Options -Indexes` in Apache or removing `autoindex on;` in nginx).',
-        category: 'Access Control'
-      },
-      {
-        id: 'finding-5',
-        title: 'Missing Content-Security-Policy (CSP) Header',
-        description: 'The response does not contain a Content-Security-Policy header. Browsers are left vulnerable to Cross-Site Scripting (XSS) and data injection attacks.',
-        severity: 'high',
-        fix: 'Implement a strict CSP header declaring trusted sources for scripts, styles, images, and frame origins. Utilize nonces or hashes for inline content.',
-        category: 'Headers Security'
-      },
-      {
-        id: 'finding-6',
-        title: 'X-Powered-By Exposure: PHP 7.4.3',
-        description: 'The server response header leaks both technology and precise versioning strings (PHP/7.4.3). This aids malicous operators in target matching against known platform CVEs.',
-        severity: 'low',
-        fix: 'Disable the X-Powered-By header via server configuration or runtime flags (e.g., set expose_php = Off in php.ini).',
-        category: 'Information Leakage'
-      }
-    ]
-  }
-};
-
-class LocalFileDb {
+export class LocalFileDb {
   private data: DbSchema;
+  private readonly dbFilePath: string;
+  private readonly scanLogs = new Map<string, string[]>();
 
-  constructor() {
+  constructor(dbFilePath: string = DEFAULT_DB_FILE) {
+    this.dbFilePath = dbFilePath;
     this.data = {
       users: {},
       scans: {},
       transactions: [],
       apiKeys: {},
       suppressions: [],
-      monitoredTargets: []
+      monitoredTargets: [],
+      authProfiles: {},
     };
     this.load();
   }
 
   private load() {
     try {
-      if (fs.existsSync(DB_FILE)) {
-        const fileContent = fs.readFileSync(DB_FILE, 'utf8');
-        this.data = JSON.parse(fileContent);
-        if (!this.data.suppressions) {
-          this.data.suppressions = [];
-        }
-        if (!this.data.monitoredTargets) {
-          this.data.monitoredTargets = [];
-        }
-      } else {
-        // Seed default user and default data
-        const defaultUser: User = {
-          id: 'user_default',
-          email: 'c.c4480131515@gmail.com',
-          credits: 10,
-          apiKey: 'sl_live_' + crypto.randomBytes(16).toString('hex'),
-          createdAt: new Date().toISOString()
+      if (fs.existsSync(this.dbFilePath)) {
+        const raw = fs.readFileSync(this.dbFilePath, 'utf8');
+        const parsed = JSON.parse(raw) as DbSchema;
+        this.data = {
+          suppressions: [],
+          monitoredTargets: [],
+          authProfiles: {},
+          ...parsed,
         };
-        
-        this.data.users[defaultUser.id] = defaultUser;
-        this.data.scans = { ...INITIAL_DEMO_SCANS };
-        
-        // Seed default transactions
-        this.data.transactions.push({
-          id: 'tx-seed',
-          userId: 'user_default',
-          amount: 10,
-          type: 'purchase',
-          stripeSessionId: 'cs_test_initial_provision',
-          createdAt: new Date().toISOString()
-        });
-
-        // Seed API key matching the user's default key
-        this.data.apiKeys[defaultUser.apiKey] = {
-          id: 'key-default',
-          userId: 'user_default',
-          key: defaultUser.apiKey,
-          credits: 10,
-          active: true,
-          createdAt: new Date().toISOString()
-        };
-
-        this.save();
       }
     } catch (err) {
       console.error('Error loading DB file:', err);
@@ -160,79 +58,98 @@ class LocalFileDb {
 
   private save() {
     try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.writeFileSync(this.dbFilePath, JSON.stringify(this.data, null, 2), 'utf8');
     } catch (err) {
       console.error('Error saving DB file:', err);
     }
   }
 
-  // --- Users ---
-  getUser(id: string): User | undefined {
-    return this.data.users[id];
+  private toPublicUser(u: DbUser): User {
+    const { passwordHash: _, ...pub } = u as any;
+    return pub as User;
   }
 
-  getOrCreateUser(email: string): User {
-    const normEmail = email.toLowerCase().trim();
-    let user = Object.values(this.data.users).find(u => u.email.toLowerCase() === normEmail);
-    if (!user) {
-      const id = 'user_' + crypto.randomBytes(6).toString('hex');
-      const apiKey = 'sl_live_' + crypto.randomBytes(16).toString('hex');
-      user = {
-        id,
-        email: normEmail,
-        credits: 5, // 5 signup credits
-        apiKey,
-        createdAt: new Date().toISOString()
-      };
-      this.data.users[id] = user;
-      
-      // Seed initial credit transaction
-      this.data.transactions.push({
-        id: 'tx-signup-' + id,
-        userId: id,
-        amount: 5,
-        type: 'purchase',
-        createdAt: new Date().toISOString()
-      });
+  // --- Auth ---
+  findUserByEmail(email: string): DbUser | null {
+    const norm = email.toLowerCase().trim();
+    return Object.values(this.data.users).find(u => u.email.toLowerCase() === norm) || null;
+  }
 
-      // Create matching API key record
-      this.data.apiKeys[apiKey] = {
-        id: 'key-' + id,
-        userId: id,
-        key: apiKey,
-        credits: 5,
-        active: true,
-        createdAt: new Date().toISOString()
-      };
-
-      this.save();
+  registerUser(email: string, passwordHash: string): User {
+    const norm = email.toLowerCase().trim();
+    if (this.findUserByEmail(norm)) {
+      throw new Error('An account with this email already exists.');
     }
-    return user;
+
+    const id = 'user_' + crypto.randomBytes(8).toString('hex');
+    const apiKey = 'sl_live_' + crypto.randomBytes(20).toString('hex');
+
+    const newUser: DbUser = {
+      id,
+      email: norm,
+      credits: 5,
+      apiKey,
+      createdAt: new Date().toISOString(),
+      passwordHash,
+    };
+
+    this.data.users[id] = newUser;
+
+    // Signup credit grant
+    this.data.transactions.push({
+      id: 'tx_signup_' + id,
+      userId: id,
+      amount: 5,
+      type: 'purchase',
+      createdAt: new Date().toISOString(),
+    });
+
+    // Matching API key record
+    this.data.apiKeys[apiKey] = {
+      id: 'key_' + crypto.randomBytes(8).toString('hex'),
+      userId: id,
+      key: apiKey,
+      credits: 5,
+      active: true,
+      createdAt: new Date().toISOString(),
+    };
+
+    this.save();
+    return this.toPublicUser(newUser);
+  }
+
+  // --- Users ---
+  getUser(id: string): User | undefined {
+    const u = this.data.users[id];
+    return u ? this.toPublicUser(u) : undefined;
+  }
+
+  getDbUser(id: string): DbUser | undefined {
+    return this.data.users[id];
   }
 
   addCredits(userId: string, amount: number, type: 'purchase' | 'scan_debit', stripeSessionId?: string): User {
     const user = this.data.users[userId];
     if (!user) throw new Error('User not found');
     user.credits = Math.max(0, user.credits + amount);
-    
-    // Also mirror credits on API key active entries
+
+    // Mirror credits on active API keys
     Object.values(this.data.apiKeys).forEach(k => {
       if (k.userId === userId && k.active) {
         k.credits = user.credits;
       }
     });
 
-    const tx: CreditTransaction = {
+    this.data.transactions.push({
       id: 'tx_' + crypto.randomBytes(8).toString('hex'),
       userId,
       amount,
       type,
       stripeSessionId,
-      createdAt: new Date().toISOString()
-    };
-    this.data.transactions.push(tx);
+      createdAt: new Date().toISOString(),
+    });
     this.save();
-    return user;
+    return this.toPublicUser(user);
   }
 
   deductCredits(userId: string, amount: number): boolean {
@@ -240,6 +157,10 @@ class LocalFileDb {
     if (!user || user.credits < amount) return false;
     this.addCredits(userId, -amount, 'scan_debit');
     return true;
+  }
+
+  getTransactions(userId: string): CreditTransaction[] {
+    return this.data.transactions.filter(t => t.userId === userId);
   }
 
   // --- Scans ---
@@ -254,14 +175,14 @@ class LocalFileDb {
   }
 
   createScan(userId: string, url: string, authHeader?: string): Scan {
-    const id = 'scan_' + crypto.randomBytes(8).toString('hex');
+    const id = 'scan_' + crypto.randomBytes(10).toString('hex');
     const scan: Scan = {
       id,
       userId,
       url,
       authHeader,
       status: 'queued',
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
     this.data.scans[id] = scan;
     this.save();
@@ -271,11 +192,7 @@ class LocalFileDb {
   updateScan(id: string, updates: Partial<Scan>): Scan {
     const scan = this.data.scans[id];
     if (!scan) throw new Error('Scan not found');
-    
-    this.data.scans[id] = {
-      ...scan,
-      ...updates
-    };
+    this.data.scans[id] = { ...scan, ...updates };
     this.save();
     return this.data.scans[id];
   }
@@ -285,21 +202,23 @@ class LocalFileDb {
     return Object.values(this.data.apiKeys).filter(k => k.userId === userId);
   }
 
+  findApiKey(keyStr: string): ApiKey | null {
+    return this.data.apiKeys[keyStr] || null;
+  }
+
   generateApiKey(userId: string): ApiKey {
     const user = this.data.users[userId];
     if (!user) throw new Error('User not found');
     const id = 'key_' + crypto.randomBytes(8).toString('hex');
-    const keyStr = 'sl_live_' + crypto.randomBytes(16).toString('hex');
-    
+    const keyStr = 'sl_live_' + crypto.randomBytes(20).toString('hex');
     const keyObj: ApiKey = {
       id,
       userId,
       key: keyStr,
       credits: user.credits,
       active: true,
-      createdAt: new Date().toISOString()
+      createdAt: new Date().toISOString(),
     };
-    
     this.data.apiKeys[keyStr] = keyObj;
     this.save();
     return keyObj;
@@ -316,56 +235,37 @@ class LocalFileDb {
   validateApiKeyAndDeduct(apiKeyString: string, quantity: number = 1): User | null {
     const keyObj = this.data.apiKeys[apiKeyString];
     if (!keyObj || !keyObj.active) return null;
-    
     const user = this.data.users[keyObj.userId];
     if (!user || user.credits < quantity) return null;
-
-    // Deduct credit
     this.addCredits(user.id, -quantity, 'scan_debit');
-    return user;
+    return this.toPublicUser(user);
   }
 
-  // --- Suppression Rules (False Positives Management) ---
+  // --- Suppression Rules ---
   listSuppressions(userId: string): SuppressionRule[] {
-    return (this.data.suppressions || []).filter(s => s.userId === userId);
+    return this.data.suppressions.filter(s => s.userId === userId);
   }
 
   addSuppression(userId: string, targetUrl: string, findingTitle: string, reason: string): SuppressionRule {
     const id = 'supp_' + crypto.randomBytes(8).toString('hex');
-    const rule: SuppressionRule = {
-      id,
-      userId,
-      targetUrl,
-      findingTitle,
-      reason,
-      createdAt: new Date().toISOString()
-    };
-    if (!this.data.suppressions) {
-      this.data.suppressions = [];
-    }
+    const rule: SuppressionRule = { id, userId, targetUrl, findingTitle, reason, createdAt: new Date().toISOString() };
     this.data.suppressions.push(rule);
 
-    // Apply suppression retroactively to all existing scans for this user & URL
     Object.values(this.data.scans).forEach(scan => {
       if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(targetUrl)) {
         let dirty = false;
         if (scan.findings) {
-          scan.findings = scan.findings.map(finding => {
-            if (finding.title === findingTitle) {
+          scan.findings = scan.findings.map(f => {
+            if (f.title === findingTitle) {
               dirty = true;
-              return {
-                ...finding,
-                isFalsePositive: true,
-                suppressionReason: reason,
-                suppressedAt: rule.createdAt
-              };
+              return { ...f, isFalsePositive: true, suppressionReason: reason, suppressedAt: rule.createdAt };
             }
-            return finding;
+            return f;
           });
           if (dirty) {
-            const recalc = recalculateScore(scan.findings);
-            scan.score = recalc.score;
-            scan.severity = recalc.severity;
+            const r = recalculateScore(scan.findings);
+            scan.score = r.score;
+            scan.severity = r.severity;
           }
         }
       }
@@ -376,48 +276,39 @@ class LocalFileDb {
   }
 
   removeSuppression(userId: string, ruleId: string): boolean {
-    if (!this.data.suppressions) return false;
-    const initialLen = this.data.suppressions.length;
     const ruleToRemove = this.data.suppressions.find(r => r.id === ruleId && r.userId === userId);
     if (!ruleToRemove) return false;
 
     this.data.suppressions = this.data.suppressions.filter(r => !(r.id === ruleId && r.userId === userId));
-    const finalLen = this.data.suppressions.length;
 
-    if (initialLen !== finalLen) {
-      // Un-suppress retroactively as well
-      Object.values(this.data.scans).forEach(scan => {
-        if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(ruleToRemove.targetUrl)) {
-          let dirty = false;
-          if (scan.findings) {
-            scan.findings = scan.findings.map(finding => {
-              if (finding.title === ruleToRemove.findingTitle) {
-                dirty = true;
-                const updated = { ...finding };
-                delete updated.isFalsePositive;
-                delete updated.suppressionReason;
-                delete updated.suppressedAt;
-                return updated;
-              }
-              return finding;
-            });
-            if (dirty) {
-              const recalc = recalculateScore(scan.findings);
-              scan.score = recalc.score;
-              scan.severity = recalc.severity;
+    Object.values(this.data.scans).forEach(scan => {
+      if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(ruleToRemove.targetUrl)) {
+        let dirty = false;
+        if (scan.findings) {
+          scan.findings = scan.findings.map(f => {
+            if (f.title === ruleToRemove.findingTitle) {
+              dirty = true;
+              const { isFalsePositive: _, suppressionReason: __, suppressedAt: ___, ...rest } = f as any;
+              return rest;
             }
+            return f;
+          });
+          if (dirty) {
+            const r = recalculateScore(scan.findings);
+            scan.score = r.score;
+            scan.severity = r.severity;
           }
         }
-      });
-      this.save();
-      return true;
-    }
-    return false;
+      }
+    });
+
+    this.save();
+    return true;
   }
 
   // --- Monitored Targets ---
   listMonitoredTargets(userId: string): MonitoredTarget[] {
-    return (this.data.monitoredTargets || []).filter(t => t.userId === userId);
+    return this.data.monitoredTargets.filter(t => t.userId === userId);
   }
 
   addMonitoredTarget(userId: string, url: string, frequencyDays: number, scheduleString?: string): MonitoredTarget {
@@ -429,55 +320,63 @@ class LocalFileDb {
       frequencyDays,
       scheduleString,
       createdAt: new Date().toISOString(),
-      nextScanAt: new Date(Date.now() + frequencyDays * 24 * 60 * 60 * 1000).toISOString()
+      nextScanAt: new Date(Date.now() + frequencyDays * 86400000).toISOString(),
     };
-    if (!this.data.monitoredTargets) {
-      this.data.monitoredTargets = [];
-    }
     this.data.monitoredTargets.push(target);
     this.save();
     return target;
   }
 
   removeMonitoredTarget(userId: string, id: string): boolean {
-    if (!this.data.monitoredTargets) return false;
-    const initialLen = this.data.monitoredTargets.length;
+    const before = this.data.monitoredTargets.length;
     this.data.monitoredTargets = this.data.monitoredTargets.filter(t => !(t.id === id && t.userId === userId));
-    const removed = this.data.monitoredTargets.length !== initialLen;
+    const removed = this.data.monitoredTargets.length !== before;
     if (removed) this.save();
     return removed;
   }
 
+  getDueMonitoringTargets(): MonitoredTarget[] {
+    const now = new Date().toISOString();
+    return this.data.monitoredTargets.filter(t => t.nextScanAt && t.nextScanAt <= now);
+  }
+
+  touchMonitoredTarget(id: string): void {
+    const target = this.data.monitoredTargets.find(t => t.id === id);
+    if (target) {
+      target.lastScannedAt = new Date().toISOString();
+      target.nextScanAt = new Date(Date.now() + target.frequencyDays * 86400000).toISOString();
+      this.save();
+    }
+  }
+
+  appendScanLog(scanId: string, message: string): void {
+    if (!this.scanLogs.has(scanId)) this.scanLogs.set(scanId, []);
+    const ts = new Date().toISOString();
+    this.scanLogs.get(scanId)!.push(`[${ts}] ${message}`);
+  }
+
+  getScanLogs(scanId: string): string[] {
+    return this.scanLogs.get(scanId) ?? [];
+  }
+
   getScanWithSuppressedFindings(scan: Scan): Scan {
-    if (!scan || !scan.findings) return scan;
+    if (!scan?.findings) return scan;
     const userRules = this.listSuppressions(scan.userId);
     const scanUrlClean = cleanUrl(scan.url);
 
     let dirty = false;
     const updatedFindings = scan.findings.map(finding => {
-      const matchingRule = userRules.find(r => 
-        cleanUrl(r.targetUrl) === scanUrlClean && 
-        r.findingTitle === finding.title
+      const matchingRule = userRules.find(r =>
+        cleanUrl(r.targetUrl) === scanUrlClean && r.findingTitle === finding.title
       );
-      if (matchingRule) {
-        if (!finding.isFalsePositive) {
-          dirty = true;
-          return {
-            ...finding,
-            isFalsePositive: true,
-            suppressionReason: matchingRule.reason,
-            suppressedAt: matchingRule.createdAt
-          };
-        }
-      } else {
-        if (finding.isFalsePositive) {
-          dirty = true;
-          const cloned = { ...finding };
-          delete cloned.isFalsePositive;
-          delete cloned.suppressionReason;
-          delete cloned.suppressedAt;
-          return cloned;
-        }
+      if (matchingRule && !finding.isFalsePositive) {
+        dirty = true;
+        return { ...finding, isFalsePositive: true, suppressionReason: matchingRule.reason, suppressedAt: matchingRule.createdAt };
+      }
+      if (!matchingRule && finding.isFalsePositive) {
+        dirty = true;
+        const { isFalsePositive: _, suppressionReason: __, suppressedAt: ___, ...rest } = finding as any;
+        return rest;
       }
       return finding;
     });
@@ -493,13 +392,46 @@ class LocalFileDb {
 
     return scan;
   }
+
+  // --- Auth Profiles ---
+  createAuthProfile(userId: string, data: Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>): AuthProfile {
+    const id = 'ap_' + crypto.randomBytes(8).toString('hex');
+    const profile: AuthProfile = { ...data, id, userId, createdAt: new Date().toISOString() };
+    this.data.authProfiles[id] = profile;
+    this.save();
+    return profile;
+  }
+
+  getAuthProfile(userId: string, id: string): AuthProfile | null {
+    const p = this.data.authProfiles[id];
+    return p && p.userId === userId ? p : null;
+  }
+
+  listAuthProfiles(userId: string): AuthProfile[] {
+    return Object.values(this.data.authProfiles).filter(p => p.userId === userId);
+  }
+
+  deleteAuthProfile(userId: string, id: string): boolean {
+    const p = this.data.authProfiles[id];
+    if (!p || p.userId !== userId) return false;
+    delete this.data.authProfiles[id];
+    this.save();
+    return true;
+  }
+
+  updateAuthProfile(userId: string, id: string, updates: Partial<Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>>): AuthProfile | null {
+    const p = this.data.authProfiles[id];
+    if (!p || p.userId !== userId) return null;
+    Object.assign(p, updates);
+    this.save();
+    return p;
+  }
 }
 
 // Helpers
 export function cleanUrl(urlStr: string): string {
   try {
-    let clean = urlStr.replace(/https?:\/\//i, '').replace(/\/+$/, '').trim();
-    return clean.toLowerCase();
+    return urlStr.replace(/https?:\/\//i, '').replace(/\/+$/, '').trim().toLowerCase();
   } catch {
     return String(urlStr || '').trim().toLowerCase();
   }
@@ -507,28 +439,22 @@ export function cleanUrl(urlStr: string): string {
 
 export function recalculateScore(findings: Finding[]): { score: number; severity: Severity } {
   let score = 100;
-  const activeFindings = findings.filter(f => !f.isFalsePositive);
+  const active = findings.filter(f => !f.isFalsePositive);
 
-  activeFindings.forEach(f => {
-    const sev = f.severity?.toLowerCase();
-    if (sev === 'critical') {
-      score -= 35;
-    } else if (sev === 'high') {
-      score -= 25;
-    } else if (sev === 'medium') {
-      score -= 15;
-    } else if (sev === 'low') {
-      score -= 5;
-    }
+  active.forEach(f => {
+    const s = f.severity?.toLowerCase();
+    if (s === 'critical') score -= 35;
+    else if (s === 'high') score -= 25;
+    else if (s === 'medium') score -= 15;
+    else if (s === 'low') score -= 5;
   });
 
   score = Math.max(12, Math.min(100, score));
 
   let severity: Severity = 'low';
-  if (activeFindings.some(f => f.severity === 'critical')) severity = 'critical';
-  else if (activeFindings.some(f => f.severity === 'high')) severity = 'high';
-  else if (activeFindings.some(f => f.severity === 'medium')) severity = 'medium';
-  else if (activeFindings.some(f => f.severity === 'low')) severity = 'low';
+  if (active.some(f => f.severity === 'critical')) severity = 'critical';
+  else if (active.some(f => f.severity === 'high')) severity = 'high';
+  else if (active.some(f => f.severity === 'medium')) severity = 'medium';
 
   return { score, severity };
 }

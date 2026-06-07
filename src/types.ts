@@ -23,6 +23,8 @@ export interface Finding {
   endpoint?: string;
   rawRequest?: string;
   rawResponse?: string;
+  plainEnglish?: string;
+  codeFixExample?: string;
 }
 
 export interface SuppressionRule {
@@ -39,6 +41,8 @@ export interface Scan {
   userId: string;
   url: string;
   authHeader?: string;
+  authProfileId?: string;
+  webhookUrl?: string;
   status: ScanStatus;
   score?: number; // 0 - 100
   severity?: Severity;
@@ -75,5 +79,28 @@ export interface ApiKey {
   key: string;
   credits: number;
   active: boolean;
+  createdAt: string;
+}
+
+export type AuthType = 'cookie' | 'bearer' | 'header' | 'basic' | 'form';
+
+export interface AuthProfile {
+  id: string;
+  userId: string;
+  name: string;
+  type: AuthType;
+  // cookie / bearer / header
+  headerName?: string;
+  headerValue?: string;
+  // basic
+  username?: string;
+  password?: string;
+  // form-based login
+  loginUrl?: string;
+  loginUsernameField?: string;
+  loginPasswordField?: string;
+  loginUsername?: string;
+  loginPassword?: string;
+  verifiedAt?: string;
   createdAt: string;
 }
