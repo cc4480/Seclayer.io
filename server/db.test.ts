@@ -66,3 +66,21 @@ test('scan ownership is queryable for authorization checks', () => {
   assert.equal(db.getScan(scan.id)!.userId, a.id);
   assert.notEqual(db.getScan(scan.id)!.userId, b.id);
 });
+
+test('Stripe webhook idempotency: a session is only credited once', () => {
+  const u = db.getOrCreateUser('billing@test.io');
+  const sessionId = 'cs_test_idem_1';
+  assert.equal(db.hasTransactionForSession(sessionId), false);
+  db.addCredits(u.id, 5, 'purchase', sessionId);
+  assert.equal(db.hasTransactionForSession(sessionId), true); // retry would be skipped
+});
+
+test('monitoring scheduler surfaces only due targets', () => {
+  const u = db.getOrCreateUser('monitor@test.io');
+  const t = db.addMonitoredTarget(u.id, 'https://watch.test', 7);
+  // Freshly added target is scheduled in the future -> not yet due.
+  assert.equal(db.listDueMonitoredTargets(new Date().toISOString()).some((x) => x.id === t.id), false);
+  // Backdate its next scan -> becomes due.
+  db.markMonitoredScanned(t.id, new Date(Date.now() - 1000).toISOString(), new Date(Date.now() - 1000).toISOString());
+  assert.equal(db.listDueMonitoredTargets(new Date().toISOString()).some((x) => x.id === t.id), true);
+});

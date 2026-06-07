@@ -4,10 +4,11 @@ import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
+import { generateAiReport } from './server/deepseek.js';
 import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/email.js';
 import { config, validateConfigOnBoot } from './server/config.js';
 import { rateLimit } from './server/rateLimit.js';
+import { createCheckoutSession, parseWebhookEvent, isStripeConfigured } from './server/stripe.js';
 
 async function startServer() {
   validateConfigOnBoot();
@@ -28,6 +29,27 @@ async function startServer() {
       res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     }
     next();
+  });
+
+  // Stripe webhook MUST receive the raw body for signature verification, so it
+  // is registered before the JSON body parser. Credits are granted only here,
+  // on a verified, paid checkout.session.completed event.
+  app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res) => {
+    let completion;
+    try {
+      completion = parseWebhookEvent(req.body as Buffer, req.headers['stripe-signature'] as string | undefined);
+    } catch (err: any) {
+      console.warn('[stripe] Webhook verification failed:', err?.message || err);
+      return res.status(400).json({ error: `Webhook Error: ${err?.message || 'invalid signature'}` });
+    }
+    if (completion && !db.hasTransactionForSession(completion.sessionId)) {
+      const user = db.getUser(completion.userId);
+      if (user) {
+        db.addCredits(user.id, completion.credits, 'purchase', completion.sessionId);
+        console.log(`[stripe] Granted ${completion.credits} credits to ${user.id} (session ${completion.sessionId}).`);
+      }
+    }
+    res.json({ received: true });
   });
 
   // Body parsers + cookies (explicit body size cap)
@@ -286,38 +308,22 @@ async function startServer() {
     });
   });
 
-  // Demo-mode checkout: grants credits instantly without a real payment.
-  // Replace with a real Stripe Checkout session + webhook before charging.
-  app.post('/api/credits/checkout', requireAuth, (req, res) => {
-    const { pack } = req.body;
-
-    const PRICES = {
-      single: { price: 29, credits: 1 },
-      pack5: { price: 99, credits: 5 },
-      pack20: { price: 299, credits: 20 }
-    };
-
-    const selectedPack = PRICES[pack as keyof typeof PRICES];
-    if (!selectedPack) {
-      return res.status(400).json({ status: 'error', message: 'Invalid credit pack selected' });
+  // Real Stripe Checkout. Returns a hosted checkout URL; credits are granted by
+  // the verified webhook after payment, never here.
+  app.post('/api/credits/checkout', requireAuth, async (req, res) => {
+    if (!isStripeConfigured()) {
+      return res.status(503).json({ status: 'error', message: 'Payments are not currently available. Please contact support.' });
     }
-
-    const sessionId = `cs_test_${Math.random().toString(36).substring(2, 15)}`;
-    db.addCredits(getUserId(req), selectedPack.credits, 'purchase', sessionId);
-
-    res.json({
-      status: 'ok',
-      url: `/dashboard?checkout_success=true&credits=${selectedPack.credits}`,
-      sessionId,
-      creditsAdded: selectedPack.credits,
-      pricePaid: selectedPack.price,
-      demoMode: true
-    });
-  });
-
-  // Mock Stripe Webhook endpoint
-  app.post('/api/webhooks/stripe', (req, res) => {
-    res.json({ received: true });
+    const { pack } = req.body;
+    const base = config.appUrl || `${req.protocol}://${req.get('host')}`;
+    try {
+      const url = await createCheckoutSession(getUserId(req), pack, base);
+      res.json({ status: 'ok', url });
+    } catch (err: any) {
+      const msg = err?.message || 'Could not start checkout.';
+      const code = /invalid credit pack/i.test(msg) ? 400 : 502;
+      res.status(code).json({ status: 'error', message: msg });
+    }
   });
 
   // API Key routes for developer MCP usecases
@@ -389,213 +395,25 @@ async function startServer() {
   });
 
 
-  // --- ENTERPRISE PIPELINE ACTIVE ENDPOINTS ---
-
-  // 1. ASPM & Signal Correlation Engine
-  app.post('/api/enterprise/aspm/correlate', (req, res) => {
-    const { url = 'staging.api.vulnerable-shop.io' } = req.body;
-    res.json({
-      success: true,
-      targetUrl: url,
-      orchestrator: 'OWASP DefectDojo Correlator Core',
-      findingsCorrelated: 2,
-      analysisTimeMs: 420,
-      steps: [
-        {
-          phase: "SAST Vulnerability Ingestion",
-          status: "complete",
-          logs: `Parsed Semgrep SAST scan hook on dynamic repository commits definition. Flagged 1 SQL Injection hazard inside "/controllers/UserController.java" line 87: Unsafely concatenated raw HTTP inputs "userId" to SQL executable stream.`
-        },
-        {
-          phase: "ASPM Correlation Engine Triggered",
-          status: "complete",
-          logs: `Fusion Matcher searched EASM perimeter indexing for live URLs hosting the compiled code. Identified active target match: "${url}".`
-        },
-        {
-          phase: "Targeted Dynamic Verification (DAST)",
-          status: "complete",
-          logs: `Dispatched containerized OWASP ZAP/Katana worker probing "${url}/api/user/profile?id=1'". Input escape injections triggered parsing trace: Dynamic SQL syntax error returned in headers.`
-        },
-        {
-          phase: "Active Vulnerability Confirmation & Escalation",
-          status: "escalated",
-          logs: `Vulnerability verified as dynamic 100% exploitable. Escalated SAST Finding category severity from MEDIUM to CRITICAL. Raised high-priority Jira ticket & synced ticket ledger inside DefectDojo (ID: SL-DD-948211).`
-        }
-      ]
-    });
-  });
-
-  // 2. EASM Attack Surface Mapping
-  app.post('/api/enterprise/easm/recon', (req, res) => {
-    const { domain = 'target-enterprise.com' } = req.body;
-    const cleanDomain = domain.replace(/https?:\/\//i, '').split('/')[0];
-    res.json({
-      success: true,
-      domain: cleanDomain,
-      scanner: 'OWASP Amass & Continuous Recon Worker v3',
-      scanTime: new Date().toISOString(),
-      summary: {
-        totalSubdomains: 6,
-        activeIps: 3,
-        nameserver: 'ns1.dnsrouting-gate.net',
-        nameserverIp: '45.89.21.4'
-      },
-      technologies: [
-        { name: "Nginx Server", type: "Web Server", version: "1.23.2", confidence: 100 },
-        { name: "React Framework", type: "Client Engine", version: "18.2.0", confidence: 100 },
-        { name: "Node.js Express", type: "Backend Framework", version: "18.15.0", confidence: 95 },
-        { name: "PostgreSQL Database", type: "DB Server", version: "15.1", confidence: 85 },
-        { name: "Cloudflare WAF", type: "Network Shield", version: "Global Edge", confidence: 90 }
-      ],
-      subdomains: [
-        { subdomain: `api.${cleanDomain}`, ip: '104.22.4.12', status: 'live', ports: ['80', '443', '8443'], service: 'HTTPS Express API' },
-        { subdomain: `staging.${cleanDomain}`, ip: '104.22.4.13', status: 'live', ports: ['443', '8080'], service: 'Vulnerable Staging Area' },
-        { subdomain: `admin.${cleanDomain}`, ip: '104.22.4.14', status: 'live', ports: ['443'], service: 'Protected Portal Gate' },
-        { subdomain: `vpn.${cleanDomain}`, ip: '45.12.98.5', status: 'live', ports: ['1194'], service: 'OpenVPN Daemon' },
-        { subdomain: `grafana.${cleanDomain}`, ip: '104.22.4.15', status: 'inactive', ports: ['3000'], service: 'Telemetry Panel' },
-        { subdomain: `internal-db.${cleanDomain}`, ip: '10.0.12.3', status: 'internal-only', ports: ['5432'], service: 'Production Postgres Mirror' }
-      ],
-      portsList: [
-        { port: 80, protocol: 'tcp', service: 'HTTP (Redirects HTTPS)' },
-        { port: 443, protocol: 'tcp', service: 'HTTPS (TLS 1.3 Active)' },
-        { port: 1194, protocol: 'udp', service: 'OpenVPN (Vulnerable to credential sprays)' },
-        { port: 8080, protocol: 'tcp', service: 'HTTP-ALT (Exposes Spring Boot actuator admin stats)' }
-      ]
-    });
-  });
-
-  // 3. Katana & Hadrian API Security Testing API
-  app.post('/api/enterprise/api-scan/hadrian', (req, res) => {
-    const { schemaTitle = 'API Specification Core' } = req.body;
-    res.json({
-      success: true,
-      service: `Hadrian API Role Mutation Matrix Engine (${schemaTitle})`,
-      endpointsCount: 4,
-      matrix: [
-        {
-          endpoint: '/api/v1/user/profile/{id}',
-          methods: ['GET', 'PUT'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Self-Only)", color: "text-amber-400" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "IDOR on PUT method: Specifying standard header overrides allows arbitrary profile updates on any account without administrative privileges."
-        },
-        {
-          endpoint: '/api/v1/billing/transactions',
-          methods: ['GET', 'POST'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Denied (403)", color: "text-red-500" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "None detected. Strict role-based filter checks present at Route level."
-        },
-        {
-          endpoint: '/api/v1/system/actuator/env',
-          methods: ['GET'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Exposed)", color: "text-red-500 font-bold" },
-            "Guest Role": { status: "Allow (Exposed)", color: "text-red-500 font-bold animate-pulse" }
-          },
-          vulnerability: "BOLA / Authentication Bypass: Critical configurations variables (.env database passwords) accessible by unauthorized third-parties and guest operators."
-        },
-        {
-          endpoint: '/api/v1/support/tickets/{ticketId}',
-          methods: ['GET', 'DELETE'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Any ID)", color: "text-red-500 font-semibold" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "Insecure Direct Object Reference (IDOR): Standard user can review or purge support tickets of other customers by iterating dynamic ticket integer indexes."
-        }
-      ]
-    });
-  });
-
-  // 4. DongTai Runtime IAST Bytecode Tracer
-  app.post('/api/enterprise/iast/trace', (req, res) => {
-    const { inputPayload = `1' UNION SELECT credit_card FROM payments` } = req.body;
-    res.json({
-      success: true,
-      agent: 'DongTai VM Bytecode Passive Instrumenter Agent v2.5',
-      runtime: 'Java Virtual Machine OpenJDK 17',
-      status: 'Sink Triggered Malicious Flow Alert',
-      payloadTested: inputPayload,
-      traceTime: new Date().toISOString(),
-      traces: [
-        {
-          step: 1,
-          clazz: 'org.apache.catalina.connector.Request',
-          method: 'getParameter("searchQuery")',
-          line: 312,
-          description: `HTTP parameter parsing matched. Tainted reference loaded into user scope. Input: "${inputPayload}"`
-        },
-        {
-          step: 2,
-          clazz: 'com.seclayer.enterprise.controller.SearchController',
-          method: 'executeSearch(HttpServletRequest)',
-          line: 45,
-          description: `Tainted wrapper transferred directly to query validator. Sanitizer bypass occurred (length checks only; regex failed to intercept SQL escape syntax).`
-        },
-        {
-          step: 3,
-          clazz: 'com.seclayer.enterprise.data.RepositoryCore',
-          method: 'unsafeRawSearchBind(String)',
-          line: 104,
-          description: `String concatenation sink assembled: "SELECT * FROM items WHERE name = '" + searchQuery + "'" -> query result: "SELECT * FROM items WHERE name = '1' UNION SELECT credit_card FROM payments'".`
-        },
-        {
-          step: 4,
-          clazz: 'org.postgresql.jdbc.PgStatement',
-          method: 'execute(String)',
-          line: 2190,
-          description: `⚠️ SQL DATA SINK REACHED! Passive IAST hooks intercepted the query parsing executing in real-time. Confirmed attacker payload has mutated query execution logic inside the active running process.`
-        }
-      ]
-    });
-  });
-
-  // 5. PentAGI Autonomous Pentest AI Exploit Agent
-  app.get('/api/enterprise/pentagi/logs', async (req, res) => {
-    const url = req.query.url as string | undefined;
-    const logs = await generatePentagiLogs(url);
-    res.json({
-      success: true,
-      engine: 'PentAGI Autonomous Multi-Agent Multi-Step Pentest Coordinator',
-      agents: ['Scout', 'Exploiter', 'Reporter'],
-      logs: logs
-    });
-  });
-
-
-  // --- Background scan coordinator queue ---
+  // --- Background scan worker ---
+  // Drives a scan through its real lifecycle: status reflects actual work
+  // boundaries (diagnostics, then AI analysis), with no artificial delays.
   async function processScanJob(scanId: string) {
     try {
-      console.log(`[Job Worker] Starting pen-test work details for Scan ID: ${scanId}`);
-      
-      // Queued to Scanning
-      await sleep(1500);
-      db.updateScan(scanId, { status: 'scanning' });
+      console.log(`[Job Worker] Starting scan ${scanId}`);
 
-      // Execute Diagnostic Probes (actual HTTP check)
       const scan = db.getScan(scanId);
       if (!scan) return;
-      
+
+      // Active diagnostics (HTTP probing, header/secret/SCA/path checks, fuzzing).
+      db.updateScan(scanId, { status: 'scanning' });
       const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
-      // Scanning to Analyzing
-      await sleep(1500);
+      // Compile findings and generate the analysis report.
       db.updateScan(scanId, { status: 'analyzing' });
-
-      // Compile raw data inputs & call AI Generator
       const staticCompiled = compileStaticFindings(diagnostics);
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
-      // Save report in status Complete
       db.updateScan(scanId, {
         status: 'complete',
         score: outputReport.score,
@@ -604,21 +422,50 @@ async function startServer() {
         aiSummary: outputReport.aiSummary,
         completedAt: new Date().toISOString()
       });
-      console.log(`[Job Worker] Successfully finalized security run for Scan ID: ${scanId}`);
+      console.log(`[Job Worker] Completed scan ${scanId}`);
 
     } catch (err: any) {
-      console.error(`[Job Worker] FAILED during pen-testing run of Scan ID ${scanId}:`, err);
+      console.error(`[Job Worker] FAILED scan ${scanId}:`, err?.message || err);
       db.updateScan(scanId, {
         status: 'failed',
-        error: err.message || 'An unexpected server timeout occurred during scanner diagnostics.'
+        error: err?.message || 'The scan could not be completed.'
       });
     }
   }
 
-  function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  // --- Continuous monitoring worker ---
+  // Runs real scheduled scans for due monitored targets: validates the target,
+  // spends a credit, and launches the same scan pipeline as a manual scan.
+  let monitorTickRunning = false;
+  async function runDueMonitoredScans() {
+    if (monitorTickRunning) return;
+    monitorTickRunning = true;
+    try {
+      const due = db.listDueMonitoredTargets(new Date().toISOString());
+      for (const target of due) {
+        const next = new Date(Date.now() + (target.frequencyDays || 7) * 24 * 60 * 60 * 1000).toISOString();
+        try {
+          const user = db.getUser(target.userId);
+          if (!user || user.credits < 1) continue; // retry next tick once credits exist
+          await assertScanTargetSafe(target.url);
+          db.deductCredits(target.userId, 1);
+          const scan = db.createScan(target.userId, target.url);
+          db.markMonitoredScanned(target.id, new Date().toISOString(), next);
+          processScanJob(scan.id);
+        } catch (err: any) {
+          // Invalid/unsafe target: defer instead of retrying every tick.
+          db.markMonitoredScanned(target.id, target.lastScannedAt || new Date().toISOString(), next);
+          console.warn(`[monitor] Skipped ${target.url}: ${err?.message || err}`);
+        }
+      }
+    } finally {
+      monitorTickRunning = false;
+    }
   }
-
+  const monitorInterval = setInterval(() => {
+    runDueMonitoredScans().catch((e) => console.error('[monitor] tick error:', e));
+  }, 60 * 1000);
+  monitorInterval.unref();
 
   // Unknown API routes return JSON 404 (not the SPA shell).
   app.use('/api', (req, res) => {

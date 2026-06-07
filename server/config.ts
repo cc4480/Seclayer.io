@@ -15,6 +15,7 @@ export const config = {
   appUrl: clean(process.env.APP_URL, 'MY_APP_URL')?.replace(/\/+$/, ''),
   deepseekConfigured: !!clean(process.env.DEEPSEEK_API_KEY, 'MY_DEEPSEEK_API_KEY'),
   emailConfigured: !!clean(process.env.RESEND_API_KEY, 'MY_RESEND_API_KEY'),
+  stripeConfigured: !!clean(process.env.STRIPE_SECRET_KEY) && !!clean(process.env.STRIPE_WEBHOOK_SECRET),
 };
 
 // Logs configuration warnings; returns false if a production-critical setting is
@@ -28,6 +29,9 @@ export function validateConfigOnBoot(): boolean {
   }
   if (!config.emailConfigured) {
     warnings.push('RESEND_API_KEY not set — magic-link emails are written to the console (dev/demo mode).');
+  }
+  if (!config.stripeConfigured) {
+    warnings.push('STRIPE_SECRET_KEY / STRIPE_WEBHOOK_SECRET not set — credit purchases are disabled.');
   }
 
   if (config.isProd) {

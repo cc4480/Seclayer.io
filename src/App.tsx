@@ -64,6 +64,14 @@ export default function App() {
         setApiKeys([]);
         setCredits(0);
       }
+
+      // Handle return from Stripe Checkout: land on the dashboard and clean the
+      // query string. Credits arrive via the webhook, reflected by this reload.
+      const params = new URLSearchParams(window.location.search);
+      if (params.has('checkout_success') || params.has('checkout_canceled')) {
+        if (userRes.ok) setCurrentView('dashboard');
+        window.history.replaceState({}, '', window.location.pathname);
+      }
     } catch (err) {
       console.error('Error loading user dashboard metrics:', err);
     } finally {
@@ -182,12 +190,17 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ pack: packName })
       });
-      if (res.ok) {
-        // Immediately reload user credentials containing topped-up values
-        await loadUserContext();
+      const data = await res.json().catch(() => ({}));
+      if (res.ok && data.url) {
+        // Redirect to Stripe's hosted checkout. Credits are granted by the
+        // webhook after payment; we return to /dashboard?checkout_success=true.
+        window.location.href = data.url;
+        return;
       }
+      alert(data.message || 'Checkout is currently unavailable. Please try again later.');
     } catch (err) {
       console.error('Purchase transactions failed:', err);
+      alert('Could not start checkout. Please try again.');
     } finally {
       setIsPerformingAction(false);
     }

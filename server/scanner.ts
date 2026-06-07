@@ -225,11 +225,9 @@ export async function runDiagnostics(
     scaLibraries: [],
     easmPerimeter: {
       subdomains: [],
-      ip: "104.244.42.1", // default fallback, will resolve if possible
-      nameserver: "ns1.seclayer-dns.net",
-      protocol: url.startsWith("https://")
-        ? "TLS 1.3 / HTTPS"
-        : "HTTP/1.1 Cleartext",
+      ip: "", // resolved from real DNS below
+      nameserver: "", // resolved from real DNS below
+      protocol: url.startsWith("https://") ? "HTTPS" : "HTTP",
     },
     dastInputs: [],
     redTeamFindings: [],
@@ -470,12 +468,16 @@ export async function runDiagnostics(
       "pop",
       "imap",
     ];
-    result.easmPerimeter.ip = "104.244.42.1"; // Standard DNS estimation fallback
-
     try {
       const ipRecords = await dns.resolve4(hostname).catch(() => []);
       if (ipRecords && ipRecords.length > 0) {
         result.easmPerimeter.ip = ipRecords[0];
+      }
+
+      // Resolve the authoritative nameserver(s) for real, when available.
+      const nsRecords = await dns.resolveNs(hostname).catch(() => [] as string[]);
+      if (nsRecords && nsRecords.length > 0) {
+        result.easmPerimeter.nameserver = nsRecords[0];
       }
 
       // Check for Wildcard DNS to prevent false positive subdomain bloating

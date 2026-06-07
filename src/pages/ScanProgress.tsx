@@ -15,38 +15,36 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
   const [progressPercent, setProgressPercent] = useState(10);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Micro-event telemetry config mapping
+  // Micro-event telemetry — describes the scanner's actual work.
   const microEventsConfig: Record<string, string[]> = {
     initial: [
-      "Establishing system control loop metrics...",
-      "Validating credential token authorization...",
-      "Provisioning safe worker environments on Kubernetes clusters..."
+      "Validating target URL and DNS resolution...",
+      "Running SSRF safety checks on the destination host...",
+      "Establishing scanner session..."
     ],
     queued: [
-      "Querying target perimeter socket state and port matrices...",
-      "Amass network asset discovery worker enqueued in background...",
-      "Resolving public Domain & DNS records structure...",
-      "Pre-fetching certificate transparency logs ledger..."
+      "Resolving DNS A / AAAA records for the target host...",
+      "Verifying the target is publicly reachable...",
+      "Preparing the diagnostic probe sequence..."
     ],
     scanning: [
-      "Katana crawler starting up headless browser subprocess...",
-      "Injecting raw SQL validation payloads into input elements...",
-      "Hadrian rotating authentication roles for BOLA matrices...",
-      "APISCAN sending Swagger-defined validation parameters...",
-      "Evaluating Strict-Transport-Security policy headers..."
+      "Fetching the root document and inspecting response headers...",
+      "Evaluating CSP, HSTS, X-Frame-Options and cookie directives...",
+      "Scanning the client payload for exposed secret signatures...",
+      "Checking JavaScript libraries against known CVEs...",
+      "Enumerating subdomains via DNS and probing sensitive paths..."
     ],
     analyzing: [
-      "DongTai passive tracer agent hooked inside backend JVM/Python...",
-      "Tracing user input taint variables in query executors...",
-      "DefectDojo parser validating static vs dynamic findings...",
-      "Deploying PentAGI autonomous exploitation agents...",
-      "Calculating posture weights and severity metrics..."
+      "Running active injection probes (SQLi, XSS, command, SSRF)...",
+      "Testing the API surface (GraphQL introspection, object-level auth)...",
+      "Forwarding diagnostics to DeepSeek for analysis...",
+      "Compiling findings, severities and remediation guidance...",
+      "Calculating the posture score..."
     ],
     complete: [
-      "Syncing defect ledger entries inside DefectDojo controller...",
-      "All sandbox diagnostic endpoints completely cleared...",
-      "Safely tearing down ephemeral agent runtimes...",
-      "Vulnerability signatures archived. Scan complete."
+      "Finalizing the report...",
+      "Persisting findings to your account...",
+      "Scan complete."
     ]
   };
 
@@ -144,26 +142,25 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
     const logsList: string[] = [];
     const timestamp = () => new Date().toLocaleTimeString();
 
-    logsList.push(`[${timestamp()}] [SYSTEM] Enqueued target url: ${scan.url}`);
-    logsList.push(`[${timestamp()}] [SYSTEM] Provisioned security daemon pipeline.`);
+    logsList.push(`[${timestamp()}] [SYSTEM] Queued target URL: ${scan.url}`);
+    logsList.push(`[${timestamp()}] [SYSTEM] Validated target and resolved DNS.`);
 
     if (scan.status === 'scanning' || scan.status === 'analyzing' || scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [DAEMON] Checking SSL protocol schemas on host connection...`);
-      logsList.push(`[${timestamp()}] [DAEMON] Established socket on port 443.`);
-      logsList.push(`[${timestamp()}] [HEADERS] Requesting GET on root host location...`);
-      logsList.push(`[${timestamp()}] [HEADERS] Response code: 200. Parsing key security signatures...`);
+      logsList.push(`[${timestamp()}] [HTTP] Fetched root document; inspecting response headers...`);
+      logsList.push(`[${timestamp()}] [HEADERS] Evaluating CSP, HSTS, X-Frame-Options and cookie directives...`);
+      logsList.push(`[${timestamp()}] [SCAN] Scanning client payload for exposed secrets and outdated libraries...`);
+      logsList.push(`[${timestamp()}] [EASM] Enumerating subdomains via DNS and probing sensitive paths...`);
     }
 
     if (scan.status === 'analyzing' || scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [AUDIT] Analyzing standard HTTP headers checklist...`);
-      logsList.push(`[${timestamp()}] [AUDIT] Cross-checking Cookie flag parameters: HttpOnly, Secure, SameSite.`);
-      logsList.push(`[${timestamp()}] [PROBES] Testing typical site exposures: /.env, /.git/config, /admin, /wp-admin, /phpinfo.php...`);
-      logsList.push(`[${timestamp()}] [DEEPSEEK] Forwarding parsed diagnostic elements to DeepSeek Intelligence...`);
-      logsList.push(`[${timestamp()}] [DEEPSEEK] Compiling plain-English analysis and developer fixes...`);
+      logsList.push(`[${timestamp()}] [PROBES] Running active SQLi / XSS / command-injection / SSRF probes...`);
+      logsList.push(`[${timestamp()}] [API] Testing GraphQL introspection and object-level authorization...`);
+      logsList.push(`[${timestamp()}] [DEEPSEEK] Forwarding diagnostics to DeepSeek for analysis...`);
+      logsList.push(`[${timestamp()}] [DEEPSEEK] Compiling findings, severities and developer fixes...`);
     }
 
     if (scan.status === 'complete') {
-      logsList.push(`[${timestamp()}] [SYSTEM] Report successfully persisted.`);
+      logsList.push(`[${timestamp()}] [SYSTEM] Report compiled and saved.`);
     }
 
     setLogs(logsList);

@@ -26,7 +26,6 @@ class SqliteDb {
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
     this.migrate();
-    this.seedIfEmpty();
   }
 
   private migrate() {
@@ -202,24 +201,6 @@ class SqliteDb {
     );
   }
 
-  // Creates a user with an explicit id + credit balance (used for seeding a
-  // fixed demo account). Also provisions a matching API key.
-  createUserWithId(id: string, email: string, credits: number): User {
-    const normEmail = email.toLowerCase().trim();
-    const apiKey = 'sl_live_' + crypto.randomBytes(16).toString('hex');
-    const now = new Date().toISOString();
-    const tx = this.db.transaction(() => {
-      this.db.prepare('INSERT INTO users (id, email, credits, apiKey, createdAt) VALUES (?, ?, ?, ?, ?)')
-        .run(id, normEmail, credits, apiKey, now);
-      this.db.prepare('INSERT INTO transactions (id, userId, amount, type, stripeSessionId, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
-        .run('tx-seed-' + id, id, credits, 'purchase', 'cs_test_initial_provision', now);
-      this.db.prepare('INSERT INTO api_keys (id, userId, key, credits, active, createdAt) VALUES (?, ?, ?, ?, 1, ?)')
-        .run('key-' + id, id, apiKey, credits, now);
-    });
-    tx();
-    return this.getUser(id)!;
-  }
-
   getOrCreateUser(email: string): User {
     const normEmail = email.toLowerCase().trim();
     const existing = this.getUserByEmail(normEmail);
@@ -265,6 +246,12 @@ class SqliteDb {
 
   listTransactions(userId: string): CreditTransaction[] {
     return this.db.prepare('SELECT * FROM transactions WHERE userId = ? ORDER BY createdAt DESC').all(userId) as CreditTransaction[];
+  }
+
+  // Idempotency guard for Stripe webhooks: true if a purchase for this Checkout
+  // session was already recorded, so retries never grant duplicate credits.
+  hasTransactionForSession(sessionId: string): boolean {
+    return !!this.db.prepare('SELECT 1 FROM transactions WHERE stripeSessionId = ? LIMIT 1').get(sessionId);
   }
 
   // --- Scans ---
@@ -372,6 +359,18 @@ class SqliteDb {
     return res.changes > 0;
   }
 
+  // Targets whose next scheduled scan is due (used by the monitoring worker).
+  listDueMonitoredTargets(nowIso: string): MonitoredTarget[] {
+    return this.db.prepare(
+      'SELECT * FROM monitored_targets WHERE nextScanAt IS NOT NULL AND nextScanAt <= ?'
+    ).all(nowIso) as MonitoredTarget[];
+  }
+
+  markMonitoredScanned(id: string, lastScannedAt: string, nextScanAt: string): void {
+    this.db.prepare('UPDATE monitored_targets SET lastScannedAt = ?, nextScanAt = ? WHERE id = ?')
+      .run(lastScannedAt, nextScanAt, id);
+  }
+
   // Read-model: returns a scan with suppression rules applied and the score
   // recalculated. This is a PURE transform — it never writes to the database,
   // so reads have no side effects.
@@ -394,42 +393,6 @@ class SqliteDb {
     return { ...scan, findings, score, severity };
   }
 
-  private seedIfEmpty() {
-    const count = (this.db.prepare('SELECT COUNT(*) AS n FROM users').get() as any).n;
-    if (count > 0) return;
-    seedDemoData(this);
-  }
-}
-
-// Seeds a demo user + two illustrative scans so a fresh install is not empty.
-// Uses the fixed `user_default` id the zero-config frontend loads on boot.
-function seedDemoData(db: SqliteDb) {
-  const user = db.createUserWithId('user_default', 'demo@seclayer.io', 10);
-
-  const s1 = db.createScan(user.id, 'https://seclayer.io');
-  db.updateScan(s1.id, {
-    status: 'complete',
-    score: 95,
-    severity: 'low',
-    completedAt: new Date(Date.now() - 3600000 * 47.9).toISOString(),
-    aiSummary: 'The target website is exceptionally well-secured. All standard security headers are present with secure configurations. SSL/TLS is modern and correctly configured. The server does not leak technological implementations, which limits vector fingerprinting.',
-    findings: [
-      { id: 'finding-1', title: 'Missing Subresource Integrity (SRI) on external vendor assets', description: 'Several script tags loaded from third-party CDNs do not feature integrity hashes. If these vendors are compromised, malicious code could run in visitors\' browser context.', severity: 'low', confidence: 'high', fix: 'Add the integrity="" attribute with correct SHA-384 hashes and crossorigin="anonymous" to all external script and stylesheet links.', category: 'SCA' },
-    ],
-  });
-
-  const s2 = db.createScan(user.id, 'https://vulnerable-test-shop.org');
-  db.updateScan(s2.id, {
-    status: 'complete',
-    score: 35,
-    severity: 'critical',
-    completedAt: new Date(Date.now() - 3600000 * 119.8).toISOString(),
-    aiSummary: 'The application exhibits severe perimeter exposures. Critical issues were uncovered, including sensitive file leakage (.env containing database credentials) and a missing Content-Security-Policy. Remediation is an urgent requirement to avoid data exfiltration or site hijacking.',
-    findings: [
-      { id: 'finding-3', title: 'Exposed Environment Configuration File (.env)', description: 'A raw /.env configuration file was detected via root directory probing. This file contains active credentials, including database passwords and Stripe private keys.', severity: 'critical', confidence: 'high', fix: 'Immediately rotate all leaked credentials. Move the .env file out of the public web root and block requests to dotfiles.', category: 'DAST' },
-      { id: 'finding-5', title: 'Missing Content-Security-Policy (CSP) Header', description: 'The response does not contain a Content-Security-Policy header, leaving browsers vulnerable to Cross-Site Scripting (XSS) and data injection attacks.', severity: 'high', confidence: 'high', fix: 'Implement a strict CSP header declaring trusted sources for scripts, styles, images, and frame origins.', category: 'IAST' },
-    ],
-  });
 }
 
 export const db = new SqliteDb();
