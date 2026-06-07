@@ -4,11 +4,12 @@ import { Scan } from '../types.js';
 
 interface ScanProgressProps {
   scanId: string;
+  userId: string;
   onScanFinished: (scanId: string) => void;
   onCancel: () => void;
 }
 
-export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanProgressProps) {
+export default function ScanProgress({ scanId, userId, onScanFinished, onCancel }: ScanProgressProps) {
   const [scan, setScan] = useState<Scan | null>(null);
   const [logs, setLogs] = useState<string[]>([]);
   const [pollCount, setPollCount] = useState(0);
@@ -84,7 +85,7 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
 
     const fetchStatus = async () => {
       try {
-        const res = await fetch(`/api/scans/${scanId}`);
+        const res = await fetch(`/api/scans/${scanId}?userId=${encodeURIComponent(userId)}`);
         const data = await res.json();
         
         if (!active) return;

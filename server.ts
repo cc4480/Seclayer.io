@@ -2,7 +2,7 @@ import express from 'express';
 import path from 'path';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
-import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
+import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
 
 async function startServer() {
@@ -59,10 +59,17 @@ async function startServer() {
     }
 
     if (user.credits < 1) {
-      return res.status(402).json({ 
-        status: 'error', 
-        message: 'No credits remaining. Please purchase scan credits to continue.' 
+      return res.status(402).json({
+        status: 'error',
+        message: 'No credits remaining. Please purchase scan credits to continue.'
       });
+    }
+
+    // Reject SSRF / malformed targets before spending a credit.
+    try {
+      await assertScanTargetSafe(url);
+    } catch (e: any) {
+      return res.status(400).json({ status: 'error', message: e?.message || 'Target URL cannot be scanned.' });
     }
 
     // Deduct 1 credit
@@ -84,8 +91,11 @@ async function startServer() {
   });
 
   app.get('/api/scans/:id', (req, res) => {
+    const userId = (req.query.userId as string) || 'user_default';
     let scan = db.getScan(req.params.id);
-    if (!scan) {
+    // Enforce ownership: a scan ID alone must not grant access to another
+    // user's results. Return 404 (not 403) to avoid leaking scan existence.
+    if (!scan || scan.userId !== userId) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     scan = db.getScanWithSuppressedFindings(scan);
@@ -93,8 +103,9 @@ async function startServer() {
   });
 
   app.get('/api/scans/:id/report', (req, res) => {
+    const userId = (req.query.userId as string) || 'user_default';
     let scan = db.getScan(req.params.id);
-    if (!scan) {
+    if (!scan || scan.userId !== userId) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     if (scan.status !== 'complete') {
@@ -257,6 +268,13 @@ async function startServer() {
     const { url, apiKey, authHeader } = req.body;
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'Missing parameters. required: url, apiKey' });
+    }
+
+    // Reject SSRF / malformed targets before validating the key or spending a credit.
+    try {
+      await assertScanTargetSafe(url);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'Target URL cannot be scanned.' });
     }
 
     // Verify key and deduct 1 credit

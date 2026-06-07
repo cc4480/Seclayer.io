@@ -283,6 +283,7 @@ export default function App() {
         {currentView === 'progress' && selectedScanId && (
           <ScanProgress
             scanId={selectedScanId}
+            userId={user?.id || 'user_default'}
             onScanFinished={(scanId) => {
               // Refresh history lists & immediately route to viewer page
               if (user) loadUserContext(user.id);
