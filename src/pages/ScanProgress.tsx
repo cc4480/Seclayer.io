@@ -219,10 +219,10 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
               <span className="flex items-center gap-1.5">
                 <span className="w-1 h-1 rounded-full bg-[#22c55e] inline-block animate-pulse" />
                 <span>Buffer Sub-Task: <span className="text-zinc-350 normal-case font-bold">{
-                  scan?.status === 'queued' ? 'Pre-execution checklist & Docker orchestration' :
-                  scan?.status === 'scanning' ? 'DAST probing / Dynamic multi-stage payload injection' :
-                  scan?.status === 'analyzing' ? 'ASPM analyzing & DongTai IAST trace correlation' :
-                  scan?.status === 'complete' ? 'Report compiled / Synchronizing database findings' :
+                  scan?.status === 'queued' ? 'Validating target & resolving DNS' :
+                  scan?.status === 'scanning' ? 'Headers, secrets, libraries, subdomains & path probing' :
+                  scan?.status === 'analyzing' ? 'Active injection/API probes & report generation' :
+                  scan?.status === 'complete' ? 'Report compiled & saved' :
                   'Initializing target pipeline...'
                 }</span></span>
               </span>

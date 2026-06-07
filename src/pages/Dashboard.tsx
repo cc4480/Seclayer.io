@@ -1021,7 +1021,7 @@ export default function Dashboard({
                         <pre className="bg-[#09090b] border border-[#27272a]/40 p-4 rounded text-[#a1a1aa] text-[10px] overflow-x-auto">
 {`{
   "success": true,
-  "targetUrl": "https://staging.api.vulnerable.org",
+  "targetUrl": "https://api.example.com",
   "postureScore": 85,
   "vulnerabilityLevel": "medium",
   "analysisSummary": "Seclayer automated assessment identified 1 or more...",
@@ -1040,7 +1040,7 @@ export default function Dashboard({
                         <button 
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
-                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
+                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://api.example.com",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
                             setToastMsg('Response envelope snippet copied to clipboard');
                             setShowToast(true);
                             setTimeout(() => setShowToast(false), 3000);
