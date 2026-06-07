@@ -259,3 +259,128 @@ describe('GET /api/scans/:id/report', () => {
     expect(res.status).toBe(401);
   });
 });
+
+// ─── GET /api/scans/:id/sarif ────────────────────────────────────────────────
+
+describe('GET /api/scans/:id/sarif', () => {
+  const completedFindings = [
+    { id: 'f1', title: 'SQL Injection', description: 'Error-based SQLi', severity: 'critical' as const, fix: 'Use parameterised queries', category: 'DAST' },
+    { id: 'f2', title: 'Missing HSTS', description: 'No HSTS header', severity: 'medium' as const, fix: 'Add HSTS header', category: 'Headers' },
+  ];
+
+  it('returns SARIF 2.1.0 for a completed scan using JWT auth', async () => {
+    const { token, user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 60, severity: 'critical', findings: completedFindings, completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.version).toBe('2.1.0');
+    expect(res.body.runs).toHaveLength(1);
+    expect(res.body.runs[0].tool.driver.name).toBe('Seclayer');
+    expect(res.body.runs[0].results).toHaveLength(2);
+  });
+
+  it('returns SARIF using X-API-Key header (pipeline auth)', async () => {
+    const { user } = registerAndLogin(db);
+    const apiKey = db.generateApiKey(user.id);
+    const scan = db.createScan(user.id, 'https://example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 75, severity: 'medium', findings: completedFindings, completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('X-API-Key', apiKey.key);
+
+    expect(res.status).toBe(200);
+    expect(res.body.version).toBe('2.1.0');
+  });
+
+  it('maps critical severity to error level in SARIF', async () => {
+    const { token, user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 50, severity: 'critical', findings: completedFindings, completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(200);
+    const criticalResult = res.body.runs[0].results.find((r: any) => r.ruleId === 'sql-injection');
+    expect(criticalResult.level).toBe('error');
+    const mediumResult = res.body.runs[0].results.find((r: any) => r.ruleId === 'missing-hsts');
+    expect(mediumResult.level).toBe('warning');
+  });
+
+  it('returns 400 for a scan that is not complete', async () => {
+    const { token, user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(400);
+  });
+
+  it('returns 404 for a scan owned by another user', async () => {
+    const { token } = registerAndLogin(db, 'u1@example.com');
+    const { user: u2 } = registerAndLogin(db, 'u2@example.com');
+    const scan = db.createScan(u2.id, 'https://secret.example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 100, findings: [], completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('Authorization', `Bearer ${token}`);
+
+    expect(res.status).toBe(404);
+  });
+
+  it('returns 401 with no credentials', async () => {
+    const { user } = registerAndLogin(db);
+    const scan = db.createScan(user.id, 'https://example.com');
+    const res = await request(app).get(`/api/scans/${scan.id}/sarif`);
+    expect(res.status).toBe(401);
+  });
+
+  it('returns 401 for a revoked API key', async () => {
+    const { user } = registerAndLogin(db);
+    const apiKey = db.generateApiKey(user.id);
+    db.revokeApiKey(user.id, apiKey.id);
+    const scan = db.createScan(user.id, 'https://example.com');
+    db.updateScan(scan.id, { status: 'complete', score: 100, findings: [], completedAt: new Date().toISOString() });
+
+    const res = await request(app)
+      .get(`/api/scans/${scan.id}/sarif`)
+      .set('X-API-Key', apiKey.key);
+
+    expect(res.status).toBe(401);
+  });
+});
+
+// ─── POST /api/scans (webhookUrl) ────────────────────────────────────────────
+
+describe('POST /api/scans with webhookUrl', () => {
+  it('accepts a valid webhookUrl and stores it on the scan', async () => {
+    const { token } = registerAndLogin(db);
+    const res = await request(app)
+      .post('/api/scans')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ url: 'https://example.com', webhookUrl: 'https://hooks.example.com/notify' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.scan.webhookUrl).toBe('https://hooks.example.com/notify');
+  });
+
+  it('rejects a private/SSRF webhookUrl', async () => {
+    const { token } = registerAndLogin(db);
+    const res = await request(app)
+      .post('/api/scans')
+      .set('Authorization', `Bearer ${token}`)
+      .send({ url: 'https://example.com', webhookUrl: 'http://192.168.1.100/webhook' });
+
+    expect(res.status).toBe(400);
+  });
+});

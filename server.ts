@@ -33,6 +33,26 @@ function requireAuth(req: Request, res: Response, next: NextFunction) {
   next();
 }
 
+/** Accepts either a JWT Bearer token (dashboard) or X-API-Key header / ?apiKey= query (CI pipelines) */
+function requireAuthOrApiKey(dbInstance: LocalFileDb) {
+  return (req: Request, res: Response, next: NextFunction) => {
+    const authHeader = req.headers['authorization'];
+    if (authHeader?.startsWith('Bearer ')) {
+      const payload = verifyToken(authHeader.substring(7));
+      if (payload) { req.userId = payload.userId; return next(); }
+    }
+    const apiKeyStr = (req.headers['x-api-key'] as string | undefined) || (req.query.apiKey as string | undefined);
+    if (apiKeyStr) {
+      const keyObj = dbInstance.findApiKey(apiKeyStr);
+      if (keyObj?.active) {
+        const user = dbInstance.getUser(keyObj.userId);
+        if (user) { req.userId = user.id; return next(); }
+      }
+    }
+    return res.status(401).json({ error: 'Authentication required. Provide a Bearer token or X-API-Key header.' });
+  };
+}
+
 const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 30, standardHeaders: true, legacyHeaders: false });
 const scanLimiter = rateLimit({ windowMs: 60 * 1000, max: 15, standardHeaders: true, legacyHeaders: false });
 
@@ -123,6 +143,49 @@ async function resolveAuthProfile(profile: AuthProfile): Promise<Record<string, 
   }
 }
 
+/** Convert a completed scan's findings to SARIF 2.1.0 for GitHub Security tab upload */
+function generateSarif(scan: import('./src/types.js').Scan) {
+  const lvl = (s: string) => s === 'critical' || s === 'high' ? 'error' : s === 'medium' ? 'warning' : 'note';
+  const score = (s: string) => s === 'critical' ? '9.5' : s === 'high' ? '7.5' : s === 'medium' ? '5.0' : '2.0';
+  const slug = (t: string) => t.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/(^-|-$)/g, '');
+
+  const findings = scan.findings ?? [];
+  const ruleMap = new Map<string, typeof findings[0]>();
+  for (const f of findings) if (!ruleMap.has(slug(f.title))) ruleMap.set(slug(f.title), f);
+
+  return {
+    $schema: 'https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json',
+    version: '2.1.0',
+    runs: [{
+      tool: {
+        driver: {
+          name: 'Seclayer',
+          version: '2.2.0',
+          informationUri: 'https://seclayer.io',
+          rules: [...ruleMap.entries()].map(([id, f]) => ({
+            id,
+            name: f.title,
+            shortDescription: { text: f.title },
+            fullDescription: { text: f.description },
+            help: { text: `Fix: ${f.fix}`, markdown: `**Fix:** ${f.fix}` },
+            helpUri: 'https://seclayer.io',
+            properties: { 'security-severity': score(f.severity), tags: ['security', f.severity] },
+          })),
+        },
+      },
+      results: findings.map(f => ({
+        ruleId: slug(f.title),
+        level: lvl(f.severity),
+        message: { text: `${f.description}\n\nFix: ${f.fix}` },
+        locations: [{ physicalLocation: { artifactLocation: { uri: f.endpoint || scan.url } } }],
+        properties: { severity: f.severity, category: f.category },
+      })),
+      artifacts: [{ location: { uri: scan.url }, description: { text: 'Seclayer scan target' } }],
+      properties: { seclayerScore: scan.score, seclayerSeverity: scan.severity },
+    }],
+  };
+}
+
 export function createApp(dbInstance: LocalFileDb) {
   const app = express();
 
@@ -138,6 +201,38 @@ export function createApp(dbInstance: LocalFileDb) {
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     next();
   });
+
+  async function fireWebhook(scan: import('./src/types.js').Scan, status: 'complete' | 'failed') {
+    if (!scan.webhookUrl) return;
+    try {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 10000);
+      const findings = scan.findings ?? [];
+      const payload = {
+        event: `scan.${status}`,
+        scanId: scan.id,
+        url: scan.url,
+        status,
+        score: scan.score ?? null,
+        severity: scan.severity ?? null,
+        findingCount: findings.length,
+        criticalCount: findings.filter(f => f.severity === 'critical' && !f.isFalsePositive).length,
+        highCount: findings.filter(f => f.severity === 'high' && !f.isFalsePositive).length,
+        mediumCount: findings.filter(f => f.severity === 'medium' && !f.isFalsePositive).length,
+        lowCount: findings.filter(f => f.severity === 'low' && !f.isFalsePositive).length,
+        completedAt: scan.completedAt ?? new Date().toISOString(),
+        error: scan.error ?? null,
+      };
+      await fetch(scan.webhookUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'User-Agent': 'Seclayer-Webhook/1.0' },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal,
+      });
+    } catch (err: any) {
+      console.warn(`[Webhook] Delivery failed for scan ${scan.id}: ${err.message}`);
+    }
+  }
 
   async function processScanJob(scanId: string) {
     try {
@@ -170,7 +265,7 @@ export function createApp(dbInstance: LocalFileDb) {
 
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
-      dbInstance.updateScan(scanId, {
+      const completedScan = dbInstance.updateScan(scanId, {
         status: 'complete',
         score: outputReport.score,
         severity: outputReport.severity,
@@ -179,13 +274,15 @@ export function createApp(dbInstance: LocalFileDb) {
         completedAt: new Date().toISOString(),
       });
       dbInstance.appendScanLog(scanId, `[COMPLETE] Score: ${outputReport.score}/100 — ${outputReport.findings.length} findings`);
+      fireWebhook(completedScan, 'complete');
     } catch (err: any) {
       console.error(`[Scanner] Scan ${scanId} failed:`, err.message);
       dbInstance.appendScanLog(scanId, `[ERROR] Scan failed: ${err.message}`);
-      dbInstance.updateScan(scanId, {
+      const failedScan = dbInstance.updateScan(scanId, {
         status: 'failed',
         error: err.message || 'Scan failed due to an unexpected error.',
       });
+      fireWebhook(failedScan, 'failed');
     }
   }
 
@@ -242,7 +339,7 @@ export function createApp(dbInstance: LocalFileDb) {
 
   // MCP endpoint — authenticated via API key (not JWT)
   app.post('/api/mcp/scan', scanLimiter, async (req, res) => {
-    const { url, apiKey, authHeader } = req.body;
+    const { url, apiKey, authHeader, webhookUrl } = req.body;
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'url and apiKey are required.' });
     }
@@ -260,18 +357,21 @@ export function createApp(dbInstance: LocalFileDb) {
       const staticCompiled = compileStaticFindings(diagnostics);
       const aiReport = await generateAiReport(url, diagnostics, staticCompiled);
 
-      const completedScan = dbInstance.createScan(user.id, url, authHeader);
-      dbInstance.updateScan(completedScan.id, {
+      const pendingScan = dbInstance.createScan(user.id, url, authHeader);
+      const finishedScan = dbInstance.updateScan(pendingScan.id, {
         status: 'complete',
         score: aiReport.score,
         severity: aiReport.severity,
         findings: aiReport.findings,
         aiSummary: aiReport.aiSummary,
         completedAt: new Date().toISOString(),
+        ...(webhookUrl ? { webhookUrl } : {}),
       });
+      if (webhookUrl) fireWebhook(finishedScan, 'complete');
 
       res.json({
         success: true,
+        scanId: finishedScan.id,
         targetUrl: url,
         postureScore: aiReport.score,
         vulnerabilityLevel: aiReport.severity,
@@ -293,9 +393,15 @@ export function createApp(dbInstance: LocalFileDb) {
 
   // Scans
   app.post('/api/scans', scanLimiter, requireAuth, async (req, res) => {
-    const { url, authHeader, authProfileId } = req.body;
+    const { url, authHeader, authProfileId, webhookUrl } = req.body;
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
     const urlMsg = validateTargetUrl(url); if (urlMsg) return res.status(400).json({ message: urlMsg });
+
+    // Validate webhookUrl if provided — must be http(s) and not SSRF target
+    if (webhookUrl) {
+      const whErr = validateTargetUrl(webhookUrl);
+      if (whErr) return res.status(400).json({ message: `Invalid webhookUrl: ${whErr}` });
+    }
 
     // Resolve auth profile to a header value for the scanner
     let resolvedAuthHeader = authHeader;
@@ -303,15 +409,17 @@ export function createApp(dbInstance: LocalFileDb) {
       const profile = dbInstance.getAuthProfile(req.userId!, authProfileId);
       if (profile) {
         const headers = await resolveAuthProfile(profile);
-        // Serialize to 'Authorization' header value if that's what was resolved
         if (headers.Authorization) resolvedAuthHeader = headers.Authorization;
         else if (headers.Cookie) resolvedAuthHeader = headers.Cookie;
       }
     }
     const scan = dbInstance.createScan(req.userId!, url, resolvedAuthHeader);
-    if (authProfileId) dbInstance.updateScan(scan.id, { authProfileId });
+    const updates: Partial<import('./src/types.js').Scan> = {};
+    if (authProfileId) updates.authProfileId = authProfileId;
+    if (webhookUrl) updates.webhookUrl = webhookUrl;
+    if (Object.keys(updates).length) dbInstance.updateScan(scan.id, updates);
     processScanJob(scan.id);
-    res.json({ status: 'ok', scan });
+    res.json({ status: 'ok', scan: { ...scan, ...updates } });
   });
 
   app.get('/api/scans', requireAuth, (req, res) => {
@@ -350,6 +458,20 @@ export function createApp(dbInstance: LocalFileDb) {
       aiSummary: scan.aiSummary, findings: scan.findings,
       createdAt: scan.createdAt, completedAt: scan.completedAt,
     });
+  });
+
+  app.get('/api/scans/:id/sarif', requireAuthOrApiKey(dbInstance), (req, res) => {
+    let scan = dbInstance.getScan(req.params.id);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    if (scan.status !== 'complete') {
+      return res.status(400).json({ error: 'Scan is not complete yet.' });
+    }
+    scan = dbInstance.getScanWithSuppressedFindings(scan);
+    const sarif = generateSarif(scan);
+    res.setHeader('Content-Type', 'application/sarif+json');
+    res.json(sarif);
   });
 
   // Suppressions

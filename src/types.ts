@@ -40,6 +40,7 @@ export interface Scan {
   url: string;
   authHeader?: string;
   authProfileId?: string;
+  webhookUrl?: string;
   status: ScanStatus;
   score?: number; // 0 - 100
   severity?: Severity;
