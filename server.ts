@@ -6,14 +6,33 @@ import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
 import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/email.js';
+import { config, validateConfigOnBoot } from './server/config.js';
+import { rateLimit } from './server/rateLimit.js';
 
 async function startServer() {
-  const app = express();
-  const PORT = 3000;
+  validateConfigOnBoot();
 
-  // Body parsers + cookies
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  const app = express();
+  const PORT = config.port;
+
+  // Behind a proxy/load balancer in production so req.protocol, req.ip and
+  // Secure cookies are derived from the X-Forwarded-* headers.
+  if (config.isProd) app.set('trust proxy', 1);
+
+  // Baseline security headers on every response (including API + errors).
+  app.use((req, res, next) => {
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (config.isProd) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
+    }
+    next();
+  });
+
+  // Body parsers + cookies (explicit body size cap)
+  app.use(express.json({ limit: '256kb' }));
+  app.use(express.urlencoded({ extended: true, limit: '256kb' }));
   app.use(cookieParser());
 
   const SESSION_COOKIE = 'sl_session';
@@ -56,7 +75,13 @@ async function startServer() {
   });
 
   // --- Auth (passwordless magic link) ---
-  app.post('/api/auth/request-link', async (req, res) => {
+  const requestLinkLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    keyPrefix: 'auth',
+    message: 'Too many sign-in attempts. Please wait a few minutes and try again.',
+  });
+  app.post('/api/auth/request-link', requestLinkLimiter, async (req, res) => {
     const { email } = req.body || {};
     if (!email || typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
       return res.status(400).json({ status: 'error', message: 'A valid email address is required.' });
@@ -108,7 +133,13 @@ async function startServer() {
   });
 
   // Scan Routes
-  app.post('/api/scans', requireAuth, async (req, res) => {
+  const scanLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    keyPrefix: 'scan',
+    message: 'Scan rate limit reached. Please wait a moment before launching more scans.',
+  });
+  app.post('/api/scans', requireAuth, scanLimiter, async (req, res) => {
     const { url, authHeader } = req.body;
     const userId = getUserId(req);
     if (!url) {
@@ -589,16 +620,13 @@ async function startServer() {
   }
 
 
-  // --- Express serving of static client files ---
-  app.use((req, res, next) => {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
+  // Unknown API routes return JSON 404 (not the SPA shell).
+  app.use('/api', (req, res) => {
+    res.status(404).json({ status: 'error', message: `Unknown API endpoint: ${req.method} ${req.path}` });
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  // --- Express serving of static client files ---
+  if (!config.isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -612,12 +640,38 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT}`);
+  // JSON error handler — keeps thrown route errors from leaking stack traces
+  // or crashing the process; always responds with structured JSON.
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('[server] Unhandled route error:', err?.message || err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ status: 'error', message: 'An unexpected server error occurred.' });
   });
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT} (${config.isProd ? 'production' : 'development'})`);
+  });
+
+  // Graceful shutdown for containerized deployments.
+  const shutdown = (signal: string) => {
+    console.log(`[server] ${signal} received — shutting down gracefully.`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
+
+// Process-level safety nets: log instead of crashing silently.
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[server] Uncaught exception:', err);
+});
 
 // Global safety catch
 startServer().catch((err) => {
   console.error("Critical server bootstrap error:", err);
+  process.exit(1);
 });
