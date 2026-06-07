@@ -99,99 +99,302 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   };
 
   const handleDownloadPdf = () => {
-    const doc = new jsPDF();
+    const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
     const pageWidth = doc.internal.pageSize.getWidth();
     const pageHeight = doc.internal.pageSize.getHeight();
-    
-    // Brand header
+    const margin = 15;
+    const contentWidth = pageWidth - margin * 2;
+    const today = new Date().toISOString().split('T')[0];
+    const score = scan.score ?? 100;
+
+    const severityRgb = (s: string): [number, number, number] =>
+      s === 'critical' ? [239, 68, 68] :
+      s === 'high'     ? [249, 115, 22] :
+      s === 'medium'   ? [234, 179, 8] :
+                         [34, 197, 94];
+
+    const truncate = (str: string, maxLen: number) =>
+      str && str.length > maxLen ? str.slice(0, maxLen - 1) + '…' : (str || '');
+
+    const addFooters = () => {
+      const totalPages = (doc as any).internal.getNumberOfPages();
+      for (let p = 1; p <= totalPages; p++) {
+        doc.setPage(p);
+        doc.setFontSize(7);
+        doc.setFont("helvetica", "normal");
+        doc.setTextColor(150, 150, 150);
+        doc.text(
+          `Page ${p} of ${totalPages}  —  Confidential  —  Seclayer Security Assessment  —  ${today}`,
+          pageWidth / 2, pageHeight - 6, { align: 'center' }
+        );
+      }
+    };
+
+    const ensureSpace = (currentY: number, needed: number): number => {
+      if (currentY + needed > pageHeight - 14) { doc.addPage(); return 20; }
+      return currentY;
+    };
+
+    // ── PAGE 1: EXECUTIVE COVER ──────────────────────────────────────────────
     doc.setFillColor(9, 9, 11);
-    doc.rect(0, 0, pageWidth, 40, 'F');
-    
+    doc.rect(0, 0, pageWidth, 50, 'F');
     doc.setTextColor(255, 255, 255);
     doc.setFont("helvetica", "bold");
-    doc.setFontSize(22);
-    doc.text("SECLAYER", 15, 20);
-    doc.setFontSize(10);
+    doc.setFontSize(24);
+    doc.text("SECLAYER", margin, 22);
     doc.setFont("helvetica", "normal");
-    doc.text("Systematic Penetration Testing & AppSec Report", 15, 28);
-    
-    doc.setTextColor(161, 161, 170); // text-zinc-400
-    doc.text(`Generated: ${new Date().toISOString().split('T')[0]}`, pageWidth - 15, 25, { align: 'right' });
-    
-    // Executive Summary Info Box
-    doc.setTextColor(0, 0, 0);
-    doc.setFontSize(14);
-    doc.setFont("helvetica", "bold");
-    doc.text("EXECUTIVE SUMMARY", 15, 55);
-    
     doc.setFontSize(11);
+    doc.setTextColor(161, 161, 170);
+    doc.text("Security Assessment Report", margin, 33);
+    doc.setFontSize(9);
+    doc.text(today, pageWidth - margin, 22, { align: 'right' });
+
+    let y = 65;
+    doc.setFontSize(8);
     doc.setFont("helvetica", "normal");
-    doc.text(`Target Assessed: ${scan.url}`, 15, 65);
-    doc.text(`Security Posture Score: ${scan.score}/100`, 15, 72);
-    const riskSev = scan.severity ? scan.severity.toUpperCase() : 'UNKNOWN';
-    doc.text(`Risk Severity: ${scan.score < 60 ? 'HIGH RISK' : scan.score < 85 ? 'MODERATE' : 'LOW RISK'} (${riskSev})`, 15, 79);
-    doc.text(`Total Vulnerabilities: ${findings.length}`, 15, 86);
-    
-    // AI Summary
-    let currentY = 96;
+    doc.setTextColor(120, 120, 120);
+    doc.text("TARGET ASSESSED:", margin, y);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(10);
+    doc.setTextColor(30, 30, 30);
+    doc.text(scan.url, margin + 36, y);
+    y += 14;
+
+    const scoreRgb: [number, number, number] =
+      score >= 85 ? [34, 197, 94] : score >= 60 ? [234, 179, 8] : [239, 68, 68];
+    doc.setFillColor(...scoreRgb);
+    doc.rect(margin, y, 38, 22, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(18);
+    doc.text(`${score}`, margin + 19, y + 12, { align: 'center' });
+    doc.setFontSize(8);
+    doc.text("/100", margin + 19, y + 19, { align: 'center' });
+
+    const verdict = score >= 85 ? "SAFE TO SHIP" : score >= 60 ? "REVIEW RECOMMENDED" : "ACTION REQUIRED";
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(16);
+    doc.setTextColor(...scoreRgb);
+    doc.text(verdict, margin + 46, y + 13);
+    y += 34;
+
     if (scan.aiSummary) {
       doc.setFont("helvetica", "bold");
-      doc.text("Assessment Analysis", 15, currentY);
+      doc.setFontSize(9);
+      doc.setTextColor(60, 60, 60);
+      doc.text("ASSESSMENT SUMMARY", margin, y);
+      y += 5;
       doc.setFont("helvetica", "normal");
-      currentY += 7;
-      const splitAiText = doc.splitTextToSize(scan.aiSummary, pageWidth - 30);
-      doc.text(splitAiText, 15, currentY);
-      currentY += (splitAiText.length * 5) + 15;
-    } else {
-      currentY = 100;
+      doc.setFontSize(9);
+      doc.setTextColor(70, 70, 70);
+      const summaryLines = doc.splitTextToSize(scan.aiSummary, contentWidth);
+      doc.text(summaryLines, margin, y);
+      y += summaryLines.length * 4.5 + 10;
     }
-    
-    // Findings Table
-    doc.setFontSize(14);
+
     doc.setFont("helvetica", "bold");
-    doc.text("TECHNICAL FINDINGS & REMEDIATION", 15, currentY);
-    
-    const tableBody = findings.map((f, i) => [
-      i + 1,
-      f.title,
-      f.severity.toUpperCase(),
-      f.category,
-      f.description,
-      f.fix
-    ]);
-    
-    autoTable(doc, {
-      startY: currentY + 5,
-      head: [['#', 'Vulnerability', 'Severity', 'Module', 'Description', 'Remediation']],
-      body: tableBody,
-      theme: 'grid',
-      styles: { fontSize: 8, cellPadding: 3 },
-      headStyles: { fillColor: [9, 9, 11], textColor: [255, 255, 255] },
-      columnStyles: {
-        0: { cellWidth: 10 },
-        1: { cellWidth: 35 },
-        2: { cellWidth: 20 },
-        3: { cellWidth: 20 },
-        4: { cellWidth: 55 },
-        5: { cellWidth: 50 },
-      },
-      didParseCell: function(data) {
-        if (data.section === 'body' && data.column.index === 2) {
-          // just standard formatting here, custom styles can be complex in some autotable versions, so we use string values
-        }
-      }
+    doc.setFontSize(9);
+    doc.setTextColor(60, 60, 60);
+    doc.text("FINDINGS SUMMARY", margin, y);
+    y += 6;
+
+    const counts: Array<{ label: string; n: number; rgb: [number, number, number] }> = [
+      { label: 'Critical', n: findings.filter(f => f.severity === 'critical').length, rgb: [239, 68, 68] },
+      { label: 'High',     n: findings.filter(f => f.severity === 'high').length,     rgb: [249, 115, 22] },
+      { label: 'Medium',   n: findings.filter(f => f.severity === 'medium').length,   rgb: [234, 179, 8] },
+      { label: 'Low',      n: findings.filter(f => f.severity === 'low').length,      rgb: [34, 197, 94] },
+    ];
+    counts.forEach((c, idx) => {
+      const px = margin + idx * 45;
+      doc.setFillColor(c.rgb[0], c.rgb[1], c.rgb[2]);
+      doc.rect(px, y, 40, 14, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(11);
+      doc.text(`${c.n}`, px + 20, y + 8, { align: 'center' });
+      doc.setFontSize(6);
+      doc.setFont("helvetica", "normal");
+      doc.text(c.label.toUpperCase(), px + 20, y + 13, { align: 'center' });
     });
-    
-    // Page footer
-    const pageCount = (doc as any).internal.getNumberOfPages();
-    for (let i = 1; i <= pageCount; i++) {
-        doc.setPage(i);
-        doc.setFontSize(8);
-        doc.setTextColor(150, 150, 150);
-        doc.text(`Page ${i} of ${pageCount} - Private & Confidential - Enterprise Security Audit Document`, pageWidth / 2, pageHeight - 10, { align: 'center' });
+
+    // ── PAGE 2: PRIORITY FIXES ───────────────────────────────────────────────
+    const priorityFindings = findings
+      .filter(f => !f.isFalsePositive && (f.severity === 'critical' || f.severity === 'high'))
+      .sort((a, b) => (a.severity === 'critical' ? 0 : 1) - (b.severity === 'critical' ? 0 : 1))
+      .slice(0, 5);
+
+    if (priorityFindings.length > 0) {
+      doc.addPage();
+      doc.setFillColor(9, 9, 11);
+      doc.rect(0, 0, pageWidth, 16, 'F');
+      doc.setTextColor(255, 255, 255);
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(12);
+      doc.text("PRIORITY FIXES", margin, 11);
+      let py = 28;
+
+      priorityFindings.forEach((f, idx) => {
+        const sRgb = severityRgb(f.severity);
+        const bodyText = f.plainEnglish || f.description;
+        const bodyLines = doc.splitTextToSize(bodyText, contentWidth);
+        const codeLines = f.codeFixExample ? doc.splitTextToSize(f.codeFixExample, contentWidth - 8) : [];
+        const blockH = 10 + bodyLines.length * 4.5 + 4 + (codeLines.length > 0 ? codeLines.length * 4 + 10 : 0);
+        py = ensureSpace(py, blockH + 8);
+
+        doc.setFillColor(...sRgb);
+        doc.rect(margin, py, 22, 6, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(7);
+        doc.text(f.severity.toUpperCase(), margin + 11, py + 4.2, { align: 'center' });
+        doc.setFont("helvetica", "bold");
+        doc.setFontSize(10);
+        doc.setTextColor(20, 20, 20);
+        doc.text(f.title, margin + 26, py + 4.5);
+        py += 10;
+
+        doc.setFont("helvetica", "normal");
+        doc.setFontSize(9);
+        doc.setTextColor(70, 70, 70);
+        doc.text(bodyLines, margin, py);
+        py += bodyLines.length * 4.5 + 4;
+
+        if (codeLines.length > 0) {
+          const codeBlockH = codeLines.length * 4 + 8;
+          py = ensureSpace(py, codeBlockH + 4);
+          doc.setFillColor(242, 242, 242);
+          doc.rect(margin, py, contentWidth, codeBlockH, 'F');
+          doc.setDrawColor(210, 210, 210);
+          doc.rect(margin, py, contentWidth, codeBlockH, 'S');
+          doc.setFont("courier", "normal");
+          doc.setFontSize(7.5);
+          doc.setTextColor(40, 40, 40);
+          doc.text(codeLines, margin + 4, py + 5);
+          py += codeBlockH + 6;
+        }
+
+        if (idx < priorityFindings.length - 1) {
+          py = ensureSpace(py, 6);
+          doc.setDrawColor(220, 220, 220);
+          doc.line(margin, py, pageWidth - margin, py);
+          py += 6;
+        }
+      });
     }
-    
-    doc.save(`seclayer-appsec-audit-${scan.url.replace(/https?:\/\//i, '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`);
+
+    // ── PAGE 3+: ALL FINDINGS TABLE ──────────────────────────────────────────
+    doc.addPage();
+    doc.setFillColor(9, 9, 11);
+    doc.rect(0, 0, pageWidth, 16, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.text("FULL FINDINGS", margin, 11);
+
+    autoTable(doc, {
+      startY: 20,
+      head: [['#', 'Vulnerability', 'Severity', 'Category', 'Impact', 'Remediation']],
+      body: findings.map((f, i) => [
+        String(i + 1),
+        f.isFalsePositive ? `${f.title} (SUPPRESSED)` : f.title,
+        f.severity.toUpperCase(),
+        f.category,
+        truncate(f.plainEnglish || f.description, 100),
+        truncate(f.fix, 100),
+      ]),
+      theme: 'grid',
+      styles: { fontSize: 7.5, cellPadding: 2.5, overflow: 'linebreak' },
+      headStyles: { fillColor: [9, 9, 11], textColor: [255, 255, 255], fontStyle: 'bold' },
+      alternateRowStyles: { fillColor: [248, 248, 248] },
+      columnStyles: {
+        0: { cellWidth: 8 },
+        1: { cellWidth: 38 },
+        2: { cellWidth: 18 },
+        3: { cellWidth: 18 },
+        4: { cellWidth: 52 },
+        5: { cellWidth: 47 },
+      },
+      didParseCell: (data) => {
+        if (data.section === 'body' && data.column.index === 2) {
+          data.cell.styles.textColor = severityRgb(String(data.cell.raw).toLowerCase());
+          data.cell.styles.fontStyle = 'bold';
+        }
+        if (data.section === 'body' && findings[data.row.index]?.isFalsePositive) {
+          data.cell.styles.textColor = [160, 160, 160];
+        }
+      },
+    });
+
+    // ── LAST PAGE: COMPLIANCE SUMMARY ────────────────────────────────────────
+    doc.addPage();
+    doc.setFillColor(9, 9, 11);
+    doc.rect(0, 0, pageWidth, 16, 'F');
+    doc.setTextColor(255, 255, 255);
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(12);
+    doc.text("COMPLIANCE SUMMARY", margin, 11);
+
+    const activeFindings = findings.filter(f => !f.isFalsePositive);
+    const checkFail = (kws: string[]) =>
+      activeFindings.some(f =>
+        (f.severity === 'high' || f.severity === 'critical') &&
+        kws.some(kw => f.title.toLowerCase().includes(kw.toLowerCase()) || f.description.toLowerCase().includes(kw.toLowerCase()))
+      );
+
+    type CompRow = { id: string; name: string; status: 'PASS' | 'FAIL' | 'WARN' };
+    const pciReqs: CompRow[] = [
+      { id: 'Req 4.2.1',  name: 'Strong Cryptography',           status: checkFail(['TLS','SSL','certificate','HSTS','expired']) ? 'FAIL' : 'PASS' },
+      { id: 'Req 6.2.4',  name: 'Protect Against Known Attacks', status: checkFail(['injection','XSS','cross-site','SSTI','template','traversal','command']) ? 'FAIL' : 'PASS' },
+      { id: 'Req 6.3.2',  name: 'Software Component Inventory',  status: checkFail(['jQuery','Bootstrap','Lodash','outdated','library']) ? 'FAIL' : 'PASS' },
+      { id: 'Req 8.2.1',  name: 'User Authentication Controls',  status: checkFail(['CORS','cookie','session','authentication','bypass']) ? 'FAIL' : 'PASS' },
+      { id: 'Req 11.3.2', name: 'External Vulnerability Scans',  status: 'PASS' },
+      { id: 'Req 11.4.1', name: 'Penetration Testing',           status: 'PASS' },
+    ];
+    const soc2Reqs: CompRow[] = [
+      { id: 'CC6.1', name: 'Logical Access Controls', status: checkFail(['CORS','authentication','bypass','IDOR','access control']) ? 'FAIL' : 'PASS' },
+      { id: 'CC6.6', name: 'Logical Access Threats',  status: checkFail(['injection','XSS','SSRF','traversal','command']) ? 'FAIL' : 'PASS' },
+      { id: 'CC7.1', name: 'Vulnerability Detection', status: 'PASS' },
+      { id: 'CC8.1', name: 'Change Management',       status: checkFail(['outdated','library','jQuery','Bootstrap','SCA']) ? 'FAIL' : 'PASS' },
+      { id: 'CC9.2', name: 'Risk Monitoring',         status: score >= 70 ? 'PASS' : 'WARN' },
+    ];
+
+    const statusRgb = (s: 'PASS' | 'FAIL' | 'WARN'): [number, number, number] =>
+      s === 'PASS' ? [34, 197, 94] : s === 'FAIL' ? [239, 68, 68] : [234, 179, 8];
+    const compColW = (contentWidth - 8) / 2;
+
+    const renderCompTable = (rows: CompRow[], startX: number, title: string) => {
+      doc.setFont("helvetica", "bold");
+      doc.setFontSize(9);
+      doc.setTextColor(30, 30, 30);
+      doc.text(title, startX, 24);
+      autoTable(doc, {
+        startY: 28,
+        tableWidth: compColW,
+        margin: { left: startX },
+        head: [['ID', 'Requirement', 'Status']],
+        body: rows.map(r => [r.id, r.name, r.status]),
+        theme: 'grid',
+        styles: { fontSize: 7, cellPadding: 2 },
+        headStyles: { fillColor: [9, 9, 11], textColor: [255, 255, 255], fontStyle: 'bold' },
+        columnStyles: {
+          0: { cellWidth: 22 },
+          1: { cellWidth: compColW - 40 },
+          2: { cellWidth: 18, halign: 'center', fontStyle: 'bold' },
+        },
+        didParseCell: (data) => {
+          if (data.section === 'body' && data.column.index === 2) {
+            data.cell.styles.textColor = statusRgb(String(data.cell.raw) as 'PASS' | 'FAIL' | 'WARN');
+            data.cell.styles.fontStyle = 'bold';
+          }
+        },
+      });
+    };
+
+    renderCompTable(pciReqs, margin, "PCI-DSS 4.0");
+    renderCompTable(soc2Reqs, margin + compColW + 8, "SOC2 Trust Service Criteria");
+
+    addFooters();
+    doc.save(`seclayer-report-${scan.url.replace(/https?:\/\//i, '').replace(/[^a-zA-Z0-9]/g, '_')}.pdf`);
   };
 
   // Score metrics
@@ -265,7 +468,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
               id="report-download-btn"
             >
               <Download className="w-3.5 h-3.5 text-[#52525b]" />
-              <span>Export Audit Findings</span>
+              <span>Download PDF Report</span>
             </button>
           </div>
         </div>
@@ -566,14 +769,22 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                           </div>
 
                           {/* Detail summary */}
-                          <p className={`text-xs font-mono leading-relaxed mb-4 pl-1 ${finding.isFalsePositive ? 'text-zinc-500' : 'text-[#a1a1aa]'}`}>
+                          <p className={`text-xs font-mono leading-relaxed mb-3 pl-1 ${finding.isFalsePositive ? 'text-zinc-500' : 'text-[#a1a1aa]'}`}>
                             {finding.description}
                           </p>
 
-                          {/* Detailed Remediation code fix payload block */}
+                          {/* Plain English impact — visible to solo devs */}
+                          {finding.plainEnglish && (
+                            <div className="mb-4 pl-1 py-2.5 px-3 rounded border border-[#22c55e]/15 bg-[#22c55e]/5 flex items-start space-x-2">
+                              <span className="text-[#22c55e] font-mono text-[9px] uppercase tracking-wider font-bold shrink-0 mt-0.5">What this means:</span>
+                              <p className="text-[#a1a1aa] text-[11px] font-sans leading-relaxed">{finding.plainEnglish}</p>
+                            </div>
+                          )}
+
+                          {/* Remediation fix */}
                           <div className={`p-4 rounded border ${finding.isFalsePositive ? 'bg-zinc-950/40 border-zinc-850' : 'bg-[#0c0c0e] border-[#27272a]'}`}>
                             <div className="flex justify-between items-center mb-1.5">
-                              <span className="text-[#52525b] font-mono text-[9px] uppercase tracking-wider">Automated Remediation Fix</span>
+                              <span className="text-[#52525b] font-mono text-[9px] uppercase tracking-wider">Remediation Steps</span>
                               <button
                                 onClick={() => handleCopyCode(finding.id, finding.fix)}
                                 className="text-[10px] font-mono text-[#52525b] hover:text-[#22c55e] flex items-center space-x-1 transition-colors cursor-pointer"
@@ -597,6 +808,33 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                               </code>
                             </div>
                           </div>
+
+                          {/* Code fix example */}
+                          {finding.codeFixExample && (
+                            <div className="mt-3 p-4 rounded border border-[#27272a] bg-black">
+                              <div className="flex justify-between items-center mb-2">
+                                <span className="text-[#22c55e] font-mono text-[9px] uppercase tracking-wider font-bold flex items-center space-x-1.5">
+                                  <Code className="w-3 h-3" />
+                                  <span>Code Fix Example</span>
+                                </span>
+                                <button
+                                  onClick={() => handleCopyCode(`code-${finding.id}`, finding.codeFixExample!)}
+                                  className="text-[10px] font-mono text-[#52525b] hover:text-[#22c55e] flex items-center space-x-1 transition-colors cursor-pointer"
+                                >
+                                  {copiedCodeId === `code-${finding.id}` ? (
+                                    <><Check className="w-3 h-3 text-[#22c55e] shrink-0" /><span>Copied</span></>
+                                  ) : (
+                                    <><Clipboard className="w-3 h-3 shrink-0" /><span>Copy code</span></>
+                                  )}
+                                </button>
+                              </div>
+                              <div className="overflow-x-auto max-h-56 scrollbar-thin">
+                                <code className="text-[11px] font-mono whitespace-pre leading-relaxed block py-1 text-[#22c55e]/80">
+                                  {finding.codeFixExample}
+                                </code>
+                              </div>
+                            </div>
+                          )}
 
                           {/* Raw Request / Response Collapsible Drawer for API_SEC / Payload details */}
                           {(finding.rawRequest || finding.rawResponse) && (

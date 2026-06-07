@@ -23,6 +23,8 @@ export interface Finding {
   endpoint?: string;
   rawRequest?: string;
   rawResponse?: string;
+  plainEnglish?: string;
+  codeFixExample?: string;
 }
 
 export interface SuppressionRule {
