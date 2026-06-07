@@ -41,7 +41,6 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: scan.userId || 'user_default',
           reason: suppressReason.trim() || 'Verified acceptable risk / false positive audit confirmation.'
         })
       });
@@ -65,7 +64,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const handleRemoveSuppressionDirectly = async (findingTitle: string) => {
     setIsSuppressing(true);
     try {
-      const listRes = await fetch(`/api/suppressions?userId=${scan.userId || 'user_default'}`);
+      const listRes = await fetch(`/api/suppressions`);
       if (!listRes.ok) throw new Error('Could not read exclusion lists');
       const listData = await listRes.json();
       const matchingRule = (listData.suppressions || []).find((s: any) => 
@@ -77,7 +76,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
         throw new Error('Suppression rule on this target was not found in database.');
       }
 
-      const delRes = await fetch(`/api/suppressions/${matchingRule.id}?userId=${scan.userId || 'user_default'}`, {
+      const delRes = await fetch(`/api/suppressions/${matchingRule.id}`, {
         method: 'DELETE'
       });
       if (delRes.ok) {

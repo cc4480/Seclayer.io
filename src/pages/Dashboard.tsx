@@ -200,7 +200,7 @@ export default function Dashboard({
 
   const fetchSuppressRules = async () => {
     try {
-      const res = await fetch(`/api/suppressions?userId=${user.id || 'user_default'}`);
+      const res = await fetch(`/api/suppressions`);
       if (res.ok) {
         const data = await res.json();
         setSuppressRules(data.suppressions || []);
@@ -212,7 +212,7 @@ export default function Dashboard({
 
   const fetchMonitoredTargets = async () => {
     try {
-      const res = await fetch(`/api/monitoring?userId=${user.id || 'user_default'}`);
+      const res = await fetch(`/api/monitoring`);
       if (res.ok) {
         const data = await res.json();
         setMonitoredTargets(data.monitoredTargets || []);
@@ -243,7 +243,7 @@ export default function Dashboard({
       const res = await fetch('/api/monitoring', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString, userId: user.id })
+        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString })
       });
       if (res.ok) {
         setMonitorUrl('');
@@ -256,7 +256,7 @@ export default function Dashboard({
 
   const handleDeleteMonitor = async (id: string) => {
     try {
-      const res = await fetch(`/api/monitoring/${id}?userId=${user.id || 'user_default'}`, {
+      const res = await fetch(`/api/monitoring/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -1457,7 +1457,7 @@ export default function Dashboard({
                         onClick={async () => {
                           setIsDeletingRule(rule.id);
                           try {
-                            const delRes = await fetch(`/api/suppressions/${rule.id}?userId=${user.id || 'user_default'}`, {
+                            const delRes = await fetch(`/api/suppressions/${rule.id}`, {
                               method: 'DELETE'
                             });
                             if (delRes.ok) {

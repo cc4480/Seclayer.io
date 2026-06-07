@@ -91,7 +91,73 @@ class SqliteDb {
         createdAt TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_mon_user ON monitored_targets(userId);
+      CREATE TABLE IF NOT EXISTS login_tokens (
+        tokenHash TEXT PRIMARY KEY,
+        email TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        consumedAt TEXT,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS sessions (
+        tokenHash TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        expiresAt TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(userId);
     `);
+  }
+
+  // --- Magic-link auth + sessions ---
+  // Tokens are random secrets; only their SHA-256 hash is persisted so a DB
+  // read cannot reveal a usable login link or session token.
+  private hashToken(raw: string): string {
+    return crypto.createHash('sha256').update(raw).digest('hex');
+  }
+
+  // Issues a single-use magic-link token (default 15 min TTL). Returns the raw
+  // token to embed in the emailed link; only its hash is stored.
+  createLoginToken(email: string, ttlMs = 15 * 60 * 1000): string {
+    const raw = crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+    this.db.prepare('INSERT INTO login_tokens (tokenHash, email, expiresAt, createdAt) VALUES (?, ?, ?, ?)')
+      .run(this.hashToken(raw), email.toLowerCase().trim(), new Date(now + ttlMs).toISOString(), new Date(now).toISOString());
+    return raw;
+  }
+
+  // Validates and burns a magic-link token, returning the associated email.
+  consumeLoginToken(raw: string): string | null {
+    const hash = this.hashToken(raw);
+    const row: any = this.db.prepare('SELECT * FROM login_tokens WHERE tokenHash = ?').get(hash);
+    if (!row || row.consumedAt) return null;
+    if (new Date(row.expiresAt).getTime() < Date.now()) return null;
+    this.db.prepare('UPDATE login_tokens SET consumedAt = ? WHERE tokenHash = ?').run(new Date().toISOString(), hash);
+    return row.email;
+  }
+
+  // Creates a server-side session (default 30 day TTL). Returns the raw token
+  // to set as an httpOnly cookie; only its hash is stored.
+  createSession(userId: string, ttlMs = 30 * 24 * 60 * 60 * 1000): string {
+    const raw = crypto.randomBytes(32).toString('hex');
+    const now = Date.now();
+    this.db.prepare('INSERT INTO sessions (tokenHash, userId, expiresAt, createdAt) VALUES (?, ?, ?, ?)')
+      .run(this.hashToken(raw), userId, new Date(now + ttlMs).toISOString(), new Date(now).toISOString());
+    return raw;
+  }
+
+  // Resolves a session cookie to a userId, or null if missing/expired.
+  getSessionUserId(raw: string): string | null {
+    const row: any = this.db.prepare('SELECT * FROM sessions WHERE tokenHash = ?').get(this.hashToken(raw));
+    if (!row) return null;
+    if (new Date(row.expiresAt).getTime() < Date.now()) {
+      this.db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(row.tokenHash);
+      return null;
+    }
+    return row.userId;
+  }
+
+  deleteSession(raw: string): void {
+    this.db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(this.hashToken(raw));
   }
 
   // --- Row mappers ---

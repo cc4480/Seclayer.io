@@ -1,35 +1,47 @@
 import React, { useState } from 'react';
-import { Shield, Mail, Check, RefreshCw, X, ArrowRight } from 'lucide-react';
+import { Shield, Mail, Check, RefreshCw, X, ArrowRight, AlertTriangle } from 'lucide-react';
 
 interface LoginModalProps {
   onClose: () => void;
-  onLoginSuccess: (email: string) => void;
 }
 
-export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps) {
+export default function LoginModal({ onClose }: LoginModalProps) {
   const [email, setEmail] = useState('');
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [isMagicLinkSent, setIsMagicLinkSent] = useState(false);
+  const [devLink, setDevLink] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email || !email.includes('@')) return;
 
     setIsSubmitting(true);
-    
-    // Execute server action
-    setTimeout(() => {
+    setError(null);
+    try {
+      const res = await fetch('/api/auth/request-link', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setError(data.message || 'Could not send the sign-in link. Please try again.');
+        return;
+      }
+      // devLink is only returned when no email provider is configured (dev/demo).
+      setDevLink(data.devLink || null);
       setIsMagicLinkSent(true);
-      setTimeout(() => {
-        onLoginSuccess(email);
-        onClose();
-      }, 1500);
-    }, 1200);
+    } catch {
+      setError('Network error. Please try again.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm">
-      <div 
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm" onClick={onClose}>
+      <div
         className="relative w-full max-w-md bg-[#0c0c0e] border border-[#27272a] p-8 rounded shadow-2xl space-y-6"
         onClick={(e) => e.stopPropagation()}
         id="login-modal-root"
@@ -47,17 +59,29 @@ export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps)
           <div className="inline-flex p-2 bg-[#22c55e]/10 border border-[#22c55e]/20 rounded text-[#22c55e] mb-2">
             <Shield className="w-6 h-6" />
           </div>
-          <h2 className="text-xl font-bold font-mono text-white">Access Developer Portal</h2>
+          <h2 className="text-xl font-bold font-mono text-white">Sign in to Seclayer</h2>
           <p className="text-[#a1a1aa] text-xs max-w-xs mx-auto font-mono">
-            Provide your email to load your prepaid credits, keys and scan logs. New emails receive <strong className="text-[#22c55e]">5 starting scan credits</strong>.
+            Enter your email and we'll send a secure sign-in link. New emails receive <strong className="text-[#22c55e]">5 starting scan credits</strong>.
           </p>
         </div>
 
         {isMagicLinkSent ? (
-          <div className="bg-[#22c55e]/5 border border-[#22c55e]/25 p-5 rounded text-center space-y-2 text-[#22c55e]">
+          <div className="bg-[#22c55e]/5 border border-[#22c55e]/25 p-5 rounded text-center space-y-3 text-[#22c55e]">
             <Check className="w-6 h-6 mx-auto bg-[#22c55e] text-black rounded-full p-1" />
-            <span className="text-xs font-mono font-bold block uppercase tracking-wider">Magic access granted</span>
-            <p className="text-[11px] text-[#a1a1aa] font-mono">Dispatched access token to {email}. Loading terminal settings...</p>
+            <span className="text-xs font-mono font-bold block uppercase tracking-wider">Check your email</span>
+            <p className="text-[11px] text-[#a1a1aa] font-mono">
+              We sent a sign-in link to <strong className="text-white">{email}</strong>. It is valid for 15 minutes and can be used once.
+            </p>
+            {devLink && (
+              <a
+                href={devLink}
+                className="inline-flex items-center justify-center space-x-2 w-full py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-[11px] font-mono tracking-widest uppercase font-bold rounded transition-all cursor-pointer"
+                id="login-modal-devlink"
+              >
+                <span>Dev mode: open sign-in link</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </a>
+            )}
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">
@@ -77,6 +101,13 @@ export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps)
               </div>
             </div>
 
+            {error && (
+              <div className="flex items-start space-x-2 text-[11px] font-mono text-red-400 bg-red-500/5 border border-red-500/25 rounded p-2.5">
+                <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                <span>{error}</span>
+              </div>
+            )}
+
             <button
               type="submit"
               disabled={isSubmitting || !email.includes('@')}
@@ -86,11 +117,11 @@ export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps)
               {isSubmitting ? (
                 <>
                   <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                  <span>Authorizing...</span>
+                  <span>Sending link...</span>
                 </>
               ) : (
                 <>
-                  <span>Deploy magical access</span>
+                  <span>Send sign-in link</span>
                   <ArrowRight className="w-3.5 h-3.5" />
                 </>
               )}

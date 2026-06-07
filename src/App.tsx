@@ -21,41 +21,48 @@ export default function App() {
   const [showLogin, setShowLogin] = useState(false);
   const [isPerformingAction, setIsPerformingAction] = useState(false);
   
-  // Fetch initial profile & stats (automatically uses user_default out of the box)
+  // Restore the session (if any) on load. Identity comes from the httpOnly
+  // session cookie, so no userId is ever passed from the client.
   useEffect(() => {
-    loadUserContext('user_default');
+    loadUserContext();
   }, []);
 
-  const loadUserContext = async (userId: string) => {
+  const loadUserContext = async () => {
     setIsPerformingAction(true);
     try {
-      // 1. Fetch user profile
-      const userRes = await fetch(`/api/auth/me?userId=${userId}`);
+      // 1. Fetch user profile from the session cookie.
+      const userRes = await fetch('/api/auth/me');
       if (userRes.ok) {
         const userData = await userRes.json();
         setUser(userData.user);
         setCredits(userData.user.credits);
 
         // 2. Fetch user's scans list
-        const scansRes = await fetch(`/api/scans?userId=${userId}`);
+        const scansRes = await fetch('/api/scans');
         if (scansRes.ok) {
           const scansData = await scansRes.json();
           setScans(scansData.scans);
         }
 
         // 3. Fetch user's developer keys
-        const keysRes = await fetch(`/api/keys?userId=${userId}`);
+        const keysRes = await fetch('/api/keys');
         if (keysRes.ok) {
           const keysData = await keysRes.json();
           setApiKeys(keysData.keys);
         }
 
         // 4. Fetch user credit transactions
-        const creditsRes = await fetch(`/api/credits?userId=${userId}`);
+        const creditsRes = await fetch('/api/credits');
         if (creditsRes.ok) {
           const creditsData = await creditsRes.json();
           setTransactions(creditsData.transactions || []);
         }
+      } else {
+        // No valid session — present the app in a logged-out state.
+        setUser(null);
+        setScans([]);
+        setApiKeys([]);
+        setCredits(0);
       }
     } catch (err) {
       console.error('Error loading user dashboard metrics:', err);
@@ -100,7 +107,7 @@ export default function App() {
       const res = await fetch('/api/scans', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url, userId: user.id, authHeader })
+        body: JSON.stringify({ url, authHeader })
       });
 
       if (res.ok) {
@@ -108,13 +115,13 @@ export default function App() {
         // Optimistically deduct credit locally & add scan to list
         setCredits(prev => Math.max(0, prev - 1));
         setScans(prev => [data.scan, ...prev]);
-        
+
         // Open scanning terminal screen
         setSelectedScanId(data.scan.id);
         setCurrentView('progress');
-        
+
         // Refresh full state background metrics in parallel
-        setTimeout(() => loadUserContext(user.id), 1000);
+        setTimeout(() => loadUserContext(), 1000);
       } else {
         const errData = await res.json();
         alert(errData.message || 'Scanning initiation failed');
@@ -132,12 +139,11 @@ export default function App() {
     try {
       const res = await fetch('/api/keys', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id })
+        headers: { 'Content-Type': 'application/json' }
       });
       if (res.ok) {
         // Reload keys listing
-        loadUserContext(user.id);
+        loadUserContext();
       }
     } catch (err) {
       console.error('Key generation error:', err);
@@ -150,12 +156,12 @@ export default function App() {
     if (!user) return;
     setIsPerformingAction(true);
     try {
-      const res = await fetch(`/api/keys/${keyId}?userId=${user.id}`, {
+      const res = await fetch(`/api/keys/${keyId}`, {
         method: 'DELETE'
       });
       if (res.ok) {
         // Reload keys listing
-        loadUserContext(user.id);
+        loadUserContext();
       }
     } catch (err) {
       console.error('Key revoking error:', err);
@@ -174,38 +180,14 @@ export default function App() {
       const res = await fetch('/api/credits/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, pack: packName })
+        body: JSON.stringify({ pack: packName })
       });
       if (res.ok) {
-        const data = await res.json();
         // Immediately reload user credentials containing topped-up values
-        await loadUserContext(user.id);
+        await loadUserContext();
       }
     } catch (err) {
       console.error('Purchase transactions failed:', err);
-    } finally {
-      setIsPerformingAction(false);
-    }
-  };
-
-  const handleLoginSuccess = async (email: string) => {
-    setIsPerformingAction(true);
-    try {
-      const res = await fetch('/api/auth/login', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setUser(data.user);
-        
-        // Load credits and list scans belonging to this freshly authorized user profile
-        await loadUserContext(data.user.id);
-        setCurrentView('dashboard');
-      }
-    } catch (err) {
-      console.error('Sign-in synchronization failure:', err);
     } finally {
       setIsPerformingAction(false);
     }
@@ -283,10 +265,9 @@ export default function App() {
         {currentView === 'progress' && selectedScanId && (
           <ScanProgress
             scanId={selectedScanId}
-            userId={user?.id || 'user_default'}
             onScanFinished={(scanId) => {
               // Refresh history lists & immediately route to viewer page
-              if (user) loadUserContext(user.id);
+              if (user) loadUserContext();
               handleNavigate('report', scanId);
             }}
             onCancel={() => {
@@ -301,7 +282,7 @@ export default function App() {
             scan={activeScan}
             previousScan={scans.filter(s => s.url === activeScan.url && s.id !== activeScan.id && new Date(s.createdAt).getTime() < new Date(activeScan.createdAt).getTime()).sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())[0]}
             onBack={() => handleNavigate('dashboard')}
-            onRefreshScans={() => loadUserContext(user?.id || 'user_default')}
+            onRefreshScans={() => loadUserContext()}
           />
         )}
       </main>
@@ -310,7 +291,6 @@ export default function App() {
       {showLogin && (
         <LoginModal
           onClose={() => setShowLogin(false)}
-          onLoginSuccess={handleLoginSuccess}
         />
       )}
 

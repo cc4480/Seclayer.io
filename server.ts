@@ -1,33 +1,51 @@
 import express from 'express';
 import path from 'path';
+import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
+import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/email.js';
 
 async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Body parsers
+  // Body parsers + cookies
   app.use(express.json());
   app.use(express.urlencoded({ extended: true }));
+  app.use(cookieParser());
+
+  const SESSION_COOKIE = 'sl_session';
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax' as const,
+    path: '/',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  };
+
+  // Resolve the session cookie to a userId for every request. Identity is
+  // derived server-side from the signed session — never from client input.
+  app.use((req, res, next) => {
+    const token = req.cookies?.[SESSION_COOKIE];
+    if (token) {
+      const userId = db.getSessionUserId(token);
+      if (userId) (req as any).userId = userId;
+    }
+    next();
+  });
+
+  function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!(req as any).userId) {
+      return res.status(401).json({ status: 'error', message: 'Authentication required' });
+    }
+    next();
+  }
+  const getUserId = (req: express.Request): string => (req as any).userId;
 
   // --- API ROUTES ---
-
-  // Auth Routes
-  app.post('/api/auth/login', (req, res) => {
-    const { email } = req.body;
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ status: 'error', message: 'Valid email required' });
-    }
-    const user = db.getOrCreateUser(email);
-    res.json({ status: 'ok', user });
-  });
-
-  app.post('/api/auth/logout', (req, res) => {
-    res.json({ status: 'ok', message: 'Logged out successfully' });
-  });
 
   app.get('/api/system/health', (req, res) => {
     res.json({
@@ -37,9 +55,52 @@ async function startServer() {
     });
   });
 
-  app.get('/api/auth/me', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const user = db.getUser(userId);
+  // --- Auth (passwordless magic link) ---
+  app.post('/api/auth/request-link', async (req, res) => {
+    const { email } = req.body || {};
+    if (!email || typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return res.status(400).json({ status: 'error', message: 'A valid email address is required.' });
+    }
+    const normEmail = email.toLowerCase().trim();
+    const token = db.createLoginToken(normEmail);
+    const base = (process.env.APP_URL && process.env.APP_URL !== 'MY_APP_URL')
+      ? process.env.APP_URL.replace(/\/+$/, '')
+      : `${req.protocol}://${req.get('host')}`;
+    const link = `${base}/api/auth/verify?token=${token}`;
+    try {
+      const mail = buildMagicLinkEmail(link);
+      await sendEmail({ to: normEmail, subject: mail.subject, html: mail.html, text: mail.text });
+    } catch (err: any) {
+      console.error('Failed to send magic link email:', err?.message || err);
+      return res.status(502).json({ status: 'error', message: 'Could not send the sign-in email. Please try again shortly.' });
+    }
+    // Never reveal whether the email exists. With no email provider configured
+    // (dev/demo), return the link directly so the flow stays testable.
+    const devLink = isEmailConfigured() ? undefined : link;
+    res.json({ status: 'ok', message: 'If that email is valid, a sign-in link is on its way.', devLink });
+  });
+
+  app.get('/api/auth/verify', (req, res) => {
+    const token = req.query.token as string | undefined;
+    const email = token ? db.consumeLoginToken(token) : null;
+    if (!email) {
+      return res.status(400).send('<h1>Sign-in link invalid or expired</h1><p>Please request a new link from the Seclayer app.</p>');
+    }
+    const user = db.getOrCreateUser(email);
+    const session = db.createSession(user.id);
+    res.cookie(SESSION_COOKIE, session, cookieOptions);
+    res.redirect('/');
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const token = req.cookies?.[SESSION_COOKIE];
+    if (token) db.deleteSession(token);
+    res.clearCookie(SESSION_COOKIE, { ...cookieOptions, maxAge: undefined });
+    res.json({ status: 'ok', message: 'Logged out successfully' });
+  });
+
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    const user = db.getUser(getUserId(req));
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User profile not found' });
     }
@@ -47,8 +108,9 @@ async function startServer() {
   });
 
   // Scan Routes
-  app.post('/api/scans', async (req, res) => {
-    const { url, userId = 'user_default', authHeader } = req.body;
+  app.post('/api/scans', requireAuth, async (req, res) => {
+    const { url, authHeader } = req.body;
+    const userId = getUserId(req);
     if (!url) {
       return res.status(400).json({ status: 'error', message: 'Target URL is required' });
     }
@@ -84,28 +146,25 @@ async function startServer() {
     res.json({ status: 'ok', scan });
   });
 
-  app.get('/api/scans', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const scansList = db.listScans(userId).map(s => db.getScanWithSuppressedFindings(s));
+  app.get('/api/scans', requireAuth, (req, res) => {
+    const scansList = db.listScans(getUserId(req)).map(s => db.getScanWithSuppressedFindings(s));
     res.json({ scans: scansList });
   });
 
-  app.get('/api/scans/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+  app.get('/api/scans/:id', requireAuth, (req, res) => {
     let scan = db.getScan(req.params.id);
     // Enforce ownership: a scan ID alone must not grant access to another
     // user's results. Return 404 (not 403) to avoid leaking scan existence.
-    if (!scan || scan.userId !== userId) {
+    if (!scan || scan.userId !== getUserId(req)) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     scan = db.getScanWithSuppressedFindings(scan);
     res.json({ scan });
   });
 
-  app.get('/api/scans/:id/report', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+  app.get('/api/scans/:id/report', requireAuth, (req, res) => {
     let scan = db.getScan(req.params.id);
-    if (!scan || scan.userId !== userId) {
+    if (!scan || scan.userId !== getUserId(req)) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     if (scan.status !== 'complete') {
@@ -125,33 +184,30 @@ async function startServer() {
   });
 
   // --- False Positive & Suppression Rules ---
-  app.get('/api/suppressions', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const rules = db.listSuppressions(userId);
-    res.json({ suppressions: rules });
+  app.get('/api/suppressions', requireAuth, (req, res) => {
+    res.json({ suppressions: db.listSuppressions(getUserId(req)) });
   });
 
-  app.post('/api/suppressions', (req, res) => {
-    const { userId = 'user_default', targetUrl, findingTitle, reason } = req.body;
+  app.post('/api/suppressions', requireAuth, (req, res) => {
+    const { targetUrl, findingTitle, reason } = req.body;
     if (!targetUrl || !findingTitle) {
       return res.status(400).json({ error: 'targetUrl and findingTitle are required' });
     }
-    const rule = db.addSuppression(userId, targetUrl, findingTitle, reason || 'False positive confirmation');
+    const rule = db.addSuppression(getUserId(req), targetUrl, findingTitle, reason || 'False positive confirmation');
     res.json({ status: 'ok', rule });
   });
 
-  app.delete('/api/suppressions/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeSuppression(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/suppressions/:id', requireAuth, (req, res) => {
+    if (!db.removeSuppression(getUserId(req), req.params.id)) {
       return res.status(404).json({ error: 'Suppression exclusion rule not found' });
     }
     res.json({ status: 'ok' });
   });
 
-  app.post('/api/scans/:scanId/findings/:findingId/suppress', (req, res) => {
+  app.post('/api/scans/:scanId/findings/:findingId/suppress', requireAuth, (req, res) => {
     const { scanId, findingId } = req.params;
-    const { reason = 'Manual enterprise validation', userId = 'user_default' } = req.body;
+    const { reason = 'Manual enterprise validation' } = req.body;
+    const userId = getUserId(req);
 
     const scan = db.getScan(scanId);
     if (!scan || scan.userId !== userId) {
@@ -168,47 +224,42 @@ async function startServer() {
   });
 
   // --- Continuous Monitoring ---
-  app.get('/api/monitoring', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const monitoredTargets = db.listMonitoredTargets(userId);
-    res.json({ monitoredTargets });
+  app.get('/api/monitoring', requireAuth, (req, res) => {
+    res.json({ monitoredTargets: db.listMonitoredTargets(getUserId(req)) });
   });
 
-  app.post('/api/monitoring', (req, res) => {
-    const { url, frequencyDays = 7, scheduleString, userId = 'user_default' } = req.body;
+  app.post('/api/monitoring', requireAuth, (req, res) => {
+    const { url, frequencyDays = 7, scheduleString } = req.body;
     if (!url) {
       return res.status(400).json({ error: 'url is required' });
     }
-    const target = db.addMonitoredTarget(userId, url, frequencyDays, scheduleString);
+    const target = db.addMonitoredTarget(getUserId(req), url, frequencyDays, scheduleString);
     res.json({ status: 'ok', target });
   });
 
-  app.delete('/api/monitoring/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeMonitoredTarget(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/monitoring/:id', requireAuth, (req, res) => {
+    if (!db.removeMonitoredTarget(getUserId(req), req.params.id)) {
       return res.status(404).json({ error: 'Monitored target not found' });
     }
     res.json({ status: 'ok' });
   });
 
-  // Credit and checkout testing integration
-  app.get('/api/credits', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+  // --- Credits ---
+  app.get('/api/credits', requireAuth, (req, res) => {
+    const userId = getUserId(req);
     const user = db.getUser(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    // We can fetch transactions list from db
     res.json({
       credits: user.credits,
       transactions: db.listTransactions(userId)
     });
   });
 
-  // Mock Stripe Checkout test integration
-  app.post('/api/credits/checkout', (req, res) => {
-    const { userId = 'user_default', pack } = req.body;
-    
+  // Demo-mode checkout: grants credits instantly without a real payment.
+  // Replace with a real Stripe Checkout session + webhook before charging.
+  app.post('/api/credits/checkout', requireAuth, (req, res) => {
+    const { pack } = req.body;
+
     const PRICES = {
       single: { price: 29, credits: 1 },
       pack5: { price: 99, credits: 5 },
@@ -221,17 +272,15 @@ async function startServer() {
     }
 
     const sessionId = `cs_test_${Math.random().toString(36).substring(2, 15)}`;
-    
-    // We update the credits automatically as if Stripe webhook succeeded instantly, 
-    // but we can pass back the details for user review. Excellent interactive UX!
-    db.addCredits(userId, selectedPack.credits, 'purchase', sessionId);
-    
+    db.addCredits(getUserId(req), selectedPack.credits, 'purchase', sessionId);
+
     res.json({
       status: 'ok',
       url: `/dashboard?checkout_success=true&credits=${selectedPack.credits}`,
       sessionId,
       creditsAdded: selectedPack.credits,
-      pricePaid: selectedPack.price
+      pricePaid: selectedPack.price,
+      demoMode: true
     });
   });
 
@@ -241,22 +290,16 @@ async function startServer() {
   });
 
   // API Key routes for developer MCP usecases
-  app.get('/api/keys', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const keys = db.listApiKeys(userId);
-    res.json({ keys });
+  app.get('/api/keys', requireAuth, (req, res) => {
+    res.json({ keys: db.listApiKeys(getUserId(req)) });
   });
 
-  app.post('/api/keys', (req, res) => {
-    const { userId = 'user_default' } = req.body;
-    const keyObj = db.generateApiKey(userId);
-    res.json({ status: 'ok', key: keyObj });
+  app.post('/api/keys', requireAuth, (req, res) => {
+    res.json({ status: 'ok', key: db.generateApiKey(getUserId(req)) });
   });
 
-  app.delete('/api/keys/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.revokeApiKey(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/keys/:id', requireAuth, (req, res) => {
+    if (!db.revokeApiKey(getUserId(req), req.params.id)) {
       return res.status(404).json({ status: 'error', message: 'Key not found or could not be revoked' });
     }
     res.json({ status: 'ok' });
