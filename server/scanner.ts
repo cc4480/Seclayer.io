@@ -8,7 +8,7 @@ import * as dns from "dns/promises";
 // The scanner issues server-side HTTP requests to user-supplied targets, so it
 // must refuse internal/reserved destinations (loopback, RFC1918, link-local,
 // cloud metadata, CGNAT, etc.) to avoid being abused as an SSRF proxy.
-function isBlockedIp(ip: string): boolean {
+export function isBlockedIp(ip: string): boolean {
   if (net.isIPv4(ip)) {
     const [a, b] = ip.split(".").map(Number);
     if (a === 0) return true; // "this" network
@@ -101,6 +101,33 @@ export async function assertScanTargetSafe(targetUrl: string): Promise<void> {
   await assertTargetIsScannable(parsed);
 }
 
+// Follows redirects manually, re-validating every hop against the SSRF guard so
+// a target cannot 30x-redirect the scanner into internal infrastructure.
+async function safeFetch(targetUrl: string, options: RequestInit, maxRedirects = 4): Promise<Response> {
+  let current = targetUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    await assertTargetIsScannable(new URL(current));
+    const res = await fetch(current, { ...options, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (loc) {
+        current = new URL(loc, current).toString();
+        continue;
+      }
+    }
+    return res;
+  }
+  throw new Error(`Exceeded ${maxRedirects} redirects while scanning ${targetUrl}`);
+}
+
+// Heuristic: does this body look like an HTML document (e.g. a single-page-app
+// catch-all that returns index.html for every path)? Used to suppress false
+// positives where a 200 response is just the SPA shell, not a real exposed file.
+export function looksLikeHtml(body: string): boolean {
+  const head = body.slice(0, 512).toLowerCase();
+  return /<!doctype html|<html|<head|<body|<title|<div|<script|<meta/.test(head);
+}
+
 export interface DiagnosticResult {
   url: string;
   scannedAt: string;
@@ -117,6 +144,7 @@ export interface DiagnosticResult {
     file: string;
     issue: string;
     severity: Severity;
+    confidence: "low" | "medium" | "high";
     type: string;
     fix: string;
     description: string;
@@ -222,7 +250,7 @@ export async function runDiagnostics(
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 6000); // 6s timeout max
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       method: "GET",
       headers,
       signal: controller.signal,
@@ -282,130 +310,113 @@ export async function runDiagnostics(
       }
     }
 
-    // --- 2. SAST SCAN ENGINE (Regex Match HTML & JavaScript for Source Security) ---
+    // --- 2. SAST SCAN ENGINE (high-precision secret signatures only) ---
+    // Only patterns that are essentially never legitimately client-side are
+    // reported with high confidence. Identifiers that are frequently public by
+    // design (e.g. Firebase/Maps browser keys) are reported low/medium so they
+    // do not become false positives.
     if (htmlText) {
-      // Secret Key matches
       const patterns = [
         {
-          name: "Google Cloud API Key",
-          regex: /AIzaSy[A-Za-z0-9_\-]{35}/,
-          severity: "high" as Severity,
-        },
-        {
-          name: "Stripe Secret Key Placeholder",
-          regex: /sk_live_[0-9a-zA-Z]{24}/,
+          name: "Stripe Secret Key",
+          regex: /sk_live_[0-9a-zA-Z]{24,}/,
           severity: "critical" as Severity,
-        },
-        {
-          name: "Generic AWS Access Token Link",
-          regex: /AKIA[A-Z0-9]{16}/,
-          severity: "high" as Severity,
+          confidence: "high" as const,
+          note: "A Stripe live secret key grants full API access and must never appear client-side.",
         },
         {
           name: "GitHub OAuth Access Token",
           regex: /gho_[a-zA-Z0-9]{36}/,
           severity: "critical" as Severity,
+          confidence: "high" as const,
+          note: "A GitHub OAuth token grants repository access and must never be shipped to browsers.",
         },
         {
-          name: "Private Crypto Key block",
-          regex: /-----BEGIN RSA PRIVATE KEY-----/,
+          name: "Private Key Block",
+          regex: /-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/,
           severity: "critical" as Severity,
+          confidence: "high" as const,
+          note: "A PEM private key block was served to the client; the corresponding key must be rotated.",
+        },
+        {
+          name: "AWS Access Key ID",
+          regex: /AKIA[0-9A-Z]{16}/,
+          severity: "high" as Severity,
+          confidence: "medium" as const,
+          note: "An AWS access key id is exposed. Confirm the matching secret is not also leaked and rotate it.",
+        },
+        {
+          name: "Google API Key",
+          regex: /AIzaSy[A-Za-z0-9_\-]{33}/,
+          severity: "low" as Severity,
+          confidence: "low" as const,
+          note: "Google browser API keys are often intentionally public; verify it is restricted by HTTP referrer/API and not a server key.",
         },
       ];
 
       patterns.forEach((p) => {
         if (p.regex.test(htmlText)) {
           result.sastFindings.push({
-            file: "index.html (Inline Script)",
-            issue: `Hardcoded Credential Exposure (${p.name})`,
+            file: "Client-served HTML/JavaScript",
+            issue: `Exposed Credential Signature (${p.name})`,
             severity: p.severity,
+            confidence: p.confidence,
             type: "hardcoded_secrets",
-            description: `Leaked secret key signature pattern matching standard ${p.name} structure was detected exposed in client-facing HTML or inline scripts. Attackers scanning javascript payloads can harvest these credentials immediately.`,
-            fix: `Move all application secrets out of the client codebase. Implement environment variables in backend secure routers and proxy necessary third-party requests.`,
+            description: `A string matching the ${p.name} format was detected in the client-served response. ${p.note}`,
+            fix: `Remove the credential from client code, rotate it immediately, and proxy any required third-party calls through an authenticated backend that holds the secret server-side.`,
           });
         }
       });
-
-      // HTML DOM XSS sinks or debugging mode checks
-      if (/eval\s*\(/i.test(htmlText)) {
-        result.sastFindings.push({
-          file: "index.html",
-          issue: "Unsafe dynamic evaluation via eval()",
-          severity: "medium" as Severity,
-          type: "unsafe_sinks",
-          description:
-            "Use of eval() detected in page source. Dynamic evaluation of arbitrary input strings can easily lead to persistent or reflected Cross-Site Scripting (XSS) bypasses.",
-          fix: "Refactor code to avoid dynamic string expressions evaluation. Use standard JSON parsing or local function mappings.",
-        });
-      }
-
-      if (
-        /console\.log\([^)]*(process\.env|config|secrets)[^)]*\)/i.test(
-          htmlText,
-        )
-      ) {
-        result.sastFindings.push({
-          file: "index.html",
-          issue: "Sensitive Debug Logs Exposure",
-          severity: "low" as Severity,
-          type: "information_leak",
-          description:
-            "Debugging output that pipes environmental properties or system variables directly to browser console logs was detected.",
-          fix: "Configure build packager pipelines to strip console logs globally in production bundle environments.",
-        });
-      }
     }
 
-    // --- 3. SCA ANALYSIS ENGINE (Inspect scripts and headers for vulnerable library footprints) ---
+    // --- 3. SCA ANALYSIS ENGINE (vulnerable library footprints in markup) ---
+    // A library is only flagged when its version regex actually matches a known
+    // vulnerable range in the served markup. The reported version is the one
+    // captured from the page, and advisories are attributed per-library.
     if (htmlText) {
-      // Outdated libraries signature checks
       const libraries = [
         {
-          name: "jQuery 1.x / 2.x",
+          name: "jQuery",
           match: /jquery[-.](1\.\d+\.\d+|2\.\d+\.\d+)/i,
-          version: "1.12.4",
           severity: "medium" as Severity,
-          desc: "Outdated jQuery contains cross-site scripting vulnerabilities in htmlPrefilter parameter evaluations (CVE-2020-11022).",
-          fix: "Upgrade jQuery repository dependencies to version 3.5.0 or superior.",
+          advisories: ["CVE-2020-11022", "CVE-2020-11023"],
+          desc: "jQuery before 3.5.0 is affected by cross-site scripting via htmlPrefilter when passing untrusted HTML to DOM-manipulation methods.",
+          fix: "Upgrade jQuery to >= 3.5.0.",
         },
         {
-          name: "Bootstrap 3.x",
+          name: "Bootstrap",
           match: /bootstrap[-./](3\.\d+\.\d+)/i,
-          version: "3.3.7",
           severity: "medium" as Severity,
-          desc: "Bootstrap versions prior to v4 are vulnerable to CSS dynamic script executions and tooltip XSS models.",
-          fix: "Upgrade Bootstrap to >= 4.5.0 or migrate to standard tailwind styling paradigms.",
+          advisories: ["CVE-2019-8331"],
+          desc: "Bootstrap 3.x is affected by XSS in data-template/tooltip/popover handling and no longer receives security fixes.",
+          fix: "Upgrade Bootstrap to >= 4.3.1 (ideally 5.x).",
         },
         {
-          name: "AngularJS 1.8.x",
+          name: "AngularJS",
           match: /angular[-.](1\.[0-8]\.\d+)/i,
-          version: "1.8.2",
           severity: "low" as Severity,
-          desc: "Legacy AngularJS is long past End-of-Life (EOL), meaning zero future security audits or zero-day patches will be deployed.",
-          fix: "Re-platform obsolete client structures to modern React frameworks.",
+          advisories: ["EOL"],
+          desc: "AngularJS (1.x) is past end-of-life and receives no further security patches.",
+          fix: "Migrate off AngularJS to a maintained framework.",
         },
         {
-          name: "Lodash < 4.17.15",
-          match: /lodash@([0-3]\.\d+\.\d+|4\.[0-16]\.[0-5])/i,
-          version: "4.15.0",
+          name: "Lodash",
+          match: /lodash[@/-](4\.(?:[0-9]|1[0-6])\.\d+)\b/i,
           severity: "high" as Severity,
-          desc: "Vulnerable to Prototype Pollution allowing remote attackers to inject custom default object prototypes.",
-          fix: "Force upgrade lodash scripts to >= 4.17.21.",
+          advisories: ["CVE-2019-10744"],
+          desc: "lodash before 4.17.12 is vulnerable to prototype pollution via defaultsDeep.",
+          fix: "Upgrade lodash to >= 4.17.21.",
         },
       ];
 
       libraries.forEach((lib) => {
-        if (
-          lib.match.test(htmlText) ||
-          (setCookie &&
-            lib.name === "jQuery 1.x / 2.x" &&
-            /jquery/i.test(htmlText))
-        ) {
+        const m = lib.match.exec(htmlText);
+        if (m) {
           result.scaLibraries.push({
             name: lib.name,
-            version: lib.version,
+            version: m[1],
             status: "vuln",
-            advisories: ["CVE-2020-11022", "XSS Bypass"],
+            advisories: lib.advisories,
             severity: lib.severity,
             description: lib.desc,
             fix: lib.fix,
@@ -414,33 +425,13 @@ export async function runDiagnostics(
       });
     }
 
-    // --- 4. DAST INSECURE INPUTS CHECK (Check forms and actions) ---
-    if (htmlText) {
-      // Find form tags
-      const formRegex = /<form([^>]*action=["']([^"']*)["']([^>]*))>/gi;
-      let formMatch;
-      while ((formMatch = formRegex.exec(htmlText)) !== null) {
-        const action = formMatch[2];
-        const attrContent = formMatch[1] + formMatch[3];
-        const isPost = /method=["']post["']/i.test(attrContent);
-
-        // Analyze if CSRF token is present in elements inside or nearby (e.g. check for anti-csrf input tag)
-        // For simplicity: check if we see "csrf" or "token" fields
-        const hasCsrfInput = /csrf|token|xsrf/i.test(htmlText);
-
-        if (isPost && !hasCsrfInput) {
-          result.dastInputs.push({
-            formAction: action,
-            method: "POST",
-            csrfPresent: false,
-            vulnerability: "Missing Anti-CSRF Token Security Guard",
-            severity: "high" as Severity,
-            description: `Vulnerable endpoint detected: Form posting to "${action}" lacks an authenticated anti-forgery token. Attackers can execute unauthorized state-changing operations on behalf of users via malicious cross-site forms.`,
-            fix: `Implement standard CSRF secure tokens. Embed anti-csrf validation fields inside stateful forms and verify matching headers on target backend services.`,
-          });
-        }
-      }
-    }
+    // --- 4. DAST INSECURE INPUTS ---
+    // Black-box CSRF detection from static markup is unreliable: token-less
+    // forms are routinely protected by framework SameSite cookies or header
+    // tokens that are invisible to an unauthenticated crawl. To honour the
+    // zero-false-positive goal we do not infer CSRF gaps from markup alone;
+    // active state-changing CSRF testing requires an authenticated session and
+    // is out of scope for the black-box pass.
 
     // --- 5. EASM PERIMETER (Subdomains, DNS and Real Host IP Lookup) ---
     // Perform active Domain audit map
@@ -549,52 +540,44 @@ export async function runDiagnostics(
       });
     }
 
-    // Sensitive Paths Probing
-    const pathsToProbe = [
-      "/.env",
-      "/.git/config",
-      "/admin",
-      "/wp-admin",
-      "/phpinfo.php",
+    // Sensitive Paths Probing. A path is only treated as "exposed" when the
+    // response BODY actually matches the file's signature, not merely on a 200.
+    // This eliminates the dominant false positive: single-page apps that serve
+    // index.html (HTTP 200) for every unknown path including /.env.
+    const sensitiveProbes: Array<{ path: string; matches: (body: string) => boolean }> = [
+      { path: "/.env", matches: (b) => !looksLikeHtml(b) && /^[A-Z][A-Z0-9_]*\s*=/m.test(b) },
+      { path: "/.git/config", matches: (b) => /\[core\]/i.test(b) || /repositoryformatversion/i.test(b) },
+      { path: "/.git/HEAD", matches: (b) => /^ref:\s+refs\//m.test(b.trim()) },
+      { path: "/phpinfo.php", matches: (b) => /<title>phpinfo\(\)/i.test(b) || /PHP Version\s*</i.test(b) },
+      { path: "/.aws/credentials", matches: (b) => !looksLikeHtml(b) && /aws_access_key_id/i.test(b) },
+      { path: "/config.json", matches: (b) => !looksLikeHtml(b) && /"(password|secret|api[_-]?key|private[_-]?key)"\s*:/i.test(b) },
     ];
 
-    for (const p of pathsToProbe) {
+    for (const probe of sensitiveProbes) {
       try {
         const probeController = new AbortController();
-        const probeId = setTimeout(() => probeController.abort(), 2500); // short timeout
-        const probeUrl = `${host}${p}`;
-
-        const probeRes = await fetch(probeUrl, {
+        const probeId = setTimeout(() => probeController.abort(), 2500);
+        const probeRes = await safeFetch(`${host}${probe.path}`, {
           method: "GET",
-          headers: {
-            "User-Agent": "Seclayer-Security-Scanner/2.0 (seclayer.io)",
-          },
+          headers: { "User-Agent": "Seclayer-Security-Scanner/2.0 (seclayer.io)" },
           signal: probeController.signal,
         });
+        const body = await probeRes.text().catch(() => "");
         clearTimeout(probeId);
 
-        const isExposed = probeRes.status === 200;
-        result.probedPaths.push({
-          path: p,
-          status: probeRes.status,
-          exposed: isExposed,
-        });
+        const exposed = probeRes.status === 200 && probe.matches(body);
+        result.probedPaths.push({ path: probe.path, status: probeRes.status, exposed });
       } catch (err) {
-        result.probedPaths.push({
-          path: p,
-          status: 0,
-          exposed: false,
-        });
+        result.probedPaths.push({ path: probe.path, status: 0, exposed: false });
       }
     }
   } catch (err: any) {
-    console.warn(
-      `Scan connection to ${url} connections failed. Triggering default defensive audit layers.`,
-    );
-    result.responseStatus = 502;
-    result.missingHeaders = [];
-    result.techLeaked = [];
-    result.probedPaths = [];
+    // A failure reaching the target means we cannot assess it. Surface this as
+    // a failed scan rather than a misleading "clean" (no-findings) report.
+    if (err?.name === "AbortError") {
+      throw new Error(`Target ${url} did not respond within the timeout window.`);
+    }
+    throw new Error(`Unable to connect to ${url}: ${err?.message || "connection failed"}`);
   }
 
   // --- RED TEAM ACTIVE FUZZING PROBES ---
@@ -606,18 +589,17 @@ export async function runDiagnostics(
     try {
       const sqlCtl = new AbortController();
       const sqlId = setTimeout(() => sqlCtl.abort(), 4000);
-      const sqlRes = await fetch(`${url}/?id=%27%20OR%201%3D1--`, {
+      const sqlRes = await safeFetch(`${url}/?id=%27%20OR%201%3D1--`, {
         headers: fuzzHeaders,
         signal: sqlCtl.signal,
       });
       clearTimeout(sqlId);
       const sqlText = await sqlRes.text();
-      if (
-        sqlText.includes("syntax error") ||
-        sqlText.includes("SQL syntax") ||
-        sqlText.includes("ORA-") ||
-        sqlText.includes("PostgreSQL query failed")
-      ) {
+      // Match specific database error signatures only — never bare "syntax
+      // error", which appears in unrelated content and causes false positives.
+      const sqlErrorSig =
+        /(SQL syntax;|valid MySQL result|mysqli?_fetch|ORA-\d{4,5}|PLS-\d{4,5}|PostgreSQL.*?ERROR|PG::\w*Error|SQLSTATE\[|SQLite3?::|SQLiteException|Unclosed quotation mark after the character string|quoted string not properly terminated|Microsoft OLE DB Provider for SQL Server|ODBC SQL Server Driver|Npgsql\.)/i;
+      if (sqlErrorSig.test(sqlText)) {
         redTeamFindings.push({
           testName: "Active SQL Injection Probe",
           payload: "' OR 1=1--",
@@ -636,7 +618,7 @@ export async function runDiagnostics(
       const xssCtl = new AbortController();
       const xssId = setTimeout(() => xssCtl.abort(), 4000);
       const uniqueTrigger = `xss_probe_${crypto.randomBytes(4).toString("hex")}`;
-      const xssRes = await fetch(
+      const xssRes = await safeFetch(
         `${url}/?q=%3Cscript%3E${uniqueTrigger}%3C%2Fscript%3E`,
         { headers: fuzzHeaders, signal: xssCtl.signal },
       );
@@ -660,7 +642,7 @@ export async function runDiagnostics(
     try {
       const cmdCtl = new AbortController();
       const cmdId = setTimeout(() => cmdCtl.abort(), 4000);
-      const cmdRes = await fetch(`${url}/?ping=127.0.0.1%3B+id`, {
+      const cmdRes = await safeFetch(`${url}/?ping=127.0.0.1%3B+id`, {
         headers: fuzzHeaders,
         signal: cmdCtl.signal,
       });
@@ -685,7 +667,7 @@ export async function runDiagnostics(
       const ssrfCtl = new AbortController();
       const ssrfId = setTimeout(() => ssrfCtl.abort(), 4000);
       // Attempting to request localhost loopback or internal metadata
-      const ssrfRes = await fetch(`${url}/?url=http://127.0.0.1:22`, {
+      const ssrfRes = await safeFetch(`${url}/?url=http://127.0.0.1:22`, {
         headers: fuzzHeaders,
         signal: ssrfCtl.signal,
       });
@@ -727,7 +709,7 @@ export async function runDiagnostics(
       const gqlId = setTimeout(() => gqlCtl.abort(), 4000);
       const reqRaw = `POST /graphql HTTP/1.1\nHost: ${hostname}\nContent-Type: application/json\n\n{"query":"{__schema{types{name}}}"}`;
 
-      const gqlRes = await fetch(`${url}/graphql`, {
+      const gqlRes = await safeFetch(`${url}/graphql`, {
         method: "POST",
         headers: { ...apiHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ query: "{__schema{types{name}}}" }),
@@ -737,7 +719,16 @@ export async function runDiagnostics(
       const gqlText = await gqlRes.text();
       const resRaw = `HTTP/1.1 ${gqlRes.status} ${gqlRes.statusText}\n\n${gqlText.substring(0, 500)}...`;
 
-      if (gqlText.includes("__schema") || gqlText.includes("__Type")) {
+      // Confirm a real introspection RESULT (data.__schema.types), not merely
+      // the echoed query string or an error mentioning "__schema".
+      let introspectionExposed = false;
+      try {
+        const parsed = JSON.parse(gqlText);
+        introspectionExposed = Array.isArray(parsed?.data?.__schema?.types) && parsed.data.__schema.types.length > 0;
+      } catch {
+        introspectionExposed = false;
+      }
+      if (introspectionExposed) {
         apiSecFindings.push({
           testName: "GraphQL Schema Introspection Exposed",
           endpoint: "/graphql",
@@ -759,18 +750,29 @@ export async function runDiagnostics(
       const idorId = setTimeout(() => idorCtl.abort(), 4000);
       const reqRawIdor = `GET /api/v1/users/admin HTTP/1.1\nHost: ${hostname}\nAccept: application/json`;
 
-      const idorRes = await fetch(`${url}/api/v1/users/admin`, {
+      const idorRes = await safeFetch(`${url}/api/v1/users/admin`, {
         headers: apiHeaders,
         signal: idorCtl.signal,
       });
       clearTimeout(idorId);
       const idorText = await idorRes.text();
-      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorRes.headers.get("content-type") || "text/plain"}\n\n${idorText.substring(0, 500)}...`;
+      const idorCt = idorRes.headers.get("content-type") || "text/plain";
+      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorCt}\n\n${idorText.substring(0, 500)}...`;
 
-      if (
-        idorRes.status === 200 &&
-        (idorText.includes("email") || idorText.includes('"role"'))
-      ) {
+      // Only flag when a JSON user object is actually returned — a 200 HTML
+      // page that happens to contain the word "email" is not a BOLA.
+      let bolaConfirmed = false;
+      if (idorRes.status === 200 && /application\/json/i.test(idorCt)) {
+        try {
+          const obj = JSON.parse(idorText);
+          const candidate = obj?.user ?? obj?.data ?? obj;
+          bolaConfirmed = !!candidate && typeof candidate === "object" &&
+            ("email" in candidate || "role" in candidate || "username" in candidate);
+        } catch {
+          bolaConfirmed = false;
+        }
+      }
+      if (bolaConfirmed) {
         apiSecFindings.push({
           testName: "Broken Object Level Authorization (BOLA)",
           endpoint: "/api/v1/users/admin",
@@ -886,7 +888,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       title: sf.issue,
       description: sf.description,
       severity: sf.severity,
-      confidence: "low",
+      confidence: sf.confidence,
       fix: sf.fix,
       category: "SAST",
     });
