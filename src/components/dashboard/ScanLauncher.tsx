@@ -1,16 +1,21 @@
 import React, { useState } from 'react';
 import { Play, Globe, ArrowRight, AlertTriangle } from 'lucide-react';
+import { AuthProfile } from '../../types.js';
 
 interface ScanLauncherProps {
-  onInitiateScan: (url: string, authHeader?: string) => Promise<void>;
+  onInitiateScan: (url: string, authProfileId?: string, authHeader?: string) => Promise<void>;
   isPerformingAction: boolean;
+  authProfiles: AuthProfile[];
 }
 
-export default function ScanLauncher({ onInitiateScan, isPerformingAction }: ScanLauncherProps) {
+export default function ScanLauncher({ onInitiateScan, isPerformingAction, authProfiles }: ScanLauncherProps) {
   const [scanUrl, setScanUrl] = useState('');
-  const [authHeader, setAuthHeader] = useState('');
+  const [selectedProfileId, setSelectedProfileId] = useState<string>('');
+  const [customAuthHeader, setCustomAuthHeader] = useState('');
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [errorText, setErrorText] = useState('');
+
+  const isCustomHeader = selectedProfileId === '__custom__';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -18,9 +23,12 @@ export default function ScanLauncher({ onInitiateScan, isPerformingAction }: Sca
     const urlStr = scanUrl.trim();
     if (!urlStr) return;
     try {
-      await onInitiateScan(urlStr, authHeader.trim() || undefined);
+      const profileId = selectedProfileId && selectedProfileId !== '__custom__' ? selectedProfileId : undefined;
+      const authHeader = isCustomHeader ? (customAuthHeader.trim() || undefined) : undefined;
+      await onInitiateScan(urlStr, profileId, authHeader);
       setScanUrl('');
-      setAuthHeader('');
+      setSelectedProfileId('');
+      setCustomAuthHeader('');
     } catch (err: any) {
       setErrorText(err.message || 'Scan initiation failed.');
     }
@@ -70,18 +78,45 @@ export default function ScanLauncher({ onInitiateScan, isPerformingAction }: Sca
           {showAdvanced && (
             <div className="mt-3 p-3 bg-black/40 border border-[#27272a] rounded space-y-3">
               <div>
-                <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authorization Header</label>
-                <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Provide a valid Bearer token, basic auth, or custom header to test authenticated endpoints.</p>
-                <input
-                  type="text"
-                  className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded placeholder-[#52525b] transition-colors"
-                  placeholder="Bearer eyJhbGciOiJIUzI1..."
-                  value={authHeader}
-                  onChange={(e) => setAuthHeader(e.target.value)}
+                <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">
+                  Auth Profile
+                </label>
+                <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">
+                  Select a saved credential profile for authenticated scanning, or enter a raw Authorization header.
+                </p>
+                <select
+                  className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded transition-colors cursor-pointer"
+                  value={selectedProfileId}
+                  onChange={(e) => setSelectedProfileId(e.target.value)}
                   disabled={isPerformingAction}
-                  id="auth-header-input"
-                />
+                  id="auth-profile-select"
+                >
+                  <option value="">None (unauthenticated)</option>
+                  {authProfiles.map(profile => (
+                    <option key={profile.id} value={profile.id}>
+                      {profile.name} — {profile.type.toUpperCase()}
+                    </option>
+                  ))}
+                  <option value="__custom__">Custom Authorization Header...</option>
+                </select>
               </div>
+
+              {isCustomHeader && (
+                <div>
+                  <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">
+                    Authorization Header Value
+                  </label>
+                  <input
+                    type="text"
+                    className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded placeholder-[#52525b] transition-colors"
+                    placeholder="Bearer eyJhbGciOiJIUzI1..."
+                    value={customAuthHeader}
+                    onChange={(e) => setCustomAuthHeader(e.target.value)}
+                    disabled={isPerformingAction}
+                    id="auth-header-input"
+                  />
+                </div>
+              )}
             </div>
           )}
         </div>

@@ -5,13 +5,14 @@ import Dashboard from './pages/Dashboard.js';
 import ReportViewer from './pages/ReportViewer.js';
 import ScanProgress from './pages/ScanProgress.js';
 import LoginModal from './components/LoginModal.js';
-import { User, Scan, ApiKey } from './types.js';
+import { User, Scan, ApiKey, AuthProfile } from './types.js';
 import { apiFetch, setToken, clearToken, getToken } from './lib/api.js';
 
 export default function App() {
   const [user, setUser] = useState<User | null>(null);
   const [scans, setScans] = useState<Scan[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
+  const [authProfiles, setAuthProfiles] = useState<AuthProfile[]>([]);
   const [currentView, setCurrentView] = useState<'landing' | 'dashboard' | 'progress' | 'report'>('landing');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
@@ -38,13 +39,18 @@ export default function App() {
       const userData = await userRes.json();
       setUser(userData.user);
 
-      const [scansRes, keysRes] = await Promise.all([
+      const [scansRes, keysRes, profilesRes] = await Promise.all([
         apiFetch('/api/scans'),
         apiFetch('/api/keys'),
+        apiFetch('/api/auth-profiles'),
       ]);
 
       if (scansRes.ok) setScans((await scansRes.json()).scans);
       if (keysRes.ok) setApiKeys((await keysRes.json()).keys);
+      if (profilesRes.ok) {
+        const profilesData = await profilesRes.json();
+        setAuthProfiles(profilesData.profiles || profilesData || []);
+      }
     } catch (err) {
       console.error('Error loading user context:', err);
     } finally {
@@ -72,14 +78,14 @@ export default function App() {
     setTimeout(() => onInitiateScan(initialUrl), 400);
   };
 
-  const onInitiateScan = async (url: string, authHeader?: string) => {
+  const onInitiateScan = async (url: string, authProfileId?: string, authHeader?: string) => {
     if (!user) { setShowLogin(true); return; }
 
     setIsPerformingAction(true);
     try {
       const res = await apiFetch('/api/scans', {
         method: 'POST',
-        body: JSON.stringify({ url, authHeader }),
+        body: JSON.stringify({ url, authProfileId, authHeader }),
       });
 
       if (res.ok) {
@@ -136,6 +142,7 @@ export default function App() {
     setUser(null);
     setScans([]);
     setApiKeys([]);
+    setAuthProfiles([]);
     setCurrentView('landing');
   };
 
@@ -165,6 +172,7 @@ export default function App() {
             user={user}
             scans={scans}
             apiKeys={apiKeys}
+            authProfiles={authProfiles}
             onInitiateScan={onInitiateScan}
             onGenerateKey={onGenerateKey}
             onRevokeKey={onRevokeKey}

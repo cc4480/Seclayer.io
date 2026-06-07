@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
+import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget, AuthProfile } from '../src/types.js';
 
 const DEFAULT_DB_FILE = path.join(process.cwd(), 'db.json');
 
@@ -17,6 +17,7 @@ interface DbSchema {
   apiKeys: Record<string, ApiKey>;
   suppressions: SuppressionRule[];
   monitoredTargets: MonitoredTarget[];
+  authProfiles: Record<string, AuthProfile>;
 }
 
 export class LocalFileDb {
@@ -33,6 +34,7 @@ export class LocalFileDb {
       apiKeys: {},
       suppressions: [],
       monitoredTargets: [],
+      authProfiles: {},
     };
     this.load();
   }
@@ -45,6 +47,7 @@ export class LocalFileDb {
         this.data = {
           suppressions: [],
           monitoredTargets: [],
+          authProfiles: {},
           ...parsed,
         };
       }
@@ -388,6 +391,40 @@ export class LocalFileDb {
     }
 
     return scan;
+  }
+
+  // --- Auth Profiles ---
+  createAuthProfile(userId: string, data: Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>): AuthProfile {
+    const id = 'ap_' + crypto.randomBytes(8).toString('hex');
+    const profile: AuthProfile = { ...data, id, userId, createdAt: new Date().toISOString() };
+    this.data.authProfiles[id] = profile;
+    this.save();
+    return profile;
+  }
+
+  getAuthProfile(userId: string, id: string): AuthProfile | null {
+    const p = this.data.authProfiles[id];
+    return p && p.userId === userId ? p : null;
+  }
+
+  listAuthProfiles(userId: string): AuthProfile[] {
+    return Object.values(this.data.authProfiles).filter(p => p.userId === userId);
+  }
+
+  deleteAuthProfile(userId: string, id: string): boolean {
+    const p = this.data.authProfiles[id];
+    if (!p || p.userId !== userId) return false;
+    delete this.data.authProfiles[id];
+    this.save();
+    return true;
+  }
+
+  updateAuthProfile(userId: string, id: string, updates: Partial<Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>>): AuthProfile | null {
+    const p = this.data.authProfiles[id];
+    if (!p || p.userId !== userId) return null;
+    Object.assign(p, updates);
+    this.save();
+    return p;
   }
 }
 

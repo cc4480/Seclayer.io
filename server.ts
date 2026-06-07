@@ -4,6 +4,7 @@ import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
 import { db, LocalFileDb } from './server/db.js';
+import type { AuthProfile } from './src/types.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { generateAiReport } from './server/ai.js';
 import { runPentagiExploit } from './server/pentagi.js';
@@ -52,6 +53,74 @@ function validateTargetUrl(raw: string): string | null {
     return 'Scanning private/local addresses is not allowed.';
   }
   return null;
+}
+
+/** Resolve an AuthProfile into a concrete headers map. For form type, performs actual login. */
+async function resolveAuthProfile(profile: AuthProfile): Promise<Record<string, string>> {
+  switch (profile.type) {
+    case 'bearer':
+      return { Authorization: `Bearer ${profile.headerValue ?? ''}` };
+    case 'cookie':
+      return { Cookie: profile.headerValue ?? '' };
+    case 'header':
+      if (!profile.headerName) return {};
+      return { [profile.headerName]: profile.headerValue ?? '' };
+    case 'basic': {
+      const creds = Buffer.from(`${profile.username ?? ''}:${profile.password ?? ''}`).toString('base64');
+      return { Authorization: `Basic ${creds}` };
+    }
+    case 'form': {
+      const {
+        loginUrl, loginUsername = '', loginPassword = '',
+        loginUsernameField = 'username', loginPasswordField = 'password',
+      } = profile;
+      if (!loginUrl || !loginUsername) return {};
+
+      // Try JSON body login first (most modern apps)
+      try {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 8000);
+        const res = await fetch(loginUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0' },
+          body: JSON.stringify({ [loginUsernameField]: loginUsername, [loginPasswordField]: loginPassword }),
+          redirect: 'manual',
+          signal: ctrl.signal,
+        });
+        const body = await res.text().catch(() => '');
+        try {
+          const json = JSON.parse(body);
+          const token = json.token || json.access_token || json.accessToken || json.jwt || json.id_token || json.authToken;
+          if (token && typeof token === 'string') return { Authorization: `Bearer ${token}` };
+        } catch {}
+        const setCookie = res.headers.get('set-cookie');
+        if (setCookie && [200, 201, 302, 301].includes(res.status)) {
+          return { Cookie: setCookie.split(';')[0] };
+        }
+      } catch {}
+
+      // Fallback: form-encoded login
+      try {
+        const ctrl = new AbortController();
+        setTimeout(() => ctrl.abort(), 8000);
+        const res = await fetch(loginUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded', 'User-Agent': 'Mozilla/5.0' },
+          body: new URLSearchParams({ [loginUsernameField]: loginUsername, [loginPasswordField]: loginPassword }).toString(),
+          redirect: 'manual',
+          signal: ctrl.signal,
+        });
+        const setCookie = res.headers.get('set-cookie');
+        if (setCookie && [200, 201, 302, 301].includes(res.status)) {
+          return { Cookie: setCookie.split(';')[0] };
+        }
+      } catch {}
+
+      return {};
+    }
+    default:
+      return {};
+  }
 }
 
 export function createApp(dbInstance: LocalFileDb) {
@@ -224,11 +293,23 @@ export function createApp(dbInstance: LocalFileDb) {
 
   // Scans
   app.post('/api/scans', scanLimiter, requireAuth, async (req, res) => {
-    const { url, authHeader } = req.body;
+    const { url, authHeader, authProfileId } = req.body;
     if (!url) return res.status(400).json({ message: 'Target URL is required.' });
     const urlMsg = validateTargetUrl(url); if (urlMsg) return res.status(400).json({ message: urlMsg });
 
-    const scan = dbInstance.createScan(req.userId!, url, authHeader);
+    // Resolve auth profile to a header value for the scanner
+    let resolvedAuthHeader = authHeader;
+    if (authProfileId && !authHeader) {
+      const profile = dbInstance.getAuthProfile(req.userId!, authProfileId);
+      if (profile) {
+        const headers = await resolveAuthProfile(profile);
+        // Serialize to 'Authorization' header value if that's what was resolved
+        if (headers.Authorization) resolvedAuthHeader = headers.Authorization;
+        else if (headers.Cookie) resolvedAuthHeader = headers.Cookie;
+      }
+    }
+    const scan = dbInstance.createScan(req.userId!, url, resolvedAuthHeader);
+    if (authProfileId) dbInstance.updateScan(scan.id, { authProfileId });
     processScanJob(scan.id);
     res.json({ status: 'ok', scan });
   });
@@ -337,6 +418,60 @@ export function createApp(dbInstance: LocalFileDb) {
     const success = dbInstance.revokeApiKey(req.userId!, req.params.id);
     if (!success) return res.status(404).json({ error: 'Key not found.' });
     res.json({ status: 'ok' });
+  });
+
+  // --- AUTH PROFILES ---
+  app.get('/api/auth-profiles', requireAuth, (req, res) => {
+    res.json({ profiles: dbInstance.listAuthProfiles(req.userId!) });
+  });
+
+  app.post('/api/auth-profiles', requireAuth, (req, res) => {
+    const { name, type, headerName, headerValue, username, password,
+            loginUrl, loginUsernameField, loginPasswordField, loginUsername, loginPassword } = req.body;
+    if (!name || !type) return res.status(400).json({ error: 'name and type are required.' });
+    const VALID_TYPES = ['cookie', 'bearer', 'header', 'basic', 'form'];
+    if (!VALID_TYPES.includes(type)) return res.status(400).json({ error: 'Invalid auth type.' });
+    const profile = dbInstance.createAuthProfile(req.userId!, {
+      name, type, headerName, headerValue, username, password,
+      loginUrl, loginUsernameField, loginPasswordField, loginUsername, loginPassword,
+    });
+    res.status(201).json({ profile });
+  });
+
+  app.delete('/api/auth-profiles/:id', requireAuth, (req, res) => {
+    const ok = dbInstance.deleteAuthProfile(req.userId!, req.params.id);
+    if (!ok) return res.status(404).json({ error: 'Auth profile not found.' });
+    res.json({ status: 'ok' });
+  });
+
+  app.post('/api/auth-profiles/:id/test', requireAuth, async (req, res) => {
+    const profile = dbInstance.getAuthProfile(req.userId!, req.params.id);
+    if (!profile) return res.status(404).json({ error: 'Auth profile not found.' });
+    const { testUrl } = req.body;
+    if (!testUrl) return res.status(400).json({ error: 'testUrl is required.' });
+    const urlErr = validateTargetUrl(testUrl);
+    if (urlErr) return res.status(400).json({ error: urlErr });
+    try {
+      const headers = await resolveAuthProfile(profile);
+      if (Object.keys(headers).length === 0) {
+        return res.json({ success: false, status: 0, message: 'Could not resolve auth credentials (form login may have failed or credentials are incomplete).' });
+      }
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 8000);
+      const testRes = await fetch(testUrl, { headers: { ...headers, 'User-Agent': 'Mozilla/5.0' }, signal: ctrl.signal });
+      const ok = testRes.status < 400;
+      // Mark as verified
+      dbInstance.updateAuthProfile(req.userId!, req.params.id, { verifiedAt: new Date().toISOString() });
+      res.json({
+        success: ok,
+        status: testRes.status,
+        message: ok
+          ? `Auth confirmed — ${testUrl} returned HTTP ${testRes.status}`
+          : `Auth may be invalid — ${testUrl} returned HTTP ${testRes.status} (401/403 indicates rejected credentials)`,
+      });
+    } catch (err: any) {
+      res.json({ success: false, status: 0, message: `Request failed: ${err.message}` });
+    }
   });
 
   // --- ENTERPRISE ENDPOINTS ---
@@ -591,16 +726,23 @@ export function createApp(dbInstance: LocalFileDb) {
   // 5. PentAGI — real multi-stage automated exploit runner
   app.get('/api/enterprise/pentagi/logs', requireAuth, async (req, res) => {
     const url = req.query.url as string | undefined;
+    const authProfileId = req.query.authProfileId as string | undefined;
     if (!url) {
       return res.status(400).json({ error: 'Target url query parameter is required.' });
     }
     const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
     try {
-      const logs = await runPentagiExploit(url);
+      let authHeaders: Record<string, string> = {};
+      if (authProfileId) {
+        const profile = dbInstance.getAuthProfile(req.userId!, authProfileId);
+        if (profile) authHeaders = await resolveAuthProfile(profile);
+      }
+      const logs = await runPentagiExploit(url, authHeaders);
       res.json({
         success: true,
         engine: 'PentAGI Autonomous Multi-Agent Pentest Coordinator',
         agents: ['Scout Agent', 'Exploiter Agent', 'Reporter Agent'],
+        authenticated: Object.keys(authHeaders).length > 0,
         logs,
       });
     } catch (err: any) {

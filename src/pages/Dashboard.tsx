@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 import { Terminal, ArrowRight } from 'lucide-react';
-import { Scan, ApiKey, User } from '../types.js';
+import { Scan, ApiKey, User, AuthProfile } from '../types.js';
 import ScanLauncher from '../components/dashboard/ScanLauncher.js';
 import ApiKeyPanel from '../components/dashboard/ApiKeyPanel.js';
 import ScansTab from '../components/dashboard/ScansTab.js';
@@ -8,24 +8,27 @@ import MonitoringTab from '../components/dashboard/MonitoringTab.js';
 import OrchestratorTab from '../components/dashboard/OrchestratorTab.js';
 import ExclusionsTab from '../components/dashboard/ExclusionsTab.js';
 import ApiDocsTab from '../components/dashboard/ApiDocsTab.js';
+import AuthProfilesTab from '../components/dashboard/AuthProfilesTab.js';
 
 interface DashboardProps {
   user: User;
   scans: Scan[];
   apiKeys: ApiKey[];
-  onInitiateScan: (url: string, authHeader?: string) => Promise<void>;
+  authProfiles: AuthProfile[];
+  onInitiateScan: (url: string, authProfileId?: string, authHeader?: string) => Promise<void>;
   onGenerateKey: () => void;
   onRevokeKey: (keyId: string) => void;
   onViewReport: (scanId: string) => void;
   isPerformingAction: boolean;
 }
 
-type ActiveTab = 'scans' | 'orchestrator' | 'monitoring' | 'exclusions' | 'api-docs';
+type ActiveTab = 'scans' | 'orchestrator' | 'monitoring' | 'exclusions' | 'auth-profiles' | 'api-docs';
 
 export default function Dashboard({
   user,
   scans,
   apiKeys,
+  authProfiles,
   onInitiateScan,
   onGenerateKey,
   onRevokeKey,
@@ -39,6 +42,7 @@ export default function Dashboard({
     { id: 'orchestrator', label: '[+] Autonomous AI Attacks' },
     { id: 'monitoring', label: '[+] Continuous Monitoring' },
     { id: 'exclusions', label: '[+] Risk Exclusions & FP Rules' },
+    { id: 'auth-profiles', label: '[+] Auth Profiles' },
     { id: 'api-docs', label: '[+] API Documentation' },
   ];
 
@@ -80,7 +84,11 @@ export default function Dashboard({
         {/* Scan launcher + API keys grid */}
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-8">
           <div className="lg:col-span-7">
-            <ScanLauncher onInitiateScan={onInitiateScan} isPerformingAction={isPerformingAction} />
+            <ScanLauncher
+              onInitiateScan={onInitiateScan}
+              isPerformingAction={isPerformingAction}
+              authProfiles={authProfiles}
+            />
           </div>
           <div className="lg:col-span-5">
             <ApiKeyPanel apiKeys={apiKeys} onGenerateKey={onGenerateKey} onRevokeKey={onRevokeKey} />
@@ -117,6 +125,9 @@ export default function Dashboard({
           )}
           {activeTab === 'exclusions' && (
             <ExclusionsTab userId={user.id} scanCount={scans.length} />
+          )}
+          {activeTab === 'auth-profiles' && (
+            <AuthProfilesTab />
           )}
           {activeTab === 'api-docs' && (
             <ApiDocsTab apiKeys={apiKeys} />
