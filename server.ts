@@ -1,3 +1,4 @@
+import './server/env.js'; // must run first: loads .env before any module reads process.env
 import express from 'express';
 import path from 'path';
 import cookieParser from 'cookie-parser';
