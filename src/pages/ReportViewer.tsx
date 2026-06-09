@@ -554,6 +554,14 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                                   Conf: {finding.confidence}
                                 </span>
                               )}
+                              {finding.owasp && (
+                                <span
+                                  title={finding.owasp}
+                                  className="text-[9px] font-mono uppercase px-2 py-0.5 rounded border border-purple-500/30 bg-black text-purple-300"
+                                >
+                                  {finding.owasp.split(' – ')[0]}
+                                </span>
+                              )}
                               <h5 className={`text-xs font-bold font-mono tracking-tight leading-snug ${finding.isFalsePositive ? 'text-zinc-500 line-through' : 'text-white'}`}>{finding.title}</h5>
                             </div>
                             <span className="text-[10px] text-[#52525b] font-mono tracking-wide">ID: {finding.id}</span>

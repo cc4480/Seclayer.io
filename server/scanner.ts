@@ -3,6 +3,7 @@ import { scoreFindings } from "./scoring.js";
 import { crawlSite, InjectableTarget } from "./crawler.js";
 import { runTemplates } from "./templateEngine.js";
 import { TEMPLATES } from "./templates.js";
+import { mapOwasp } from "./owasp.js";
 import crypto from "crypto";
 import net from "net";
 import * as dns from "dns/promises";
@@ -1145,6 +1146,11 @@ export function compileStaticFindings(diag: DiagnosticResult): {
     seenTitles.add(key);
     return true;
   });
+
+  // Tag each finding with its OWASP Top 10 (2021) category.
+  for (const f of deduped) {
+    if (!f.owasp) f.owasp = mapOwasp(f.category, f.title);
+  }
 
   // Score via the shared scoring module so the initial score and any later
   // recalculation (after suppression) always use identical weights.

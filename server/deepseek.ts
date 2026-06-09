@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { Finding, Severity } from '../src/types.js';
+import { mapOwasp } from './owasp.js';
 
 // DeepSeek exposes an OpenAI-compatible chat completions API, so we talk to it
 // directly over fetch and avoid pulling in a heavyweight SDK dependency.
@@ -111,13 +112,8 @@ Ensure the returned output is strictly valid JSON compliant with the required st
 
     // Safeguard values
     const finalScore = Math.max(10, Math.min(100, Number(data.adjustedScore ?? staticCompiled.score)));
-    const finalFindings: Finding[] = (data.findings || []).map((f: any, idx: number) => ({
-      id: `f_gen_${idx}_${crypto.randomUUID().slice(0,4)}`,
-      title: f.title || 'Vulnerability Finding',
-      description: f.description || '',
-      severity: (['info', 'low', 'medium', 'high', 'critical'].includes(f.severity?.toLowerCase()) ? f.severity.toLowerCase() : 'low') as Severity,
-      fix: f.fix || '',
-      category: (() => {
+    const finalFindings: Finding[] = (data.findings || []).map((f: any, idx: number) => {
+      const category = (() => {
         const cat = String(f.category || '').toUpperCase().replace(' ', '_');
         if (['DAST', 'SAST', 'IAST', 'SCA', 'EASM', 'RED_TEAM'].includes(cat)) return cat;
         if (cat.includes('RED') || cat.includes('TEAM') || cat.includes('FUZZ') || cat.includes('EXPLOIT')) return 'RED_TEAM';
@@ -126,8 +122,18 @@ Ensure the returned output is strictly valid JSON compliant with the required st
         if (cat.includes('INTERFACE') || cat.includes('INTERACT') || cat.includes('COOKIE') || cat.includes('SESSION')) return 'IAST';
         if (cat.includes('SURFACE') || cat.includes('DNS') || cat.includes('PORT') || cat.includes('ATTACK') || cat.includes('SSL') || cat.includes('DOMAIN') || cat.includes('CERT')) return 'EASM';
         return 'DAST';
-      })()
-    }));
+      })();
+      const title = f.title || 'Vulnerability Finding';
+      return {
+        id: `f_gen_${idx}_${crypto.randomUUID().slice(0,4)}`,
+        title,
+        description: f.description || '',
+        severity: (['info', 'low', 'medium', 'high', 'critical'].includes(f.severity?.toLowerCase()) ? f.severity.toLowerCase() : 'low') as Severity,
+        fix: f.fix || '',
+        category,
+        owasp: mapOwasp(category, title),
+      };
+    });
 
     // Find highest severity from findings
     let finalSeverity: Severity = 'low';
