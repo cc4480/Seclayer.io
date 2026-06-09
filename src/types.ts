@@ -6,6 +6,7 @@ export interface User {
   email: string;
   credits: number;
   apiKey: string;
+  notifyWebhook?: string; // optional Slack-compatible alert webhook
   createdAt: string;
 }
 

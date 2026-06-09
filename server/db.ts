@@ -105,6 +105,15 @@ class SqliteDb {
       );
       CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(userId);
     `);
+    // Additive column migrations (safe across existing databases).
+    this.addColumnIfMissing("users", "notifyWebhook", "TEXT");
+  }
+
+  private addColumnIfMissing(table: string, column: string, decl: string) {
+    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === column)) {
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+    }
   }
 
   // --- Magic-link auth + sessions ---
@@ -162,7 +171,15 @@ class SqliteDb {
   // --- Row mappers ---
   private rowToUser(row: any): User | undefined {
     if (!row) return undefined;
-    return { id: row.id, email: row.email, credits: row.credits, apiKey: row.apiKey, createdAt: row.createdAt };
+    return {
+      id: row.id, email: row.email, credits: row.credits, apiKey: row.apiKey,
+      notifyWebhook: row.notifyWebhook ?? undefined, createdAt: row.createdAt,
+    };
+  }
+
+  setUserWebhook(userId: string, url: string | null): User | undefined {
+    this.db.prepare("UPDATE users SET notifyWebhook = ? WHERE id = ?").run(url, userId);
+    return this.getUser(userId);
   }
 
   private rowToScan(row: any): Scan | undefined {

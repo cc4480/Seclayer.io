@@ -64,6 +64,31 @@ export default function Dashboard({
   const [monitorTime, setMonitorTime] = useState('09:00');
   const [isAddingMonitor, setIsAddingMonitor] = useState(false);
 
+  // Alert webhook (Slack-compatible)
+  const [webhookUrl, setWebhookUrl] = useState(user.notifyWebhook || '');
+  const [webhookSaving, setWebhookSaving] = useState(false);
+  const [webhookSaved, setWebhookSaved] = useState(false);
+
+  const saveWebhook = async () => {
+    setWebhookSaving(true);
+    setWebhookSaved(false);
+    try {
+      const res = await fetch('/api/user/webhook', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: webhookUrl.trim() })
+      });
+      if (res.ok) {
+        setWebhookSaved(true);
+        setTimeout(() => setWebhookSaved(false), 2500);
+      }
+    } catch (err) {
+      console.error('Error saving webhook:', err);
+    } finally {
+      setWebhookSaving(false);
+    }
+  };
+
   const fetchSuppressRules = async () => {
     try {
       const res = await fetch(`/api/suppressions`);
@@ -709,6 +734,31 @@ export default function Dashboard({
                   <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
                     Set up automated, recurring scans for your critical infrastructure. Monitoring tasks will automatically deduct credits from your balance per execution.
                   </p>
+                </div>
+              </div>
+
+              <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5">
+                <h3 className="text-sm font-bold font-mono text-white mb-1.5">Alert Webhook <span className="text-[10px] text-[#52525b] font-normal">(Slack-compatible, optional)</span></h3>
+                <p className="text-[10px] text-[#a1a1aa] mb-3">Get notified when any scan (manual or monitored) finds high/critical issues. Paste a Slack incoming webhook or any JSON endpoint.</p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+                    <input
+                      type="text"
+                      className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 placeholder-[#52525b]"
+                      placeholder="https://hooks.slack.com/services/…"
+                      value={webhookUrl}
+                      onChange={(e) => setWebhookUrl(e.target.value)}
+                      id="webhook-input"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={saveWebhook}
+                    disabled={webhookSaving}
+                    className="px-4 py-2 bg-[#18181b] hover:bg-[#27272a] text-white text-[11px] font-mono font-bold uppercase tracking-wider border border-[#27272a] rounded transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                  >
+                    {webhookSaving ? 'Saving…' : webhookSaved ? 'Saved ✓' : webhookUrl.trim() ? 'Save Webhook' : 'Disable'}
+                  </button>
                 </div>
               </div>
 

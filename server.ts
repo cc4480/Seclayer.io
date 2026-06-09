@@ -10,6 +10,7 @@ import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/emai
 import { config, validateConfigOnBoot } from './server/config.js';
 import { rateLimit } from './server/rateLimit.js';
 import { createCheckoutSession, parseWebhookEvent, isStripeConfigured } from './server/stripe.js';
+import { notifyScanComplete } from './server/notify.js';
 
 async function startServer() {
   validateConfigOnBoot();
@@ -298,6 +299,16 @@ async function startServer() {
     res.json({ status: 'ok' });
   });
 
+  // --- Alert webhook (Slack-compatible) ---
+  app.put('/api/user/webhook', requireAuth, (req, res) => {
+    const { url } = req.body || {};
+    if (url && (typeof url !== 'string' || !/^https?:\/\//i.test(url))) {
+      return res.status(400).json({ status: 'error', message: 'Webhook must be an http(s) URL, or empty to disable.' });
+    }
+    const user = db.setUserWebhook(getUserId(req), url ? url.trim() : null);
+    res.json({ status: 'ok', notifyWebhook: user?.notifyWebhook ?? null });
+  });
+
   // --- Credits ---
   app.get('/api/credits', requireAuth, (req, res) => {
     const userId = getUserId(req);
@@ -415,7 +426,7 @@ async function startServer() {
       const staticCompiled = compileStaticFindings(diagnostics);
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
-      db.updateScan(scanId, {
+      const completed = db.updateScan(scanId, {
         status: 'complete',
         score: outputReport.score,
         severity: outputReport.severity,
@@ -424,6 +435,10 @@ async function startServer() {
         completedAt: new Date().toISOString()
       });
       console.log(`[Job Worker] Completed scan ${scanId}`);
+
+      // Fire the user's alert webhook for actionable results (non-blocking).
+      const owner = db.getUser(completed.userId);
+      notifyScanComplete(owner?.notifyWebhook, db.getScanWithSuppressedFindings(completed));
 
     } catch (err: any) {
       console.error(`[Job Worker] FAILED scan ${scanId}:`, err?.message || err);

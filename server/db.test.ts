@@ -75,6 +75,14 @@ test('Stripe webhook idempotency: a session is only credited once', () => {
   assert.equal(db.hasTransactionForSession(sessionId), true); // retry would be skipped
 });
 
+test('user alert webhook can be set and cleared', () => {
+  const u = db.getOrCreateUser('hook@test.io');
+  assert.equal(u.notifyWebhook, undefined);
+  assert.equal(db.setUserWebhook(u.id, 'https://hooks.slack.com/x')!.notifyWebhook, 'https://hooks.slack.com/x');
+  assert.equal(db.getUser(u.id)!.notifyWebhook, 'https://hooks.slack.com/x');
+  assert.equal(db.setUserWebhook(u.id, null)!.notifyWebhook, undefined);
+});
+
 test('monitoring scheduler surfaces only due targets', () => {
   const u = db.getOrCreateUser('monitor@test.io');
   const t = db.addMonitoredTarget(u.id, 'https://watch.test', 7);
