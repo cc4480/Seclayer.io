@@ -13,7 +13,10 @@ import { createCheckoutSession, parseWebhookEvent, isStripeConfigured } from './
 import { notifyScanComplete } from './server/notify.js';
 
 async function startServer() {
-  validateConfigOnBoot();
+  if (!validateConfigOnBoot() && config.isProd) {
+    console.error('[config] Refusing to start: production-critical configuration is missing (see warnings above).');
+    process.exit(1);
+  }
 
   const app = express();
   const PORT = config.port;
@@ -112,9 +115,10 @@ async function startServer() {
     }
     const normEmail = email.toLowerCase().trim();
     const token = db.createLoginToken(normEmail);
-    const base = (process.env.APP_URL && process.env.APP_URL !== 'MY_APP_URL')
-      ? process.env.APP_URL.replace(/\/+$/, '')
-      : `${req.protocol}://${req.get('host')}`;
+    // Build the link from a TRUSTED base only. In production APP_URL is required
+    // (enforced at boot), so the attacker-controllable Host header is never used
+    // for auth links. The request-host fallback is dev-only.
+    const base = config.appUrl || `${req.protocol}://${req.get('host')}`;
     const link = `${base}/api/auth/verify?token=${token}`;
     try {
       const mail = buildMagicLinkEmail(link);
@@ -123,9 +127,10 @@ async function startServer() {
       console.error('Failed to send magic link email:', err?.message || err);
       return res.status(502).json({ status: 'error', message: 'Could not send the sign-in email. Please try again shortly.' });
     }
-    // Never reveal whether the email exists. With no email provider configured
-    // (dev/demo), return the link directly so the flow stays testable.
-    const devLink = isEmailConfigured() ? undefined : link;
+    // The login link contains a live session-granting token, so it is ONLY ever
+    // returned in the response for local development (no email provider). In
+    // production it is never exposed — it is delivered by email exclusively.
+    const devLink = (!config.isProd && !isEmailConfigured()) ? link : undefined;
     res.json({ status: 'ok', message: 'If that email is valid, a sign-in link is on its way.', devLink });
   });
 
@@ -300,10 +305,19 @@ async function startServer() {
   });
 
   // --- Alert webhook (Slack-compatible) ---
-  app.put('/api/user/webhook', requireAuth, (req, res) => {
+  app.put('/api/user/webhook', requireAuth, async (req, res) => {
     const { url } = req.body || {};
-    if (url && (typeof url !== 'string' || !/^https?:\/\//i.test(url))) {
-      return res.status(400).json({ status: 'error', message: 'Webhook must be an http(s) URL, or empty to disable.' });
+    if (url) {
+      if (typeof url !== 'string') {
+        return res.status(400).json({ status: 'error', message: 'Webhook must be an http(s) URL, or empty to disable.' });
+      }
+      // Block internal/reserved destinations (SSRF) at set time; delivery is
+      // re-validated as well in case DNS changes later.
+      try {
+        await assertScanTargetSafe(url.trim());
+      } catch {
+        return res.status(400).json({ status: 'error', message: 'Webhook must be a public http(s) URL (internal/reserved addresses are not allowed).' });
+      }
     }
     const user = db.setUserWebhook(getUserId(req), url ? url.trim() : null);
     res.json({ status: 'ok', notifyWebhook: user?.notifyWebhook ?? null });
@@ -327,6 +341,7 @@ async function startServer() {
       return res.status(503).json({ status: 'error', message: 'Payments are not currently available. Please contact support.' });
     }
     const { pack } = req.body;
+    // Trusted base only (APP_URL enforced in production); dev falls back to host.
     const base = config.appUrl || `${req.protocol}://${req.get('host')}`;
     try {
       const url = await createCheckoutSession(getUserId(req), pack, base);

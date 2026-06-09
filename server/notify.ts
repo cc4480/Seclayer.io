@@ -1,4 +1,5 @@
 import { Scan, Finding } from "../src/types.js";
+import { assertScanTargetSafe } from "./scanner.js";
 
 // Outbound scan-completion alerts to a user-configured webhook (Slack incoming
 // webhooks and generic JSON endpoints both accept the { text, ... } payload).
@@ -48,7 +49,15 @@ export function buildScanNotification(scan: Scan): ScanNotification {
 // Never throws — notification failures must not affect the scan.
 export async function notifyScanComplete(webhook: string | undefined, scan: Scan): Promise<void> {
   if (!webhook || !shouldNotify(scan)) return;
-  if (!/^https?:\/\//i.test(webhook)) return;
+  // SSRF guard: the webhook host is user-controlled, so apply the same internal/
+  // reserved-address block used for scan targets (also defeats DNS rebinding by
+  // validating at delivery time). Refuse internal/non-http destinations.
+  try {
+    await assertScanTargetSafe(webhook);
+  } catch {
+    console.warn("[notify] webhook destination blocked (internal/invalid host); skipping delivery.");
+    return;
+  }
   try {
     const payload = buildScanNotification(scan);
     const ctl = new AbortController();

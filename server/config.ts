@@ -36,7 +36,8 @@ export function validateConfigOnBoot(): boolean {
 
   if (config.isProd) {
     if (!config.appUrl) {
-      warnings.push('APP_URL is not set in production — magic-link URLs will fall back to the inbound request host.');
+      warnings.push('APP_URL is required in production (used to build magic-link and checkout URLs from a trusted host, not the request Host header).');
+      prodCriticalMissing = true;
     }
     if (!config.emailConfigured) {
       warnings.push('Running in production without an email provider: users will NOT receive sign-in links.');
