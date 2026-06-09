@@ -1,9 +1,10 @@
 import { Finding, Severity } from "../src/types.js";
 import { scoreFindings } from "./scoring.js";
-import { crawlSite, InjectableTarget } from "./crawler.js";
+import { crawlSite, targetsFromHtml, dedupeTargets, paramsOf, InjectableTarget } from "./crawler.js";
 import { runTemplates } from "./templateEngine.js";
 import { TEMPLATES } from "./templates.js";
 import { mapOwasp } from "./owasp.js";
+import { renderPage, isRenderingEnabled } from "./render.js";
 import crypto from "crypto";
 import net from "net";
 import * as dns from "dns/promises";
@@ -854,15 +855,31 @@ export async function runDiagnostics(
         seedHtml: rootHtml,
       });
 
-      const getTargets = crawl.targets.filter((t) => t.method === "GET" && t.params.length > 0);
+      // Optional headless rendering: merge JS-rendered links and XHR/fetch
+      // endpoints the static crawl cannot see (no-op unless explicitly enabled).
+      let allTargets = crawl.targets;
+      if (isRenderingEnabled()) {
+        const rendered = await renderPage(url, { "User-Agent": headers["User-Agent"], ...authHeaders });
+        if (rendered) {
+          const renderedTargets = [
+            ...targetsFromHtml(rendered.html, url),
+            ...rendered.requestedUrls
+              .map((u) => ({ url: u, method: "GET" as const, params: paramsOf(u), source: "script" as const }))
+              .filter((t) => t.params.length > 0),
+          ];
+          allTargets = dedupeTargets([...crawl.targets, ...renderedTargets]);
+        }
+      }
+
+      const getTargets = allTargets.filter((t) => t.method === "GET" && t.params.length > 0);
       const fuzz = await fuzzDiscoveredTargets(getTargets, { ...headers, "Cache-Control": "no-cache" });
       result.redTeamFindings = [...(result.redTeamFindings || []), ...fuzz.findings];
 
       result.crawl = {
         pagesVisited: crawl.pagesVisited,
-        endpointsDiscovered: crawl.targets.length,
+        endpointsDiscovered: allTargets.length,
         paramsTested: fuzz.paramsTested,
-        sampleEndpoints: crawl.targets.slice(0, 8).map((t) => {
+        sampleEndpoints: allTargets.slice(0, 8).map((t) => {
           try {
             return new URL(t.url).pathname + (t.params.length ? `?${t.params.join("&")}` : "");
           } catch {

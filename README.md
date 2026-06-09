@@ -2,13 +2,25 @@
 
 Pay-Per-Scan black-box penetration testing SaaS with an MCP scan endpoint.
 
-Seclayer runs real black-box checks against a target URL — security headers,
-TLS, cookie flags, exposed-secret signatures, vulnerable-library detection,
-DNS/subdomain recon, sensitive-path probing, and active SQLi / XSS /
-command-injection / SSRF / GraphQL / object-level-authorization probes — then
-enriches the results with a DeepSeek-generated executive report and a posture
-score. Findings are designed for high precision (signature-confirmed) to avoid
-false positives.
+Seclayer runs real black-box checks against a target URL, then enriches the
+results with a DeepSeek-generated executive report and a posture score. Every
+finding is mapped to its OWASP Top 10 (2021) category, and detections are
+signature-confirmed for high precision (low false positives).
+
+**Scan coverage**
+
+- Security headers, TLS, and cookie flags
+- Exposed-secret signatures + vulnerable JavaScript library detection
+- DNS/subdomain recon and signature-confirmed sensitive-path probing
+- **Crawler + parameter discovery** — maps links, forms, and JS-referenced API
+  endpoints, then fuzzes the parameters the app actually uses
+- Active SQLi / XSS / command-injection / SSRF / GraphQL / object-level-auth probes
+- **Template engine** — data-driven detections (exposed panels, actuators,
+  config/backup files); grow coverage by adding templates, no code changes
+- **Authenticated scans** — Bearer/Basic/Cookie/custom-header credentials applied
+  across the whole request surface
+- **Optional headless rendering** (Playwright) for SPA/JS-heavy targets
+- **Continuous monitoring** with scheduled re-scans and Slack-compatible alerts
 
 ## Stack
 
@@ -51,6 +63,7 @@ See [.env.example](.env.example). Key variables:
 | `PORT` | Listen port (default 3000) |
 | `APP_URL` | Public base URL (magic-link + checkout redirect URLs) |
 | `DB_PATH` | SQLite file path (default `./data.sqlite`) |
+| `ENABLE_BROWSER_RENDERING` | `true` to crawl SPAs via headless Playwright (opt-in; install Playwright separately) |
 | `DEEPSEEK_API_KEY` | Enables AI reports (else local summaries) |
 | `RESEND_API_KEY` / `EMAIL_FROM` | Sends magic-link emails (else console) |
 | `STRIPE_SECRET_KEY` / `STRIPE_WEBHOOK_SECRET` | Enables credit purchases |

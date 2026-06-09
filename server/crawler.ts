@@ -115,6 +115,22 @@ export function extractScriptEndpoints(html: string, baseUrl: string): string[] 
   return [...out];
 }
 
+// Extracts all injectable targets from a single HTML document: forms, JS-
+// referenced API endpoints, and links that carry query parameters.
+export function targetsFromHtml(html: string, baseUrl: string): InjectableTarget[] {
+  const targets: InjectableTarget[] = [];
+  targets.push(...extractForms(html, baseUrl));
+  for (const ep of extractScriptEndpoints(html, baseUrl)) {
+    const p = paramsOf(ep);
+    if (p.length) targets.push({ url: ep, method: "GET", params: p, source: "script" });
+  }
+  for (const link of extractLinks(html, baseUrl)) {
+    const p = paramsOf(link);
+    if (p.length) targets.push({ url: link, method: "GET", params: p, source: "query" });
+  }
+  return targets;
+}
+
 // Collapses targets that fuzz the same endpoint + parameter set.
 export function dedupeTargets(targets: InjectableTarget[]): InjectableTarget[] {
   const seen = new Map<string, InjectableTarget>();
@@ -165,15 +181,9 @@ export async function crawlSite(
 
   const ingestHtml = (html: string, url: string, depth: number) => {
     pages.push(url);
-    targets.push(...extractForms(html, url));
-    for (const ep of extractScriptEndpoints(html, url)) {
-      const p = paramsOf(ep);
-      if (p.length) targets.push({ url: ep, method: "GET", params: p, source: "script" });
-    }
+    targets.push(...targetsFromHtml(html, url));
     if (depth < maxDepth) {
       for (const link of extractLinks(html, url)) {
-        const p = paramsOf(link);
-        if (p.length) targets.push({ url: link, method: "GET", params: p, source: "query" });
         if (!visited.has(stripFragment(link))) queue.push({ url: link, depth: depth + 1 });
       }
     }

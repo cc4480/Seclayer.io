@@ -4,6 +4,7 @@ import {
   extractLinks,
   extractForms,
   extractScriptEndpoints,
+  targetsFromHtml,
   paramsOf,
   dedupeTargets,
   sameOrigin,
@@ -78,6 +79,19 @@ test('dedupeTargets collapses same endpoint+params and drops param-less targets'
     { url: 'https://app.test/login', method: 'POST', params: ['user'], source: 'form' },
   ]);
   assert.equal(deduped.length, 2); // one /s?q + one POST /login
+});
+
+test('targetsFromHtml combines forms, script endpoints, and parameterized links', () => {
+  const html = `
+    <a href="/products?category=books">Books</a>
+    <a href="/about">About</a>
+    <form action="/login" method="post"><input name="email"></form>
+    <script>fetch("/api/cart?itemId=5")</script>`;
+  const targets = targetsFromHtml(html, BASE);
+  const keys = targets.map((t) => `${t.method} ${new URL(t.url).pathname}`).sort();
+  assert.deepEqual(keys, ['GET /api/cart', 'GET /products', 'POST /login']);
+  // /about has no params -> not an injectable target
+  assert.ok(!targets.some((t) => t.url.includes('/about')));
 });
 
 test('crawlSite discovers targets from seeded root HTML without extra fetches for a static seed', async () => {
