@@ -1,5 +1,6 @@
 import { Finding, Severity } from "../src/types.js";
 import { scoreFindings } from "./scoring.js";
+import { crawlSite, InjectableTarget } from "./crawler.js";
 import crypto from "crypto";
 import net from "net";
 import * as dns from "dns/promises";
@@ -184,6 +185,12 @@ export interface DiagnosticResult {
     description: string;
     fix: string;
   }>;
+  crawl?: {
+    pagesVisited: number;
+    endpointsDiscovered: number;
+    paramsTested: number;
+    sampleEndpoints: string[];
+  };
   apiSecFindings?: Array<{
     testName: string;
     severity: Severity;
@@ -243,6 +250,8 @@ export async function runDiagnostics(
     headers["Authorization"] = authHeader;
   }
 
+  let rootHtml = ""; // root document HTML, reused to seed the crawler
+
   try {
     // 1. Core Header Analysis
     const controller = new AbortController();
@@ -263,6 +272,7 @@ export async function runDiagnostics(
     });
 
     const htmlText = await response.text().catch(() => "");
+    rootHtml = htmlText;
 
     // Analyze Security Headers
     const securityHeaders = {
@@ -795,7 +805,129 @@ export async function runDiagnostics(
 
   result.apiSecFindings = apiSecFindings;
 
+  // --- CRAWL + DISCOVERED-PARAMETER FUZZING ---
+  // Map the real attack surface (links, forms, JS-referenced endpoints) and aim
+  // the injection probes at the parameters the application actually uses, rather
+  // than only a few hardcoded names. Strictly bounded by page/request/time caps.
+  try {
+    if (rootHtml && result.responseStatus > 0) {
+      const crawl = await crawlSite(url, (u, init) => safeFetch(u, init), {
+        maxPages: 10,
+        maxDepth: 2,
+        budgetMs: 15000,
+        seedHtml: rootHtml,
+      });
+
+      const getTargets = crawl.targets.filter((t) => t.method === "GET" && t.params.length > 0);
+      const fuzz = await fuzzDiscoveredTargets(getTargets, { ...headers, "Cache-Control": "no-cache" });
+      result.redTeamFindings = [...(result.redTeamFindings || []), ...fuzz.findings];
+
+      result.crawl = {
+        pagesVisited: crawl.pagesVisited,
+        endpointsDiscovered: crawl.targets.length,
+        paramsTested: fuzz.paramsTested,
+        sampleEndpoints: crawl.targets.slice(0, 8).map((t) => {
+          try {
+            return new URL(t.url).pathname + (t.params.length ? `?${t.params.join("&")}` : "");
+          } catch {
+            return t.url;
+          }
+        }),
+      };
+    }
+  } catch (crawlErr) {
+    console.warn("Crawl/fuzz stage encountered an error", crawlErr);
+  }
+
   return result;
+}
+
+// Active injection fuzzing of discovered GET parameters. Reuses the same SQLi
+// error signatures and reflected-XSS token strategy as the root-level probes,
+// but injects into real discovered parameters. Globally request-capped.
+async function fuzzDiscoveredTargets(
+  targets: InjectableTarget[],
+  fuzzHeaders: Record<string, string>,
+): Promise<{ findings: any[]; paramsTested: number }> {
+  const MAX_REQUESTS = 24;
+  const MAX_PARAMS_PER_TARGET = 3;
+  const findings: any[] = [];
+  const reported = new Set<string>(); // dedupe by testName+endpoint+param
+  let budget = MAX_REQUESTS;
+  let paramsTested = 0;
+
+  const sqlErrorSig =
+    /(SQL syntax;|valid MySQL result|mysqli?_fetch|ORA-\d{4,5}|PLS-\d{4,5}|PostgreSQL.*?ERROR|PG::\w*Error|SQLSTATE\[|SQLite3?::|SQLiteException|Unclosed quotation mark after the character string|quoted string not properly terminated|Microsoft OLE DB Provider for SQL Server|ODBC SQL Server Driver|Npgsql\.)/i;
+
+  const buildUrl = (base: string, param: string, value: string): string => {
+    const u = new URL(base);
+    u.searchParams.set(param, value);
+    return u.toString();
+  };
+
+  const probe = async (target: string): Promise<string> => {
+    const ctl = new AbortController();
+    const id = setTimeout(() => ctl.abort(), 4000);
+    try {
+      const res = await safeFetch(target, { headers: fuzzHeaders, signal: ctl.signal });
+      return await res.text();
+    } finally {
+      clearTimeout(id);
+    }
+  };
+
+  for (const t of targets) {
+    if (budget <= 0) break;
+    let endpointPath = t.url;
+    try {
+      endpointPath = new URL(t.url).pathname;
+    } catch {}
+
+    for (const param of t.params.slice(0, MAX_PARAMS_PER_TARGET)) {
+      if (budget <= 0) break;
+      paramsTested++;
+
+      // SQL injection: error-based signature on a discovered parameter.
+      try {
+        budget--;
+        const text = await probe(buildUrl(t.url, param, "' OR 1=1-- -"));
+        const key = `sqli:${endpointPath}:${param}`;
+        if (sqlErrorSig.test(text) && !reported.has(key)) {
+          reported.add(key);
+          findings.push({
+            testName: "SQL Injection (discovered parameter)",
+            payload: `${param}=' OR 1=1-- -`,
+            severity: "critical",
+            description: `Injecting SQL metacharacters into the discovered parameter "${param}" on ${endpointPath} provoked a database error in the response, indicating an exploitable SQL injection.`,
+            fix: "Use parameterized queries / prepared statements for this endpoint; never concatenate request input into SQL.",
+          });
+        }
+      } catch { /* probe failed */ }
+
+      if (budget <= 0) break;
+
+      // Reflected XSS: unique token reflected unencoded.
+      try {
+        budget--;
+        const token = `sx${crypto.randomBytes(4).toString("hex")}`;
+        const payload = `<svg/onload=${token}>`;
+        const text = await probe(buildUrl(t.url, param, payload));
+        const key = `xss:${endpointPath}:${param}`;
+        if (text.includes(payload) && !reported.has(key)) {
+          reported.add(key);
+          findings.push({
+            testName: "Reflected XSS (discovered parameter)",
+            payload: `${param}=${payload}`,
+            severity: "high",
+            description: `The discovered parameter "${param}" on ${endpointPath} reflects unencoded HTML/JavaScript into the response, confirming a reflected Cross-Site Scripting vulnerability.`,
+            fix: "Apply context-aware output encoding for this parameter and deploy a restrictive Content-Security-Policy.",
+          });
+        }
+      } catch { /* probe failed */ }
+    }
+  }
+
+  return { findings, paramsTested };
 }
 
 // Convert diagnostics into structured Category Findings
@@ -805,6 +937,20 @@ export function compileStaticFindings(diag: DiagnosticResult): {
   findings: Finding[];
 } {
   const findings: Finding[] = [];
+
+  // 0. Surface mapping summary (informational, zero score impact).
+  if (diag.crawl && (diag.crawl.pagesVisited > 1 || diag.crawl.endpointsDiscovered > 0)) {
+    const c = diag.crawl;
+    findings.push({
+      id: "f_" + crypto.randomBytes(4).toString("hex"),
+      title: `Application Surface Mapped (${c.pagesVisited} pages, ${c.endpointsDiscovered} endpoints)`,
+      description: `The crawler mapped ${c.pagesVisited} same-origin page(s) and discovered ${c.endpointsDiscovered} parameterized endpoint(s); ${c.paramsTested} parameter(s) were actively fuzzed.${c.sampleEndpoints.length ? ` Examples: ${c.sampleEndpoints.join(", ")}.` : ""}`,
+      severity: "info",
+      confidence: "high",
+      fix: "No action required — this maps the tested attack surface for context.",
+      category: "DAST",
+    });
+  }
 
   // 1. EASM (External Attack Surface Management) checks
   if (!diag.sslSecure) {
