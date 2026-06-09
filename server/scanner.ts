@@ -1,8 +1,9 @@
 import { Finding, Severity } from "../src/types.js";
 import { scoreFindings } from "./scoring.js";
 import { crawlSite, targetsFromHtml, dedupeTargets, paramsOf, InjectableTarget } from "./crawler.js";
-import { runTemplates } from "./templateEngine.js";
+import { runTemplates, selectTemplates } from "./templateEngine.js";
 import { TEMPLATES } from "./templates.js";
+import { detectTechTags } from "./techprofile.js";
 import { mapOwasp } from "./owasp.js";
 import { renderPage, isRenderingEnabled } from "./render.js";
 import crypto from "crypto";
@@ -897,7 +898,11 @@ export async function runDiagnostics(
   // Each template confirms via a body signature, so SPA fallbacks aren't flagged.
   try {
     if (result.responseStatus > 0) {
-      result.templateFindings = await runTemplates(host, authedFetch, TEMPLATES);
+      // Gate framework-specific templates by the detected tech profile so the
+      // pack scales without running every stack's checks against every target.
+      const techTags = detectTechTags(result.headers, rootHtml);
+      const selected = selectTemplates(TEMPLATES, techTags);
+      result.templateFindings = await runTemplates(host, authedFetch, selected, 6);
     }
   } catch (tplErr) {
     console.warn("Template detection stage encountered an error", tplErr);

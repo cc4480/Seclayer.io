@@ -11,7 +11,7 @@ import { Template } from "./templateEngine.js";
 
 const NOT_HTML = { type: "word" as const, words: ["<!doctype", "<html", "<head", "<body"], negative: true };
 
-export const TEMPLATES: Template[] = [
+const RAW_TEMPLATES: Template[] = [
   {
     id: "spring-actuator-env",
     name: "Spring Boot Actuator /env Exposed",
@@ -1429,3 +1429,34 @@ export const TEMPLATES: Template[] = [
     ],
   },
 ];
+
+// Framework-coupled templates only run when that stack is detected (see
+// techprofile.ts). Everything else is generic and always runs.
+const TEMPLATE_TAGS: Record<string, string[]> = {
+  "spring-actuator-env": ["spring"],
+  "spring-actuator-health": ["spring"],
+  "actuator-configprops-exposed": ["spring"],
+  "jolokia-exposed": ["java"],
+  "webinf-web-xml-exposed": ["java"],
+  "tomcat-manager-exposed": ["tomcat"],
+  "wp-config-backup": ["wordpress"],
+  "wp-config-save-exposed": ["wordpress"],
+  "wp-debug-log-exposed": ["wordpress"],
+  "wp-xmlrpc-enabled": ["wordpress"],
+  "wp-user-enumeration": ["wordpress"],
+  "laravel-telescope": ["laravel"],
+  "laravel-debugbar-exposed": ["laravel"],
+  "laravel-log-exposed": ["laravel"],
+  "symfony-profiler-exposed": ["symfony"],
+  "rails-info-exposed": ["rails"],
+  "drupal-changelog-exposed": ["drupal"],
+  "joomla-config-backup-exposed": ["joomla"],
+  "composer-json-exposed": ["php"],
+  "composer-lock-exposed": ["php"],
+  "web-config-exposed": ["aspnet"],
+};
+
+export const TEMPLATES: Template[] = RAW_TEMPLATES.map((t) => ({
+  ...t,
+  tags: TEMPLATE_TAGS[t.id],
+}));

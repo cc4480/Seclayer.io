@@ -36,6 +36,17 @@ export interface Template {
   description: string;
   fix: string;
   requests: TemplateRequest[];
+  // Optional tech tags (e.g. "wordpress", "spring"). A tagged template only
+  // runs when one of its tags is in the detected tech profile; untagged
+  // templates are generic and always run.
+  tags?: string[];
+}
+
+// Selects which templates to run for a target: all generic (untagged)
+// templates, plus tagged templates whose tech was detected. Keeps large packs
+// fast by skipping framework-specific checks on irrelevant stacks. Pure.
+export function selectTemplates(templates: Template[], activeTags: Set<string>): Template[] {
+  return templates.filter((t) => !t.tags || t.tags.length === 0 || t.tags.some((tag) => activeTags.has(tag)));
 }
 
 export interface ResponseView {
