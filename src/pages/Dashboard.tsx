@@ -271,12 +271,12 @@ export default function Dashboard({
                   {showAdvanced && (
                     <div className="mt-3 p-3 bg-black/40 border border-[#27272a] rounded space-y-3">
                       <div>
-                        <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authorization Header</label>
-                        <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Provide a valid Bearer token, basic auth, or custom header to test authenticated endpoints.</p>
+                        <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authentication (optional)</label>
+                        <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Applied to every request — root, crawl, probes and templates. Use a Bearer/Basic token, or an explicit header like <span className="text-[#22c55e]">Cookie: session=…</span> or <span className="text-[#22c55e]">X-API-Key: …</span>.</p>
                         <input
                           type="text"
                           className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded placeholder-[#52525b] transition-colors"
-                          placeholder="Bearer eyJhbGciOiJIUzI1..."
+                          placeholder="Bearer eyJhbGci…   |   Cookie: session=…   |   X-API-Key: …"
                           value={authHeader}
                           onChange={(e) => setAuthHeader(e.target.value)}
                           disabled={isPerformingAction}

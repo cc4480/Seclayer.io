@@ -132,6 +132,24 @@ export function looksLikeHtml(body: string): boolean {
   return /<!doctype html|<html|<head|<body|<title|<div|<script|<meta/.test(head);
 }
 
+// Parses a user-supplied credential into request headers for authenticated
+// scans. Accepts either a bare Authorization value ("Bearer …", "Basic …") or
+// an explicit "Header-Name: value" (e.g. "Cookie: session=…", "X-API-Key: …"),
+// enabling token, basic, cookie, or custom-header authentication.
+export function parseAuthHeader(authHeader?: string): Record<string, string> {
+  const raw = (authHeader || "").trim();
+  if (!raw) return {};
+  const idx = raw.indexOf(":");
+  if (idx > 0) {
+    const name = raw.slice(0, idx).trim();
+    const value = raw.slice(idx + 1).trim();
+    if (name && value && /^[A-Za-z0-9-]+$/.test(name) && !/^(bearer|basic|negotiate|digest)$/i.test(name)) {
+      return { [name]: value };
+    }
+  }
+  return { Authorization: raw };
+}
+
 export interface DiagnosticResult {
   url: string;
   scannedAt: string;
@@ -250,9 +268,23 @@ export async function runDiagnostics(
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   };
-  if (authHeader) {
-    headers["Authorization"] = authHeader;
-  }
+  // Authenticated scanning: the user-supplied credential is applied to EVERY
+  // request path (root fetch, probes, crawl, and templates) so auth-gated
+  // surface is actually reached.
+  const authHeaders = parseAuthHeader(authHeader);
+  Object.assign(headers, authHeaders);
+
+  // Wrapper that injects the auth + scanner identity into crawler/template
+  // requests, which otherwise only carry their own minimal headers.
+  const authedFetch = (u: string, init: RequestInit) =>
+    safeFetch(u, {
+      ...init,
+      headers: {
+        "User-Agent": headers["User-Agent"],
+        ...authHeaders,
+        ...((init.headers as Record<string, string>) || {}),
+      },
+    });
 
   let rootHtml = ""; // root document HTML, reused to seed the crawler
 
@@ -815,7 +847,7 @@ export async function runDiagnostics(
   // than only a few hardcoded names. Strictly bounded by page/request/time caps.
   try {
     if (rootHtml && result.responseStatus > 0) {
-      const crawl = await crawlSite(url, (u, init) => safeFetch(u, init), {
+      const crawl = await crawlSite(url, authedFetch, {
         maxPages: 10,
         maxDepth: 2,
         budgetMs: 15000,
@@ -848,7 +880,7 @@ export async function runDiagnostics(
   // Each template confirms via a body signature, so SPA fallbacks aren't flagged.
   try {
     if (result.responseStatus > 0) {
-      result.templateFindings = await runTemplates(host, (u, init) => safeFetch(u, init), TEMPLATES);
+      result.templateFindings = await runTemplates(host, authedFetch, TEMPLATES);
     }
   } catch (tplErr) {
     console.warn("Template detection stage encountered an error", tplErr);
