@@ -1,6 +1,8 @@
 import { Finding, Severity } from "../src/types.js";
 import { scoreFindings } from "./scoring.js";
 import { crawlSite, InjectableTarget } from "./crawler.js";
+import { runTemplates } from "./templateEngine.js";
+import { TEMPLATES } from "./templates.js";
 import crypto from "crypto";
 import net from "net";
 import * as dns from "dns/promises";
@@ -191,6 +193,7 @@ export interface DiagnosticResult {
     paramsTested: number;
     sampleEndpoints: string[];
   };
+  templateFindings?: Finding[];
   apiSecFindings?: Array<{
     testName: string;
     severity: Severity;
@@ -839,6 +842,17 @@ export async function runDiagnostics(
     console.warn("Crawl/fuzz stage encountered an error", crawlErr);
   }
 
+  // --- TEMPLATE-BASED DETECTIONS ---
+  // Data-driven checks (exposed panels, config/backup files, actuators, etc.).
+  // Each template confirms via a body signature, so SPA fallbacks aren't flagged.
+  try {
+    if (result.responseStatus > 0) {
+      result.templateFindings = await runTemplates(host, (u, init) => safeFetch(u, init), TEMPLATES);
+    }
+  } catch (tplErr) {
+    console.warn("Template detection stage encountered an error", tplErr);
+  }
+
   return result;
 }
 
@@ -1118,8 +1132,22 @@ export function compileStaticFindings(diag: DiagnosticResult): {
     });
   }
 
+  // Template engine findings (exposed panels, config/backup files, actuators).
+  if (diag.templateFindings && diag.templateFindings.length > 0) {
+    findings.push(...diag.templateFindings);
+  }
+
+  // Final dedupe by title so a check can never double-report the same issue.
+  const seenTitles = new Set<string>();
+  const deduped = findings.filter((f) => {
+    const key = f.title.toLowerCase();
+    if (seenTitles.has(key)) return false;
+    seenTitles.add(key);
+    return true;
+  });
+
   // Score via the shared scoring module so the initial score and any later
   // recalculation (after suppression) always use identical weights.
-  const { score, severity } = scoreFindings(findings);
-  return { score, severity, findings };
+  const { score, severity } = scoreFindings(deduped);
+  return { score, severity, findings: deduped };
 }
