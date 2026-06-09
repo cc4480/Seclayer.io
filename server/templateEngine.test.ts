@@ -89,6 +89,22 @@ test('wp user-enumeration requires both slug and name (and condition)', async ()
   assert.equal(await runTemplate(tpl, 'https://app.test', partial), null);
 });
 
+test('subdomain-takeover fires on a service fingerprint at root', async () => {
+  const tpl = TEMPLATES.find((t) => t.id === 'subdomain-takeover')!;
+  const dangling: any = async () => new Response("There isn't a GitHub Pages site here.", { status: 404, headers: { 'content-type': 'text/html' } });
+  const normal: any = async () => new Response('<!doctype html><html>Welcome</html>', { status: 200, headers: { 'content-type': 'text/html' } });
+  assert.ok(await runTemplate(tpl, 'https://sub.app.test', dangling));
+  assert.equal(await runTemplate(tpl, 'https://sub.app.test', normal), null);
+});
+
+test('netrc template regex matches machine login/password', async () => {
+  const tpl = TEMPLATES.find((t) => t.id === 'netrc-exposed')!;
+  const hit: any = async () => new Response('machine api.example.com login bob password s3cret', { status: 200, headers: { 'content-type': 'text/plain' } });
+  const miss: any = async () => new Response('nothing to see', { status: 200, headers: { 'content-type': 'text/plain' } });
+  assert.ok(await runTemplate(tpl, 'https://app.test', hit));
+  assert.equal(await runTemplate(tpl, 'https://app.test', miss), null);
+});
+
 test('shipped templates are well-formed', () => {
   const cats = new Set(['DAST', 'SAST', 'IAST', 'SCA', 'EASM', 'RED_TEAM']);
   const ids = new Set<string>();

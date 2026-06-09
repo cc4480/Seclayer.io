@@ -1132,4 +1132,300 @@ export const TEMPLATES: Template[] = [
       },
     ],
   },
+
+  // --- Dangling-resource / subdomain takeover (service "not found" fingerprints) ---
+  {
+    id: "subdomain-takeover",
+    name: "Potential Subdomain Takeover",
+    severity: "high",
+    category: "EASM",
+    confidence: "high",
+    description:
+      "The host responds with a third-party service's 'unclaimed resource' page, indicating a dangling DNS record an attacker could claim to take over the (sub)domain.",
+    fix: "Remove the dangling DNS record or re-claim the resource on the referenced provider.",
+    requests: [
+      {
+        path: "/",
+        matchers: [
+          {
+            type: "word",
+            words: [
+              "There isn't a GitHub Pages site here.",
+              "herokucdn.com",
+              "NoSuchBucket",
+              "Sorry, this shop is currently unavailable",
+              "Fastly error: unknown domain",
+              "The gods are wise, but do not know of the site which you seek.",
+              "is not configured for an account",
+              "Whatever you were looking for doesn't currently exist at this address",
+            ],
+            condition: "or",
+          },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Cloud storage / directory listing ---
+  {
+    id: "s3-bucket-listing",
+    name: "S3 Bucket Listing Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The endpoint returns an S3 XML bucket listing, exposing object keys (and potentially their contents) to anonymous users.",
+    fix: "Disable public list permissions on the bucket and apply a restrictive bucket policy.",
+    requests: [
+      {
+        path: "/",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["<ListBucketResult"] },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "open-directory-listing",
+    name: "Open Directory Listing Enabled",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The server returns an auto-generated directory index, exposing the file listing of the document root or a subdirectory.",
+    fix: "Disable automatic directory indexing (Apache Options -Indexes / nginx autoindex off).",
+    requests: [
+      {
+        path: "/",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["<title>Index of /", "[To Parent Directory]", "Directory listing for /"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Infrastructure / cloud credential files ---
+  {
+    id: "kubeconfig-exposed",
+    name: "Kubeconfig Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A kubeconfig file is publicly readable, embedding cluster endpoints and client certificate/token credentials.",
+    fix: "Remove the file from the web root and rotate the embedded cluster credentials.",
+    requests: [
+      {
+        path: "/.kube/config",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["client-certificate-data", "client-key-data", "current-context:"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "terraform-state-exposed",
+    name: "Terraform State Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Terraform state file is publicly readable; state frequently contains plaintext secrets, keys, and full infrastructure detail.",
+    fix: "Remove state from the web root, use a secured remote backend, and rotate any exposed secrets.",
+    requests: [
+      {
+        path: "/terraform.tfstate",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"terraform_version"', '"lineage"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/.terraform/terraform.tfstate",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"terraform_version"', '"lineage"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "docker-config-exposed",
+    name: "Docker Registry Config Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Docker client config is publicly readable, exposing base64-encoded registry credentials.",
+    fix: "Remove the file from the web root and rotate the registry credentials.",
+    requests: [
+      {
+        path: "/.docker/config.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"auths"', '"auth"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/.dockercfg",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"auth"', "https://index.docker.io"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "netrc-exposed",
+    name: ".netrc Credentials Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A .netrc file is publicly readable, exposing machine login/password pairs used for automated authentication.",
+    fix: "Remove .netrc from the web root and rotate the exposed credentials.",
+    requests: [
+      {
+        path: "/.netrc",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: "machine\\s+\\S+\\s+(login|password)\\s+\\S+" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "aws-config-exposed",
+    name: "AWS CLI Config Exposed",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An AWS CLI config file is publicly readable, disclosing profiles, regions, and role/account references.",
+    fix: "Remove the file from the web root.",
+    requests: [
+      {
+        path: "/.aws/config",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: "\\[(default|profile )" },
+          { type: "word", words: ["region", "role_arn", "output"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Exposed admin tooling / CMS config backups / artifacts ---
+  {
+    id: "tomcat-manager-exposed",
+    name: "Apache Tomcat Manager Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Tomcat Web Application Manager is reachable, a high-value target for deploying a malicious WAR (RCE) if credentials are weak.",
+    fix: "Restrict the manager app to trusted networks and use strong, unique credentials.",
+    requests: [
+      {
+        path: "/manager/html",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Tomcat Web Application Manager"] },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "wp-config-save-exposed",
+    name: "WordPress wp-config Editor Backup Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An editor/temp backup of wp-config.php is publicly readable, exposing database credentials and WordPress salts.",
+    fix: "Delete the backup, block dotted/tilde temp files, and rotate the exposed credentials.",
+    requests: [
+      {
+        path: "/wp-config.php.save",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["DB_PASSWORD", "DB_NAME"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/wp-config.php~",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["DB_PASSWORD", "DB_NAME"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "laravel-log-exposed",
+    name: "Laravel Log File Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Laravel application log is publicly readable, leaking stack traces, queries, and frequently secrets in error context.",
+    fix: "Store logs outside the web root and deny direct access to the storage directory.",
+    requests: [
+      {
+        path: "/storage/logs/laravel.log",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["production.ERROR", "local.ERROR", "Stack trace", "stacktrace"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "dsstore-exposed",
+    name: ".DS_Store File Exposed",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A macOS .DS_Store file is publicly readable, enabling reconstruction of the directory's file names.",
+    fix: "Remove .DS_Store files from the web root and add them to your ignore rules.",
+    requests: [
+      {
+        path: "/.DS_Store",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Bud1"] },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
 ];
