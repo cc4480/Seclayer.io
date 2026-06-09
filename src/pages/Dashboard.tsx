@@ -44,147 +44,13 @@ export default function Dashboard({
   // Production-ready addition state variables
   const [copiedKeyId, setCopiedKeyId] = useState<string | null>(null);
   const [revealKeyId, setRevealKeyId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<'scans' | 'billing' | 'exclusions' | 'orchestrator' | 'monitoring' | 'api-docs'>('orchestrator');
+  const [activeTab, setActiveTab] = useState<'scans' | 'billing' | 'exclusions' | 'monitoring' | 'api-docs'>('scans');
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState('all');
   const [filterSeverity, setFilterSeverity] = useState('all');
   const [prevCredits, setPrevCredits] = useState(credits);
   const [showToast, setShowToast] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
-
-  // --- Enterprise Orchestrator Microservices State Hooks ---
-  const [orchSubTab, setOrchSubTab] = useState<'aspm' | 'easm' | 'apiscan' | 'iast' | 'pentagi'>('pentagi');
-  
-  // 1. ASPM state
-  const [aspmUrl, setAspmUrl] = useState('staging.api.vulnerable-shop.io');
-  const [aspmRunning, setAspmRunning] = useState(false);
-  const [aspmOutput, setAspmOutput] = useState<any | null>(null);
-
-  // 2. EASM state
-  const [easmDomain, setEasmDomain] = useState('example-enterprise.com');
-  const [easmRunning, setEasmRunning] = useState(false);
-  const [easmData, setEasmData] = useState<any | null>(null);
-
-  // 3. Hadrian/APISCAN API Security state
-  const [apiSpecTitle, setApiSpecTitle] = useState('Swagger User Management Core');
-  const [apiScanRunning, setApiScanRunning] = useState(false);
-  const [apiMatrix, setApiMatrix] = useState<any | null>(null);
-
-  // 4. IAST state
-  const [iastPayload, setIastPayload] = useState("1' UNION SELECT credit_card_number FROM customers");
-  const [iastRunning, setIastRunning] = useState(false);
-  const [iastResult, setIastResult] = useState<any | null>(null);
-
-  // 5. PentAGI Agentic Pentest state
-  const [pentagiRunning, setPentagiRunning] = useState(false);
-  const [pentagiLogs, setPentagiLogs] = useState<any[]>([]);
-
-  // Orchestrator trigger handlers
-  const runAspmCorrelation = async () => {
-    setAspmRunning(true);
-    setAspmOutput(null);
-    try {
-      const res = await fetch('/api/enterprise/aspm/correlate', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: aspmUrl })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setAspmOutput(data);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setAspmRunning(false);
-    }
-  };
-
-  const runEasmRecon = async () => {
-    setEasmRunning(true);
-    setEasmData(null);
-    try {
-      const res = await fetch('/api/enterprise/easm/recon', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ domain: easmDomain })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setEasmData(data);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setEasmRunning(false);
-    }
-  };
-
-  const runHadrianScan = async () => {
-    setApiScanRunning(true);
-    setApiMatrix(null);
-    try {
-      const res = await fetch('/api/enterprise/api-scan/hadrian', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaTitle: apiSpecTitle })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setApiMatrix(data);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setApiScanRunning(false);
-    }
-  };
-
-  const runIastTrace = async () => {
-    setIastRunning(true);
-    setIastResult(null);
-    try {
-      const res = await fetch('/api/enterprise/iast/trace', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputPayload: iastPayload })
-      });
-      if (res.ok) {
-        const data = await res.json();
-        setIastResult(data);
-      }
-    } catch (err) {
-      console.error(err);
-    } finally {
-      setIastRunning(false);
-    }
-  };
-
-  const runPentagiExploitation = async () => {
-    setPentagiRunning(true);
-    setPentagiLogs([]);
-    try {
-      const targetUrl = scanUrl || 'staging.api.vulnerable.org';
-      const res = await fetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(targetUrl)}`);
-      if (res.ok) {
-        const data = await res.json();
-        // Stagger logs typewriter loading effect
-        let idx = 0;
-        const interval = setInterval(() => {
-          if (idx < data.logs.length) {
-            setPentagiLogs(prev => [...prev, data.logs[idx]]);
-            idx++;
-          } else {
-            clearInterval(interval);
-            setPentagiRunning(false);
-          }
-        }, 750);
-      }
-    } catch (err) {
-      console.error(err);
-      setPentagiRunning(false);
-    }
-  };
 
   // Dynamic false positives suppression rules states
   const [suppressRules, setSuppressRules] = useState<any[]>([]);
@@ -198,9 +64,34 @@ export default function Dashboard({
   const [monitorTime, setMonitorTime] = useState('09:00');
   const [isAddingMonitor, setIsAddingMonitor] = useState(false);
 
+  // Alert webhook (Slack-compatible)
+  const [webhookUrl, setWebhookUrl] = useState(user.notifyWebhook || '');
+  const [webhookSaving, setWebhookSaving] = useState(false);
+  const [webhookSaved, setWebhookSaved] = useState(false);
+
+  const saveWebhook = async () => {
+    setWebhookSaving(true);
+    setWebhookSaved(false);
+    try {
+      const res = await fetch('/api/user/webhook', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: webhookUrl.trim() })
+      });
+      if (res.ok) {
+        setWebhookSaved(true);
+        setTimeout(() => setWebhookSaved(false), 2500);
+      }
+    } catch (err) {
+      console.error('Error saving webhook:', err);
+    } finally {
+      setWebhookSaving(false);
+    }
+  };
+
   const fetchSuppressRules = async () => {
     try {
-      const res = await fetch(`/api/suppressions?userId=${user.id || 'user_default'}`);
+      const res = await fetch(`/api/suppressions`);
       if (res.ok) {
         const data = await res.json();
         setSuppressRules(data.suppressions || []);
@@ -212,7 +103,7 @@ export default function Dashboard({
 
   const fetchMonitoredTargets = async () => {
     try {
-      const res = await fetch(`/api/monitoring?userId=${user.id || 'user_default'}`);
+      const res = await fetch(`/api/monitoring`);
       if (res.ok) {
         const data = await res.json();
         setMonitoredTargets(data.monitoredTargets || []);
@@ -243,7 +134,7 @@ export default function Dashboard({
       const res = await fetch('/api/monitoring', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString, userId: user.id })
+        body: JSON.stringify({ url: monitorUrl, frequencyDays: monitorFreq, scheduleString })
       });
       if (res.ok) {
         setMonitorUrl('');
@@ -256,7 +147,7 @@ export default function Dashboard({
 
   const handleDeleteMonitor = async (id: string) => {
     try {
-      const res = await fetch(`/api/monitoring/${id}?userId=${user.id || 'user_default'}`, {
+      const res = await fetch(`/api/monitoring/${id}`, {
         method: 'DELETE'
       });
       if (res.ok) {
@@ -344,24 +235,6 @@ export default function Dashboard({
           </div>
           
           <div className="flex flex-col md:flex-row items-center space-y-4 md:space-y-0 md:space-x-6 relative z-10 w-full md:w-auto">
-            <button
-              onClick={() => {
-                setActiveTab('orchestrator');
-                setOrchSubTab('pentagi');
-                document.getElementById('orchestrator-tab')?.scrollIntoView({ behavior: 'smooth' });
-              }}
-              className="w-full md:w-auto relative group overflow-hidden bg-black border border-[#22c55e]/40 rounded hover:border-[#22c55e] transition-colors p-3 flex items-center space-x-3 cursor-pointer"
-            >
-              <div className="absolute inset-0 bg-[#22c55e]/10 translate-y-full group-hover:translate-y-0 transition-transform duration-300 ease-out" />
-              <div className="relative flex items-center justify-center bg-[#09090b] border border-[#27272a] rounded p-1.5 w-10 h-10 shrink-0">
-                <Terminal className="w-5 h-5 text-[#22c55e] animate-pulse" />
-              </div>
-              <div className="relative text-left pr-2">
-                <span className="block text-xs font-bold text-white uppercase tracking-wider">PentAGI Audit</span>
-                <span className="block text-[10px] text-[#22c55e] font-mono mt-0.5">Autonomous AI Agents</span>
-              </div>
-              <ArrowRight className="w-4 h-4 text-[#52525b] group-hover:text-[#22c55e] transition-colors absolute right-4 opacity-0 group-hover:opacity-100 hidden sm:block" />
-            </button>
 
             <div className="text-right flex items-center justify-between w-full md:w-auto md:block pt-4 border-t border-[#27272a]/40 md:pt-0 md:border-0">
               <span className="text-[10px] font-mono text-[#52525b] uppercase block md:mb-0.5">Available Balance</span>
@@ -423,12 +296,12 @@ export default function Dashboard({
                   {showAdvanced && (
                     <div className="mt-3 p-3 bg-black/40 border border-[#27272a] rounded space-y-3">
                       <div>
-                        <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authorization Header</label>
-                        <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Provide a valid Bearer token, basic auth, or custom header to test authenticated endpoints.</p>
+                        <label className="text-[10px] font-mono uppercase tracking-wider text-[#52525b] block mb-1">Authentication (optional)</label>
+                        <p className="text-[10px] font-mono text-[#a1a1aa] mb-2">Applied to every request — root, crawl, probes and templates. Use a Bearer/Basic token, or an explicit header like <span className="text-[#22c55e]">Cookie: session=…</span> or <span className="text-[#22c55e]">X-API-Key: …</span>.</p>
                         <input
                           type="text"
                           className="bg-black border border-[#27272a] focus:border-[#22c55e] text-white text-xs font-mono w-full focus:outline-none p-2 rounded placeholder-[#52525b] transition-colors"
-                          placeholder="Bearer eyJhbGciOiJIUzI1..."
+                          placeholder="Bearer eyJhbGci…   |   Cookie: session=…   |   X-API-Key: …"
                           value={authHeader}
                           onChange={(e) => setAuthHeader(e.target.value)}
                           disabled={isPerformingAction}
@@ -652,17 +525,6 @@ export default function Dashboard({
               [+] Vulnerability Scans History ({scans.length})
             </button>
             <button
-              id="orchestrator-tab"
-              onClick={() => setActiveTab('orchestrator')}
-              className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
-                activeTab === 'orchestrator'
-                  ? 'border-[#22c55e] text-white font-bold'
-                  : 'border-transparent text-[#52525b] hover:text-[#a1a1aa]'
-              }`}
-            >
-              [+] Autonomous AI Attacks
-            </button>
-            <button
               onClick={() => setActiveTab('monitoring')}
               className={`px-4 py-2 font-mono text-xs uppercase tracking-widest border-b-2 transition-all pb-3 cursor-pointer ${
                 activeTab === 'monitoring'
@@ -876,6 +738,31 @@ export default function Dashboard({
               </div>
 
               <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5">
+                <h3 className="text-sm font-bold font-mono text-white mb-1.5">Alert Webhook <span className="text-[10px] text-[#52525b] font-normal">(Slack-compatible, optional)</span></h3>
+                <p className="text-[10px] text-[#a1a1aa] mb-3">Get notified when any scan (manual or monitored) finds high/critical issues. Paste a Slack incoming webhook or any JSON endpoint.</p>
+                <div className="flex flex-col sm:flex-row gap-2">
+                  <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+                    <input
+                      type="text"
+                      className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 placeholder-[#52525b]"
+                      placeholder="https://hooks.slack.com/services/…"
+                      value={webhookUrl}
+                      onChange={(e) => setWebhookUrl(e.target.value)}
+                      id="webhook-input"
+                    />
+                  </div>
+                  <button
+                    type="button"
+                    onClick={saveWebhook}
+                    disabled={webhookSaving}
+                    className="px-4 py-2 bg-[#18181b] hover:bg-[#27272a] text-white text-[11px] font-mono font-bold uppercase tracking-wider border border-[#27272a] rounded transition-all disabled:opacity-50 cursor-pointer whitespace-nowrap"
+                  >
+                    {webhookSaving ? 'Saving…' : webhookSaved ? 'Saved ✓' : webhookUrl.trim() ? 'Save Webhook' : 'Disable'}
+                  </button>
+                </div>
+              </div>
+
+              <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5">
                 <h3 className="text-sm font-bold font-mono text-white mb-4">Add Monitor Target</h3>
                 <form onSubmit={handleAddMonitor} className="flex flex-col gap-3">
                   <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
@@ -977,442 +864,6 @@ export default function Dashboard({
             </div>
           )}
 
-          {activeTab === 'orchestrator' && (
-            <div className="space-y-6 animate-fade-in text-xs font-mono">
-              <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
-                <Shield className="w-5 h-5 text-[#22c55e] shrink-0 mt-0.5 animate-pulse" />
-                <div className="space-y-1">
-                  <h4 className="text-white text-xs uppercase font-bold">Autonomous PentAGI & Microservices</h4>
-                  <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
-                    Trigger our autonomous AI ethical hacker agents, or utilize established standalone security engines to de-duplicate, verify, and trace live exploitable postures.
-                  </p>
-                </div>
-              </div>
-
-              {/* Sub tabs */}
-              <div className="flex flex-wrap gap-2 border-b border-[#27272a]/40 pb-3">
-                {[
-                  { id: 'aspm' as const, label: 'ASPM Correlation', subtitle: 'DefectDojo & Fusion' },
-                  { id: 'easm' as const, label: 'EASM Perimeter', subtitle: 'Amass Subdomains & Wappalyzer' },
-                  { id: 'apiscan' as const, label: 'API Security Testing', subtitle: 'APISCAN & Hadrian Matrix' },
-                  { id: 'iast' as const, label: 'Interactive Passive Testing', subtitle: 'DongTai IAST Tracer' },
-                  { id: 'pentagi' as const, label: 'Autonomous Pentest AI', subtitle: 'PentAGI Cooperative Agents' }
-                ].map(sub => (
-                  <button
-                    key={sub.id}
-                    onClick={() => setOrchSubTab(sub.id)}
-                    className={`flex-1 min-w-[150px] p-3 rounded border text-left cursor-pointer transition-all ${
-                      orchSubTab === sub.id
-                        ? 'bg-[#22c55e]/5 border-[#22c55e] text-white'
-                        : 'bg-black border-[#27272a] hover:border-[#3f3f46] text-[#a1a1aa]'
-                    }`}
-                  >
-                    <span className="text-[10px] uppercase font-bold text-[#22c55e] block mb-0.5">{sub.label}</span>
-                    <span className="text-[9px] text-[#52525b] block">{sub.subtitle}</span>
-                  </button>
-                ))}
-              </div>
-
-              {/* ASPM Correlation Sub-module */}
-              {orchSubTab === 'aspm' && (
-                <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
-                  <div>
-                    <h3 className="text-sm font-bold text-white mb-1 uppercase font-mono tracking-tight flex items-center gap-1.5">
-                      <span>1. Application Security Posture Management (ASPM)</span>
-                      <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2 font-mono">DefectDojo & Fusion Engine</span>
-                    </h3>
-                    <p className="text-[#a1a1aa] text-[11px] mb-4">
-                      ASPM acts as a single pane of glass by consolidating Static (SAST) and Dynamic (DAST) findings. When SAST signals a vulnerability, the Fusion Correlation engine dispatches a targeted dynamic query to test exploit viability. If the dynamic exploit probe is successful, score priority is raised to CRITICAL.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <Globe className="w-4 h-4 text-[#52525b] mx-2" />
-                      <input
-                        type="text"
-                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="staging.api.vulnerable-shop.io"
-                        value={aspmUrl}
-                        onChange={(e) => setAspmUrl(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      onClick={runAspmCorrelation}
-                      disabled={aspmRunning || !aspmUrl.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {aspmRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Correlating...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Trigger Core Fusion Match</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {aspmOutput && (
-                    <div className="space-y-3 pt-2">
-                      <div className="p-3 bg-zinc-900/30 border border-zinc-800 rounded flex items-center justify-between text-zinc-300">
-                        <span>Orchestrated by: <strong className="text-white">{aspmOutput.orchestrator}</strong></span>
-                        <span className="text-emerald-400 font-bold bg-emerald-950/40 px-2 py-0.5 rounded border border-emerald-900/40 text-[10px]">CORRELATION VERIFIED</span>
-                      </div>
-
-                      <div className="space-y-2">
-                        {aspmOutput.steps.map((st: any, i: number) => (
-                          <div key={i} className="bg-black border border-[#27272a] rounded p-3.5">
-                            <div className="flex items-center justify-between border-b border-[#27272a]/40 pb-2 mb-2">
-                              <span className="font-bold text-[#22c55e]">Step {i + 1}: {st.phase}</span>
-                              <span className={`text-[9px] uppercase font-bold px-1.5 py-0.25 rounded ${
-                                st.status === 'escalated' ? 'bg-red-950/50 text-red-400 border border-red-900/40 text-[9px]' : 'bg-zinc-900 text-zinc-400'
-                              }`}>{st.status}</span>
-                            </div>
-                            <pre className="text-[11px] text-[#a1a1aa] whitespace-pre-wrap leading-relaxed select-all">
-                              {st.logs}
-                            </pre>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* EASM Attack Surface Sub-module */}
-              {orchSubTab === 'easm' && (
-                <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
-                  <div>
-                    <h3 className="text-sm font-bold text-white mb-1 uppercase font-mono tracking-tight flex items-center gap-1.5">
-                      <span>2. External Attack Surface Management (EASM)</span>
-                      <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2 font-mono">OWASP Amass & Wappalyzer</span>
-                    </h3>
-                    <p className="text-[#a1a1aa] text-[11px] mb-4">
-                      Reconcile internet-exposed assets continuously. Our EASM workspace combines passive certificate transparency scraping with active DNS zone brute-forcing and technology fingerprinting (Wappalyzer signatures) to parse headers and map targets without manual intervention.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <Globe className="w-4 h-4 text-[#52525b] mx-2" />
-                      <input
-                        type="text"
-                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="target-enterprise.com"
-                        value={easmDomain}
-                        onChange={(e) => setEasmDomain(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      onClick={runEasmRecon}
-                      disabled={easmRunning || !easmDomain.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {easmRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Scanning Perimeter...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Run Continuous Attack Surface Map</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {easmData && (
-                    <div className="space-y-6 pt-2">
-                      <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                        <div className="p-3 bg-black border border-[#27272a] rounded">
-                          <span className="text-[#52525b] text-[9px] uppercase block">Primary IP Address</span>
-                          <span className="text-white text-sm font-bold block mt-1">{easmData.summary.nameserverIp}</span>
-                        </div>
-                        <div className="p-3 bg-black border border-[#27272a] rounded">
-                          <span className="text-[#52525b] text-[9px] uppercase block">Subdomains Enumerated</span>
-                          <span className="text-[#22c55e] text-sm font-black block mt-1">{easmData.summary.totalSubdomains} Live</span>
-                        </div>
-                        <div className="p-3 bg-black border border-[#27272a] rounded">
-                          <span className="text-[#52525b] text-[9px] uppercase block">Identified Nameserver</span>
-                          <span className="text-white text-sm font-bold block mt-1 truncate">{easmData.summary.nameserver}</span>
-                        </div>
-                        <div className="p-3 bg-black border border-[#27272a] rounded">
-                          <span className="text-[#52525b] text-[9px] uppercase block">Active Entry IP Targets</span>
-                          <span className="text-[#a1a1aa] text-sm font-bold block mt-1">{easmData.summary.activeIps} Hosts</span>
-                        </div>
-                      </div>
-
-                      {/* Discovered Tech Fingerprints */}
-                      <div className="space-y-2">
-                        <h4 className="text-[10px] font-bold text-white uppercase tracking-wider mb-2">Wappalyzer Tech Identification</h4>
-                        <div className="flex flex-wrap gap-2">
-                          {easmData.technologies.map((t: any, i: number) => (
-                            <div key={i} className="p-2.5 bg-[#09090b] border border-[#27272a] rounded flex items-center space-x-2">
-                              <span className="bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/25 rounded text-[10px] px-2 py-0.5">{t.type}</span>
-                              <strong className="text-zinc-100">{t.name}</strong>
-                              <span className="text-[#52525b] text-[10px]">Conf: {t.confidence}%</span>
-                            </div>
-                          ))}
-                        </div>
-                      </div>
-
-                      {/* Subdomains Table */}
-                      <div className="space-y-2">
-                        <h4 className="text-[10px] font-bold text-white uppercase tracking-wider mb-2">Discovered Host Subdomains Map</h4>
-                        <div className="overflow-x-auto border border-[#27272a] rounded">
-                          <table className="w-full text-left font-mono text-[11px] bg-black">
-                            <thead>
-                              <tr className="bg-[#0c0c0e] border-b border-[#27272a] text-[#52525b] text-[9px] uppercase">
-                                <th className="p-2.5">Subdomain Name</th>
-                                <th className="p-2.5">Mapped IP Address</th>
-                                <th className="p-2.5">Status</th>
-                                <th className="p-2.5">Open TCP/UDP Ports</th>
-                                <th className="p-2.5">Inferred Service</th>
-                              </tr>
-                            </thead>
-                            <tbody className="divide-y divide-[#27272a]/40 divide-dashed">
-                              {easmData.subdomains.map((sub: any, i: number) => (
-                                <tr key={i} className="hover:bg-[#0c0c0e] transition-colors">
-                                  <td className="p-2.5 text-white font-bold">{sub.subdomain}</td>
-                                  <td className="p-2.5 text-[#a1a1aa]">{sub.ip}</td>
-                                  <td className="p-2.5">
-                                    <span className={`px-1.5 py-0.25 text-[8px] rounded uppercase ${
-                                      sub.status === 'live' ? 'bg-[#22c55e]/10 text-[#22c55e] border border-[#22c55e]/20' : 'bg-red-950/20 text-rose-400 border border-red-900/20'
-                                    }`}>{sub.status}</span>
-                                  </td>
-                                  <td className="p-2.5 text-[#22c55e] font-bold">{sub.ports.join(', ')}</td>
-                                  <td className="p-2.5 text-zinc-500">{sub.service}</td>
-                                </tr>
-                              ))}
-                            </tbody>
-                          </table>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* API Security Testing sub-module */}
-              {orchSubTab === 'apiscan' && (
-                <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
-                  <div>
-                    <h3 className="text-sm font-bold text-white mb-1 uppercase font-mono tracking-tight flex items-center gap-1.5">
-                      <span>3. API Security & Role Authorization Mutators</span>
-                      <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2 font-mono">Hadrian & APISCAN</span>
-                    </h3>
-                    <p className="text-[#a1a1aa] text-[11px] mb-4">
-                      Replicate Hadrian's dynamic mutation mechanics. Upload Swagger specifications and define role boundary configuration files. APISCAN constructs fuzzing requests, while Hadrian automatically rotates authorization headers for Admin, User, and Guest to isolate BOLA/IDOR access discrepancies.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <span className="text-[#52525b] px-2 whitespace-nowrap">Swagger Spec Title:</span>
-                      <input
-                        type="text"
-                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="Swagger User Management Core"
-                        value={apiSpecTitle}
-                        onChange={(e) => setApiSpecTitle(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      onClick={runHadrianScan}
-                      disabled={apiScanRunning || !apiSpecTitle.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {apiScanRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Fuzzing Routes...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Assemble Schema-Driven API Mutation Scans</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {apiMatrix && (
-                    <div className="space-y-4 pt-2">
-                      <h4 className="text-[10px] font-bold text-white uppercase tracking-wider">Hadrian Role Access Mutation Matrix Output</h4>
-                      <div className="space-y-3">
-                        {apiMatrix.matrix.map((item: any, i: number) => (
-                          <div key={i} className="bg-black border border-[#27272a] rounded p-4">
-                            <div className="flex flex-col md:flex-row md:items-center justify-between border-b border-[#27272a]/30 pb-3.5 mb-3.5 gap-2">
-                              <div>
-                                <span className="text-[10px] font-mono uppercase bg-zinc-900 border border-zinc-700/60 px-2 py-0.5 rounded mr-2 text-zinc-300">
-                                  {item.methods.join(' | ')}
-                                </span>
-                                <code className="text-[#22c55e] text-xs font-bold">{item.endpoint}</code>
-                              </div>
-                              <span className="text-[10px] text-zinc-500">Method mutations: {item.methods.length * 3} calls</span>
-                            </div>
-
-                            {/* Verification roles */}
-                            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 mb-3.5">
-                              {Object.entries(item.rolesResult).map(([role, statusObj]: any, rI) => (
-                                <div key={rI} className="p-3 bg-[#0c0c0e] border border-[#27272a] rounded flex justify-between items-center text-[10px]">
-                                  <span className="text-[#52525b] text-[9px] uppercase font-bold">{role}</span>
-                                  <span className={`text-[10px] font-bold ${statusObj.color}`}>{statusObj.status}</span>
-                                </div>
-                              ))}
-                            </div>
-
-                            {item.vulnerability && (
-                              <div className="p-3 bg-red-950/10 border border-red-900/20 text-[#f87171] rounded-md text-[11px] leading-relaxed flex items-start space-x-2">
-                                <AlertTriangle className="w-4 h-4 text-[#f87171] shrink-0 mt-0.5" />
-                                <div>
-                                  <strong className="text-[#f87171] block font-bold mb-1">[⚠️ SECURITY WEAKNESS DETECTED]</strong>
-                                  <span>{item.vulnerability}</span>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Dynamic passive IAST Bytecode Tracer sub-module */}
-              {orchSubTab === 'iast' && (
-                <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
-                  <div>
-                    <h3 className="text-sm font-bold text-white mb-1 uppercase font-mono tracking-tight flex items-center gap-1.5">
-                      <span>4. Runtime Passive Instrumentation (IAST)</span>
-                      <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2 font-mono">DongTai IAST Agent</span>
-                    </h3>
-                    <p className="text-[#a1a1aa] text-[11px] mb-4">
-                      IAST places hooks directly into Server Bytecode (JVM/Python VM) to intercept internal methods in real-time. We can analyze taint traces and watch how user-provided strings navigate routing frameworks, sanitizers, and ORM abstractions to hit critical SQL database or Shell sinks.
-                    </p>
-                  </div>
-
-                  <div className="flex flex-col sm:flex-row gap-3">
-                    <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <span className="text-[#52525b] px-2 whitespace-nowrap">Input Payload:</span>
-                      <input
-                        type="text"
-                        className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="1' UNION SELECT credit_card_number FROM customers"
-                        value={iastPayload}
-                        onChange={(e) => setIastPayload(e.target.value)}
-                      />
-                    </div>
-                    <button
-                      onClick={runIastTrace}
-                      disabled={iastRunning || !iastPayload.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {iastRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Hooking Bytecode...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Instrument Bytecode Passive Hooks</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {iastResult && (
-                    <div className="space-y-4 pt-2">
-                      <div className="flex justify-between items-center text-[#a1a1aa] p-3 bg-red-950/10 border border-red-900/30 rounded">
-                        <span>Agent Target: <code className="text-white font-bold">{iastResult.runtime}</code></span>
-                        <span className="font-bold text-[#f87171] animate-pulse">SINK CRITICAL TAINT INTERCEPT</span>
-                      </div>
-
-                      <div className="space-y-3 relative before:absolute before:left-[17px] before:top-4 before:bottom-4 before:w-0.5 before:bg-[#27272a]">
-                        {iastResult.traces.map((tr: any) => (
-                          <div key={tr.step} className="pl-9 relative">
-                            <div className="absolute left-1 top-1.5 w-6 h-6 rounded-full bg-zinc-900 border border-zinc-700/60 flex items-center justify-center text-[10px] text-[#22c55e] font-black font-mono">
-                              {tr.step}
-                            </div>
-                            <div className="bg-black hover:border-zinc-700/60 border border-[#27272a] rounded p-3.5 space-y-2">
-                              <div className="flex items-center justify-between text-[11px] border-b border-[#27272a]/30 pb-1.5">
-                                <span className="font-mono text-zinc-300 font-bold truncate">Class: {tr.clazz}</span>
-                                <span className="font-mono text-[#22c55e] shrink-0 font-bold">Method: {tr.method} • Line {tr.line}</span>
-                              </div>
-                              <p className="text-[#a1a1aa] text-[11px] leading-relaxed select-all">
-                                {tr.description}
-                              </p>
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* Agentic AI Pentesting sub-module */}
-              {orchSubTab === 'pentagi' && (
-                <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
-                  <div>
-                    <h3 className="text-sm font-bold text-white mb-1 uppercase font-mono tracking-tight flex items-center gap-1.5">
-                      <span>5. Multi-Agent Autonomous Pentesting (PentAGI)</span>
-                      <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2 font-mono">AutoPentest-AI Executor</span>
-                    </h3>
-                    <p className="text-[#a1a1aa] text-[11px] mb-4">
-                      Leverage LLM-driven cooperative agents running inside sandboxed containers. Scout runs background asset spidering, Exploiter crafts multi-stage bypass attacks (e.g., bypassing CSRF through cookie harvesting), and Reporter maps vulnerability entities within a secure Graph layout for exploitation.
-                    </p>
-                  </div>
-
-                  <div className="flex justify-between items-center">
-                    <span className="text-zinc-500 text-[10px]">Coordinates Neo4j Knowledge Entities automatically</span>
-                    <button
-                      onClick={runPentagiExploitation}
-                      disabled={pentagiRunning}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 cursor-pointer"
-                    >
-                      {pentagiRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>AI Agents Investigating...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Spawn Sandbox AI Penetration Agents</span>
-                        </>
-                      )}
-                    </button>
-                  </div>
-
-                  {pentagiLogs.length > 0 && (
-                    <div className="space-y-2">
-                      <div className="border border-zinc-800 rounded bg-[#09090b] p-3 text-[10px] text-zinc-500 font-mono flex items-center justify-between">
-                        <span>Executing: {pentagiRunning ? 'COOPERATION RUNNING' : 'PENTEST SESSION COMPLETE'}</span>
-                        <span className="text-[#22c55e] font-bold">Neo4j Entities: 8 nodes mapped</span>
-                      </div>
-                      <div className="bg-black border border-zinc-800 rounded p-4 font-mono text-[11px] leading-relaxed overflow-y-auto max-h-[350px] space-y-2.5 text-zinc-300">
-                        {pentagiLogs.map((log: any, i: number) => (
-                          <div key={i} className="flex space-x-2 hover:bg-zinc-950 p-1.5 rounded transition-colors border-l-2 border-[#22c55e]">
-                            <span className="text-[#22c55e] shrink-0 font-bold">[{log.time}]</span>
-                            <span className="text-zinc-400 font-bold shrink-0">{log.agent}:</span>
-                            <span className="text-[#a1a1aa] select-all font-mono whitespace-pre-wrap">{log.msg}</span>
-                          </div>
-                        ))}
-                      </div>
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-
           {activeTab === 'exclusions' && (
             <div className="space-y-6 animate-fade-in">
               <div className="bg-amber-500/5 border border-amber-500/10 rounded p-4 flex items-start space-x-3.5">
@@ -1457,7 +908,7 @@ export default function Dashboard({
                         onClick={async () => {
                           setIsDeletingRule(rule.id);
                           try {
-                            const delRes = await fetch(`/api/suppressions/${rule.id}?userId=${user.id || 'user_default'}`, {
+                            const delRes = await fetch(`/api/suppressions/${rule.id}`, {
                               method: 'DELETE'
                             });
                             if (delRes.ok) {
@@ -1620,7 +1071,7 @@ export default function Dashboard({
                         <pre className="bg-[#09090b] border border-[#27272a]/40 p-4 rounded text-[#a1a1aa] text-[10px] overflow-x-auto">
 {`{
   "success": true,
-  "targetUrl": "https://staging.api.vulnerable.org",
+  "targetUrl": "https://api.example.com",
   "postureScore": 85,
   "vulnerabilityLevel": "medium",
   "analysisSummary": "Seclayer automated assessment identified 1 or more...",
@@ -1639,7 +1090,7 @@ export default function Dashboard({
                         <button 
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
-                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
+                            navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://api.example.com",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
                             setToastMsg('Response envelope snippet copied to clipboard');
                             setShowToast(true);
                             setTimeout(() => setShowToast(false), 3000);

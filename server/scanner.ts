@@ -1,5 +1,156 @@
 import { Finding, Severity } from "../src/types.js";
+import { scoreFindings } from "./scoring.js";
+import { crawlSite, targetsFromHtml, dedupeTargets, paramsOf, InjectableTarget } from "./crawler.js";
+import { runTemplates, selectTemplates } from "./templateEngine.js";
+import { TEMPLATES } from "./templates.js";
+import { detectTechTags } from "./techprofile.js";
+import { mapOwasp } from "./owasp.js";
+import { renderPage, isRenderingEnabled } from "./render.js";
 import crypto from "crypto";
+import net from "net";
+import * as dns from "dns/promises";
+
+// --- SSRF protection ---------------------------------------------------------
+// The scanner issues server-side HTTP requests to user-supplied targets, so it
+// must refuse internal/reserved destinations (loopback, RFC1918, link-local,
+// cloud metadata, CGNAT, etc.) to avoid being abused as an SSRF proxy.
+export function isBlockedIp(ip: string): boolean {
+  if (net.isIPv4(ip)) {
+    const [a, b] = ip.split(".").map(Number);
+    if (a === 0) return true; // "this" network
+    if (a === 127) return true; // loopback
+    if (a === 10) return true; // private
+    if (a === 172 && b >= 16 && b <= 31) return true; // private
+    if (a === 192 && b === 168) return true; // private
+    if (a === 169 && b === 254) return true; // link-local + cloud metadata
+    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+    if (a >= 224) return true; // multicast / reserved
+    return false;
+  }
+  if (net.isIPv6(ip)) {
+    const lower = ip.toLowerCase();
+    if (lower === "::1" || lower === "::") return true; // loopback / unspecified
+    if (lower.startsWith("fe80")) return true; // link-local
+    if (lower.startsWith("fc") || lower.startsWith("fd")) return true; // unique local
+    const mapped = lower.match(/::ffff:(\d+\.\d+\.\d+\.\d+)/); // IPv4-mapped
+    if (mapped) return isBlockedIp(mapped[1]);
+    return false;
+  }
+  return true; // unrecognized format -> block
+}
+
+async function assertTargetIsScannable(parsedUrl: URL): Promise<void> {
+  if (parsedUrl.protocol !== "http:" && parsedUrl.protocol !== "https:") {
+    throw new Error(
+      `Unsupported protocol "${parsedUrl.protocol}". Only http(s) targets can be scanned.`,
+    );
+  }
+
+  const hostname = parsedUrl.hostname.replace(/^\[|\]$/g, ""); // strip IPv6 brackets
+  const lower = hostname.toLowerCase();
+
+  // Block internal-only hostnames that may resolve via split-horizon DNS.
+  if (
+    lower === "localhost" ||
+    lower.endsWith(".localhost") ||
+    lower.endsWith(".local") ||
+    lower.endsWith(".internal")
+  ) {
+    throw new Error(`Refusing to scan internal hostname "${hostname}".`);
+  }
+
+  // Literal IP targets are validated directly.
+  if (net.isIP(hostname)) {
+    if (isBlockedIp(hostname)) {
+      throw new Error(
+        `Refusing to scan internal or reserved address "${hostname}".`,
+      );
+    }
+    return;
+  }
+
+  // Otherwise resolve and validate every address the host maps to.
+  const [v4, v6] = await Promise.all([
+    dns.resolve4(hostname).catch(() => [] as string[]),
+    dns.resolve6(hostname).catch(() => [] as string[]),
+  ]);
+  for (const ip of [...v4, ...v6]) {
+    if (isBlockedIp(ip)) {
+      throw new Error(
+        `Target "${hostname}" resolves to a blocked internal address (${ip}); scan refused.`,
+      );
+    }
+  }
+}
+
+// Public boundary check: validates a raw target string the same way
+// runDiagnostics normalizes it, so callers can reject SSRF/malformed targets
+// before spending credits or enqueuing work. Throws with a user-facing message.
+export async function assertScanTargetSafe(targetUrl: string): Promise<void> {
+  let url = (targetUrl || "").trim();
+  if (!/^https?:\/\//i.test(url)) {
+    // Reject explicit non-HTTP schemes (e.g. ftp://, file://, gopher://)
+    // rather than silently coercing them into a bogus https host.
+    if (/^[a-z][a-z0-9+.-]*:\/\//i.test(url)) {
+      throw new Error(
+        `Unsupported protocol in "${targetUrl}". Only http(s) targets can be scanned.`,
+      );
+    }
+    url = "https://" + url;
+  }
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error(`"${targetUrl}" is not a valid URL.`);
+  }
+  await assertTargetIsScannable(parsed);
+}
+
+// Follows redirects manually, re-validating every hop against the SSRF guard so
+// a target cannot 30x-redirect the scanner into internal infrastructure.
+async function safeFetch(targetUrl: string, options: RequestInit, maxRedirects = 4): Promise<Response> {
+  let current = targetUrl;
+  for (let hop = 0; hop <= maxRedirects; hop++) {
+    await assertTargetIsScannable(new URL(current));
+    const res = await fetch(current, { ...options, redirect: "manual" });
+    if (res.status >= 300 && res.status < 400) {
+      const loc = res.headers.get("location");
+      if (loc) {
+        current = new URL(loc, current).toString();
+        continue;
+      }
+    }
+    return res;
+  }
+  throw new Error(`Exceeded ${maxRedirects} redirects while scanning ${targetUrl}`);
+}
+
+// Heuristic: does this body look like an HTML document (e.g. a single-page-app
+// catch-all that returns index.html for every path)? Used to suppress false
+// positives where a 200 response is just the SPA shell, not a real exposed file.
+export function looksLikeHtml(body: string): boolean {
+  const head = body.slice(0, 512).toLowerCase();
+  return /<!doctype html|<html|<head|<body|<title|<div|<script|<meta/.test(head);
+}
+
+// Parses a user-supplied credential into request headers for authenticated
+// scans. Accepts either a bare Authorization value ("Bearer …", "Basic …") or
+// an explicit "Header-Name: value" (e.g. "Cookie: session=…", "X-API-Key: …"),
+// enabling token, basic, cookie, or custom-header authentication.
+export function parseAuthHeader(authHeader?: string): Record<string, string> {
+  const raw = (authHeader || "").trim();
+  if (!raw) return {};
+  const idx = raw.indexOf(":");
+  if (idx > 0) {
+    const name = raw.slice(0, idx).trim();
+    const value = raw.slice(idx + 1).trim();
+    if (name && value && /^[A-Za-z0-9-]+$/.test(name) && !/^(bearer|basic|negotiate|digest)$/i.test(name)) {
+      return { [name]: value };
+    }
+  }
+  return { Authorization: raw };
+}
 
 export interface DiagnosticResult {
   url: string;
@@ -17,6 +168,7 @@ export interface DiagnosticResult {
     file: string;
     issue: string;
     severity: Severity;
+    confidence: "low" | "medium" | "high";
     type: string;
     fix: string;
     description: string;
@@ -56,6 +208,13 @@ export interface DiagnosticResult {
     description: string;
     fix: string;
   }>;
+  crawl?: {
+    pagesVisited: number;
+    endpointsDiscovered: number;
+    paramsTested: number;
+    sampleEndpoints: string[];
+  };
+  templateFindings?: Finding[];
   apiSecFindings?: Array<{
     testName: string;
     severity: Severity;
@@ -80,6 +239,9 @@ export async function runDiagnostics(
   const host = parsedUrl.origin;
   const hostname = parsedUrl.hostname;
 
+  // SSRF guard: refuse internal/reserved targets before issuing any request.
+  await assertTargetIsScannable(parsedUrl);
+
   const result: DiagnosticResult = {
     url,
     scannedAt: new Date().toISOString(),
@@ -94,11 +256,9 @@ export async function runDiagnostics(
     scaLibraries: [],
     easmPerimeter: {
       subdomains: [],
-      ip: "104.244.42.1", // default fallback, will resolve if possible
-      nameserver: "ns1.seclayer-dns.net",
-      protocol: url.startsWith("https://")
-        ? "TLS 1.3 / HTTPS"
-        : "HTTP/1.1 Cleartext",
+      ip: "", // resolved from real DNS below
+      nameserver: "", // resolved from real DNS below
+      protocol: url.startsWith("https://") ? "HTTPS" : "HTTP",
     },
     dastInputs: [],
     redTeamFindings: [],
@@ -110,16 +270,32 @@ export async function runDiagnostics(
     Accept:
       "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
   };
-  if (authHeader) {
-    headers["Authorization"] = authHeader;
-  }
+  // Authenticated scanning: the user-supplied credential is applied to EVERY
+  // request path (root fetch, probes, crawl, and templates) so auth-gated
+  // surface is actually reached.
+  const authHeaders = parseAuthHeader(authHeader);
+  Object.assign(headers, authHeaders);
+
+  // Wrapper that injects the auth + scanner identity into crawler/template
+  // requests, which otherwise only carry their own minimal headers.
+  const authedFetch = (u: string, init: RequestInit) =>
+    safeFetch(u, {
+      ...init,
+      headers: {
+        "User-Agent": headers["User-Agent"],
+        ...authHeaders,
+        ...((init.headers as Record<string, string>) || {}),
+      },
+    });
+
+  let rootHtml = ""; // root document HTML, reused to seed the crawler
 
   try {
     // 1. Core Header Analysis
     const controller = new AbortController();
     const id = setTimeout(() => controller.abort(), 6000); // 6s timeout max
 
-    const response = await fetch(url, {
+    const response = await safeFetch(url, {
       method: "GET",
       headers,
       signal: controller.signal,
@@ -134,6 +310,7 @@ export async function runDiagnostics(
     });
 
     const htmlText = await response.text().catch(() => "");
+    rootHtml = htmlText;
 
     // Analyze Security Headers
     const securityHeaders = {
@@ -179,130 +356,113 @@ export async function runDiagnostics(
       }
     }
 
-    // --- 2. SAST SCAN ENGINE (Regex Match HTML & JavaScript for Source Security) ---
+    // --- 2. SAST SCAN ENGINE (high-precision secret signatures only) ---
+    // Only patterns that are essentially never legitimately client-side are
+    // reported with high confidence. Identifiers that are frequently public by
+    // design (e.g. Firebase/Maps browser keys) are reported low/medium so they
+    // do not become false positives.
     if (htmlText) {
-      // Secret Key matches
       const patterns = [
         {
-          name: "Google Cloud API Key",
-          regex: /AIzaSy[A-Za-z0-9_\-]{35}/,
-          severity: "high" as Severity,
-        },
-        {
-          name: "Stripe Secret Key Placeholder",
-          regex: /sk_live_[0-9a-zA-Z]{24}/,
+          name: "Stripe Secret Key",
+          regex: /sk_live_[0-9a-zA-Z]{24,}/,
           severity: "critical" as Severity,
-        },
-        {
-          name: "Generic AWS Access Token Link",
-          regex: /AKIA[A-Z0-9]{16}/,
-          severity: "high" as Severity,
+          confidence: "high" as const,
+          note: "A Stripe live secret key grants full API access and must never appear client-side.",
         },
         {
           name: "GitHub OAuth Access Token",
           regex: /gho_[a-zA-Z0-9]{36}/,
           severity: "critical" as Severity,
+          confidence: "high" as const,
+          note: "A GitHub OAuth token grants repository access and must never be shipped to browsers.",
         },
         {
-          name: "Private Crypto Key block",
-          regex: /-----BEGIN RSA PRIVATE KEY-----/,
+          name: "Private Key Block",
+          regex: /-----BEGIN (RSA |EC |OPENSSH |DSA |PGP )?PRIVATE KEY-----/,
           severity: "critical" as Severity,
+          confidence: "high" as const,
+          note: "A PEM private key block was served to the client; the corresponding key must be rotated.",
+        },
+        {
+          name: "AWS Access Key ID",
+          regex: /AKIA[0-9A-Z]{16}/,
+          severity: "high" as Severity,
+          confidence: "medium" as const,
+          note: "An AWS access key id is exposed. Confirm the matching secret is not also leaked and rotate it.",
+        },
+        {
+          name: "Google API Key",
+          regex: /AIzaSy[A-Za-z0-9_\-]{33}/,
+          severity: "low" as Severity,
+          confidence: "low" as const,
+          note: "Google browser API keys are often intentionally public; verify it is restricted by HTTP referrer/API and not a server key.",
         },
       ];
 
       patterns.forEach((p) => {
         if (p.regex.test(htmlText)) {
           result.sastFindings.push({
-            file: "index.html (Inline Script)",
-            issue: `Hardcoded Credential Exposure (${p.name})`,
+            file: "Client-served HTML/JavaScript",
+            issue: `Exposed Credential Signature (${p.name})`,
             severity: p.severity,
+            confidence: p.confidence,
             type: "hardcoded_secrets",
-            description: `Leaked secret key signature pattern matching standard ${p.name} structure was detected exposed in client-facing HTML or inline scripts. Attackers scanning javascript payloads can harvest these credentials immediately.`,
-            fix: `Move all application secrets out of the client codebase. Implement environment variables in backend secure routers and proxy necessary third-party requests.`,
+            description: `A string matching the ${p.name} format was detected in the client-served response. ${p.note}`,
+            fix: `Remove the credential from client code, rotate it immediately, and proxy any required third-party calls through an authenticated backend that holds the secret server-side.`,
           });
         }
       });
-
-      // HTML DOM XSS sinks or debugging mode checks
-      if (/eval\s*\(/i.test(htmlText)) {
-        result.sastFindings.push({
-          file: "index.html",
-          issue: "Unsafe dynamic evaluation via eval()",
-          severity: "medium" as Severity,
-          type: "unsafe_sinks",
-          description:
-            "Use of eval() detected in page source. Dynamic evaluation of arbitrary input strings can easily lead to persistent or reflected Cross-Site Scripting (XSS) bypasses.",
-          fix: "Refactor code to avoid dynamic string expressions evaluation. Use standard JSON parsing or local function mappings.",
-        });
-      }
-
-      if (
-        /console\.log\([^)]*(process\.env|config|secrets)[^)]*\)/i.test(
-          htmlText,
-        )
-      ) {
-        result.sastFindings.push({
-          file: "index.html",
-          issue: "Sensitive Debug Logs Exposure",
-          severity: "low" as Severity,
-          type: "information_leak",
-          description:
-            "Debugging output that pipes environmental properties or system variables directly to browser console logs was detected.",
-          fix: "Configure build packager pipelines to strip console logs globally in production bundle environments.",
-        });
-      }
     }
 
-    // --- 3. SCA ANALYSIS ENGINE (Inspect scripts and headers for vulnerable library footprints) ---
+    // --- 3. SCA ANALYSIS ENGINE (vulnerable library footprints in markup) ---
+    // A library is only flagged when its version regex actually matches a known
+    // vulnerable range in the served markup. The reported version is the one
+    // captured from the page, and advisories are attributed per-library.
     if (htmlText) {
-      // Outdated libraries signature checks
       const libraries = [
         {
-          name: "jQuery 1.x / 2.x",
+          name: "jQuery",
           match: /jquery[-.](1\.\d+\.\d+|2\.\d+\.\d+)/i,
-          version: "1.12.4",
           severity: "medium" as Severity,
-          desc: "Outdated jQuery contains cross-site scripting vulnerabilities in htmlPrefilter parameter evaluations (CVE-2020-11022).",
-          fix: "Upgrade jQuery repository dependencies to version 3.5.0 or superior.",
+          advisories: ["CVE-2020-11022", "CVE-2020-11023"],
+          desc: "jQuery before 3.5.0 is affected by cross-site scripting via htmlPrefilter when passing untrusted HTML to DOM-manipulation methods.",
+          fix: "Upgrade jQuery to >= 3.5.0.",
         },
         {
-          name: "Bootstrap 3.x",
+          name: "Bootstrap",
           match: /bootstrap[-./](3\.\d+\.\d+)/i,
-          version: "3.3.7",
           severity: "medium" as Severity,
-          desc: "Bootstrap versions prior to v4 are vulnerable to CSS dynamic script executions and tooltip XSS models.",
-          fix: "Upgrade Bootstrap to >= 4.5.0 or migrate to standard tailwind styling paradigms.",
+          advisories: ["CVE-2019-8331"],
+          desc: "Bootstrap 3.x is affected by XSS in data-template/tooltip/popover handling and no longer receives security fixes.",
+          fix: "Upgrade Bootstrap to >= 4.3.1 (ideally 5.x).",
         },
         {
-          name: "AngularJS 1.8.x",
+          name: "AngularJS",
           match: /angular[-.](1\.[0-8]\.\d+)/i,
-          version: "1.8.2",
           severity: "low" as Severity,
-          desc: "Legacy AngularJS is long past End-of-Life (EOL), meaning zero future security audits or zero-day patches will be deployed.",
-          fix: "Re-platform obsolete client structures to modern React frameworks.",
+          advisories: ["EOL"],
+          desc: "AngularJS (1.x) is past end-of-life and receives no further security patches.",
+          fix: "Migrate off AngularJS to a maintained framework.",
         },
         {
-          name: "Lodash < 4.17.15",
-          match: /lodash@([0-3]\.\d+\.\d+|4\.[0-16]\.[0-5])/i,
-          version: "4.15.0",
+          name: "Lodash",
+          match: /lodash[@/-](4\.(?:[0-9]|1[0-6])\.\d+)\b/i,
           severity: "high" as Severity,
-          desc: "Vulnerable to Prototype Pollution allowing remote attackers to inject custom default object prototypes.",
-          fix: "Force upgrade lodash scripts to >= 4.17.21.",
+          advisories: ["CVE-2019-10744"],
+          desc: "lodash before 4.17.12 is vulnerable to prototype pollution via defaultsDeep.",
+          fix: "Upgrade lodash to >= 4.17.21.",
         },
       ];
 
       libraries.forEach((lib) => {
-        if (
-          lib.match.test(htmlText) ||
-          (setCookie &&
-            lib.name === "jQuery 1.x / 2.x" &&
-            /jquery/i.test(htmlText))
-        ) {
+        const m = lib.match.exec(htmlText);
+        if (m) {
           result.scaLibraries.push({
             name: lib.name,
-            version: lib.version,
+            version: m[1],
             status: "vuln",
-            advisories: ["CVE-2020-11022", "XSS Bypass"],
+            advisories: lib.advisories,
             severity: lib.severity,
             description: lib.desc,
             fix: lib.fix,
@@ -311,33 +471,13 @@ export async function runDiagnostics(
       });
     }
 
-    // --- 4. DAST INSECURE INPUTS CHECK (Check forms and actions) ---
-    if (htmlText) {
-      // Find form tags
-      const formRegex = /<form([^>]*action=["']([^"']*)["']([^>]*))>/gi;
-      let formMatch;
-      while ((formMatch = formRegex.exec(htmlText)) !== null) {
-        const action = formMatch[2];
-        const attrContent = formMatch[1] + formMatch[3];
-        const isPost = /method=["']post["']/i.test(attrContent);
-
-        // Analyze if CSRF token is present in elements inside or nearby (e.g. check for anti-csrf input tag)
-        // For simplicity: check if we see "csrf" or "token" fields
-        const hasCsrfInput = /csrf|token|xsrf/i.test(htmlText);
-
-        if (isPost && !hasCsrfInput) {
-          result.dastInputs.push({
-            formAction: action,
-            method: "POST",
-            csrfPresent: false,
-            vulnerability: "Missing Anti-CSRF Token Security Guard",
-            severity: "high" as Severity,
-            description: `Vulnerable endpoint detected: Form posting to "${action}" lacks an authenticated anti-forgery token. Attackers can execute unauthorized state-changing operations on behalf of users via malicious cross-site forms.`,
-            fix: `Implement standard CSRF secure tokens. Embed anti-csrf validation fields inside stateful forms and verify matching headers on target backend services.`,
-          });
-        }
-      }
-    }
+    // --- 4. DAST INSECURE INPUTS ---
+    // Black-box CSRF detection from static markup is unreliable: token-less
+    // forms are routinely protected by framework SameSite cookies or header
+    // tokens that are invisible to an unauthenticated crawl. To honour the
+    // zero-false-positive goal we do not infer CSRF gaps from markup alone;
+    // active state-changing CSRF testing requires an authenticated session and
+    // is out of scope for the black-box pass.
 
     // --- 5. EASM PERIMETER (Subdomains, DNS and Real Host IP Lookup) ---
     // Perform active Domain audit map
@@ -376,15 +516,16 @@ export async function runDiagnostics(
       "pop",
       "imap",
     ];
-    result.easmPerimeter.ip = "104.244.42.1"; // Standard DNS estimation fallback
-
     try {
-      // Need dynamic import to avoid altering the top-level imports significantly or we can just require it
-      const dns = await import("dns/promises");
-
       const ipRecords = await dns.resolve4(hostname).catch(() => []);
       if (ipRecords && ipRecords.length > 0) {
         result.easmPerimeter.ip = ipRecords[0];
+      }
+
+      // Resolve the authoritative nameserver(s) for real, when available.
+      const nsRecords = await dns.resolveNs(hostname).catch(() => [] as string[]);
+      if (nsRecords && nsRecords.length > 0) {
+        result.easmPerimeter.nameserver = nsRecords[0];
       }
 
       // Check for Wildcard DNS to prevent false positive subdomain bloating
@@ -449,52 +590,44 @@ export async function runDiagnostics(
       });
     }
 
-    // Sensitive Paths Probing
-    const pathsToProbe = [
-      "/.env",
-      "/.git/config",
-      "/admin",
-      "/wp-admin",
-      "/phpinfo.php",
+    // Sensitive Paths Probing. A path is only treated as "exposed" when the
+    // response BODY actually matches the file's signature, not merely on a 200.
+    // This eliminates the dominant false positive: single-page apps that serve
+    // index.html (HTTP 200) for every unknown path including /.env.
+    const sensitiveProbes: Array<{ path: string; matches: (body: string) => boolean }> = [
+      { path: "/.env", matches: (b) => !looksLikeHtml(b) && /^[A-Z][A-Z0-9_]*\s*=/m.test(b) },
+      { path: "/.git/config", matches: (b) => /\[core\]/i.test(b) || /repositoryformatversion/i.test(b) },
+      { path: "/.git/HEAD", matches: (b) => /^ref:\s+refs\//m.test(b.trim()) },
+      { path: "/phpinfo.php", matches: (b) => /<title>phpinfo\(\)/i.test(b) || /PHP Version\s*</i.test(b) },
+      { path: "/.aws/credentials", matches: (b) => !looksLikeHtml(b) && /aws_access_key_id/i.test(b) },
+      { path: "/config.json", matches: (b) => !looksLikeHtml(b) && /"(password|secret|api[_-]?key|private[_-]?key)"\s*:/i.test(b) },
     ];
 
-    for (const p of pathsToProbe) {
+    for (const probe of sensitiveProbes) {
       try {
         const probeController = new AbortController();
-        const probeId = setTimeout(() => probeController.abort(), 2500); // short timeout
-        const probeUrl = `${host}${p}`;
-
-        const probeRes = await fetch(probeUrl, {
+        const probeId = setTimeout(() => probeController.abort(), 2500);
+        const probeRes = await safeFetch(`${host}${probe.path}`, {
           method: "GET",
-          headers: {
-            "User-Agent": "Seclayer-Security-Scanner/2.0 (seclayer.io)",
-          },
+          headers: { "User-Agent": "Seclayer-Security-Scanner/2.0 (seclayer.io)" },
           signal: probeController.signal,
         });
+        const body = await probeRes.text().catch(() => "");
         clearTimeout(probeId);
 
-        const isExposed = probeRes.status === 200;
-        result.probedPaths.push({
-          path: p,
-          status: probeRes.status,
-          exposed: isExposed,
-        });
+        const exposed = probeRes.status === 200 && probe.matches(body);
+        result.probedPaths.push({ path: probe.path, status: probeRes.status, exposed });
       } catch (err) {
-        result.probedPaths.push({
-          path: p,
-          status: 0,
-          exposed: false,
-        });
+        result.probedPaths.push({ path: probe.path, status: 0, exposed: false });
       }
     }
   } catch (err: any) {
-    console.warn(
-      `Scan connection to ${url} connections failed. Triggering default defensive audit layers.`,
-    );
-    result.responseStatus = 502;
-    result.missingHeaders = [];
-    result.techLeaked = [];
-    result.probedPaths = [];
+    // A failure reaching the target means we cannot assess it. Surface this as
+    // a failed scan rather than a misleading "clean" (no-findings) report.
+    if (err?.name === "AbortError") {
+      throw new Error(`Target ${url} did not respond within the timeout window.`);
+    }
+    throw new Error(`Unable to connect to ${url}: ${err?.message || "connection failed"}`);
   }
 
   // --- RED TEAM ACTIVE FUZZING PROBES ---
@@ -506,18 +639,17 @@ export async function runDiagnostics(
     try {
       const sqlCtl = new AbortController();
       const sqlId = setTimeout(() => sqlCtl.abort(), 4000);
-      const sqlRes = await fetch(`${url}/?id=%27%20OR%201%3D1--`, {
+      const sqlRes = await safeFetch(`${url}/?id=%27%20OR%201%3D1--`, {
         headers: fuzzHeaders,
         signal: sqlCtl.signal,
       });
       clearTimeout(sqlId);
       const sqlText = await sqlRes.text();
-      if (
-        sqlText.includes("syntax error") ||
-        sqlText.includes("SQL syntax") ||
-        sqlText.includes("ORA-") ||
-        sqlText.includes("PostgreSQL query failed")
-      ) {
+      // Match specific database error signatures only — never bare "syntax
+      // error", which appears in unrelated content and causes false positives.
+      const sqlErrorSig =
+        /(SQL syntax;|valid MySQL result|mysqli?_fetch|ORA-\d{4,5}|PLS-\d{4,5}|PostgreSQL.*?ERROR|PG::\w*Error|SQLSTATE\[|SQLite3?::|SQLiteException|Unclosed quotation mark after the character string|quoted string not properly terminated|Microsoft OLE DB Provider for SQL Server|ODBC SQL Server Driver|Npgsql\.)/i;
+      if (sqlErrorSig.test(sqlText)) {
         redTeamFindings.push({
           testName: "Active SQL Injection Probe",
           payload: "' OR 1=1--",
@@ -536,7 +668,7 @@ export async function runDiagnostics(
       const xssCtl = new AbortController();
       const xssId = setTimeout(() => xssCtl.abort(), 4000);
       const uniqueTrigger = `xss_probe_${crypto.randomBytes(4).toString("hex")}`;
-      const xssRes = await fetch(
+      const xssRes = await safeFetch(
         `${url}/?q=%3Cscript%3E${uniqueTrigger}%3C%2Fscript%3E`,
         { headers: fuzzHeaders, signal: xssCtl.signal },
       );
@@ -560,7 +692,7 @@ export async function runDiagnostics(
     try {
       const cmdCtl = new AbortController();
       const cmdId = setTimeout(() => cmdCtl.abort(), 4000);
-      const cmdRes = await fetch(`${url}/?ping=127.0.0.1%3B+id`, {
+      const cmdRes = await safeFetch(`${url}/?ping=127.0.0.1%3B+id`, {
         headers: fuzzHeaders,
         signal: cmdCtl.signal,
       });
@@ -585,7 +717,7 @@ export async function runDiagnostics(
       const ssrfCtl = new AbortController();
       const ssrfId = setTimeout(() => ssrfCtl.abort(), 4000);
       // Attempting to request localhost loopback or internal metadata
-      const ssrfRes = await fetch(`${url}/?url=http://127.0.0.1:22`, {
+      const ssrfRes = await safeFetch(`${url}/?url=http://127.0.0.1:22`, {
         headers: fuzzHeaders,
         signal: ssrfCtl.signal,
       });
@@ -627,7 +759,7 @@ export async function runDiagnostics(
       const gqlId = setTimeout(() => gqlCtl.abort(), 4000);
       const reqRaw = `POST /graphql HTTP/1.1\nHost: ${hostname}\nContent-Type: application/json\n\n{"query":"{__schema{types{name}}}"}`;
 
-      const gqlRes = await fetch(`${url}/graphql`, {
+      const gqlRes = await safeFetch(`${url}/graphql`, {
         method: "POST",
         headers: { ...apiHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ query: "{__schema{types{name}}}" }),
@@ -637,7 +769,16 @@ export async function runDiagnostics(
       const gqlText = await gqlRes.text();
       const resRaw = `HTTP/1.1 ${gqlRes.status} ${gqlRes.statusText}\n\n${gqlText.substring(0, 500)}...`;
 
-      if (gqlText.includes("__schema") || gqlText.includes("__Type")) {
+      // Confirm a real introspection RESULT (data.__schema.types), not merely
+      // the echoed query string or an error mentioning "__schema".
+      let introspectionExposed = false;
+      try {
+        const parsed = JSON.parse(gqlText);
+        introspectionExposed = Array.isArray(parsed?.data?.__schema?.types) && parsed.data.__schema.types.length > 0;
+      } catch {
+        introspectionExposed = false;
+      }
+      if (introspectionExposed) {
         apiSecFindings.push({
           testName: "GraphQL Schema Introspection Exposed",
           endpoint: "/graphql",
@@ -659,18 +800,29 @@ export async function runDiagnostics(
       const idorId = setTimeout(() => idorCtl.abort(), 4000);
       const reqRawIdor = `GET /api/v1/users/admin HTTP/1.1\nHost: ${hostname}\nAccept: application/json`;
 
-      const idorRes = await fetch(`${url}/api/v1/users/admin`, {
+      const idorRes = await safeFetch(`${url}/api/v1/users/admin`, {
         headers: apiHeaders,
         signal: idorCtl.signal,
       });
       clearTimeout(idorId);
       const idorText = await idorRes.text();
-      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorRes.headers.get("content-type") || "text/plain"}\n\n${idorText.substring(0, 500)}...`;
+      const idorCt = idorRes.headers.get("content-type") || "text/plain";
+      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorCt}\n\n${idorText.substring(0, 500)}...`;
 
-      if (
-        idorRes.status === 200 &&
-        (idorText.includes("email") || idorText.includes('"role"'))
-      ) {
+      // Only flag when a JSON user object is actually returned — a 200 HTML
+      // page that happens to contain the word "email" is not a BOLA.
+      let bolaConfirmed = false;
+      if (idorRes.status === 200 && /application\/json/i.test(idorCt)) {
+        try {
+          const obj = JSON.parse(idorText);
+          const candidate = obj?.user ?? obj?.data ?? obj;
+          bolaConfirmed = !!candidate && typeof candidate === "object" &&
+            ("email" in candidate || "role" in candidate || "username" in candidate);
+        } catch {
+          bolaConfirmed = false;
+        }
+      }
+      if (bolaConfirmed) {
         apiSecFindings.push({
           testName: "Broken Object Level Authorization (BOLA)",
           endpoint: "/api/v1/users/admin",
@@ -691,7 +843,160 @@ export async function runDiagnostics(
 
   result.apiSecFindings = apiSecFindings;
 
+  // --- CRAWL + DISCOVERED-PARAMETER FUZZING ---
+  // Map the real attack surface (links, forms, JS-referenced endpoints) and aim
+  // the injection probes at the parameters the application actually uses, rather
+  // than only a few hardcoded names. Strictly bounded by page/request/time caps.
+  try {
+    if (rootHtml && result.responseStatus > 0) {
+      const crawl = await crawlSite(url, authedFetch, {
+        maxPages: 10,
+        maxDepth: 2,
+        budgetMs: 15000,
+        seedHtml: rootHtml,
+      });
+
+      // Optional headless rendering: merge JS-rendered links and XHR/fetch
+      // endpoints the static crawl cannot see (no-op unless explicitly enabled).
+      let allTargets = crawl.targets;
+      if (isRenderingEnabled()) {
+        const rendered = await renderPage(url, { "User-Agent": headers["User-Agent"], ...authHeaders });
+        if (rendered) {
+          const renderedTargets = [
+            ...targetsFromHtml(rendered.html, url),
+            ...rendered.requestedUrls
+              .map((u) => ({ url: u, method: "GET" as const, params: paramsOf(u), source: "script" as const }))
+              .filter((t) => t.params.length > 0),
+          ];
+          allTargets = dedupeTargets([...crawl.targets, ...renderedTargets]);
+        }
+      }
+
+      const getTargets = allTargets.filter((t) => t.method === "GET" && t.params.length > 0);
+      const fuzz = await fuzzDiscoveredTargets(getTargets, { ...headers, "Cache-Control": "no-cache" });
+      result.redTeamFindings = [...(result.redTeamFindings || []), ...fuzz.findings];
+
+      result.crawl = {
+        pagesVisited: crawl.pagesVisited,
+        endpointsDiscovered: allTargets.length,
+        paramsTested: fuzz.paramsTested,
+        sampleEndpoints: allTargets.slice(0, 8).map((t) => {
+          try {
+            return new URL(t.url).pathname + (t.params.length ? `?${t.params.join("&")}` : "");
+          } catch {
+            return t.url;
+          }
+        }),
+      };
+    }
+  } catch (crawlErr) {
+    console.warn("Crawl/fuzz stage encountered an error", crawlErr);
+  }
+
+  // --- TEMPLATE-BASED DETECTIONS ---
+  // Data-driven checks (exposed panels, config/backup files, actuators, etc.).
+  // Each template confirms via a body signature, so SPA fallbacks aren't flagged.
+  try {
+    if (result.responseStatus > 0) {
+      // Gate framework-specific templates by the detected tech profile so the
+      // pack scales without running every stack's checks against every target.
+      const techTags = detectTechTags(result.headers, rootHtml);
+      const selected = selectTemplates(TEMPLATES, techTags);
+      result.templateFindings = await runTemplates(host, authedFetch, selected, 6);
+    }
+  } catch (tplErr) {
+    console.warn("Template detection stage encountered an error", tplErr);
+  }
+
   return result;
+}
+
+// Active injection fuzzing of discovered GET parameters. Reuses the same SQLi
+// error signatures and reflected-XSS token strategy as the root-level probes,
+// but injects into real discovered parameters. Globally request-capped.
+async function fuzzDiscoveredTargets(
+  targets: InjectableTarget[],
+  fuzzHeaders: Record<string, string>,
+): Promise<{ findings: any[]; paramsTested: number }> {
+  const MAX_REQUESTS = 24;
+  const MAX_PARAMS_PER_TARGET = 3;
+  const findings: any[] = [];
+  const reported = new Set<string>(); // dedupe by testName+endpoint+param
+  let budget = MAX_REQUESTS;
+  let paramsTested = 0;
+
+  const sqlErrorSig =
+    /(SQL syntax;|valid MySQL result|mysqli?_fetch|ORA-\d{4,5}|PLS-\d{4,5}|PostgreSQL.*?ERROR|PG::\w*Error|SQLSTATE\[|SQLite3?::|SQLiteException|Unclosed quotation mark after the character string|quoted string not properly terminated|Microsoft OLE DB Provider for SQL Server|ODBC SQL Server Driver|Npgsql\.)/i;
+
+  const buildUrl = (base: string, param: string, value: string): string => {
+    const u = new URL(base);
+    u.searchParams.set(param, value);
+    return u.toString();
+  };
+
+  const probe = async (target: string): Promise<string> => {
+    const ctl = new AbortController();
+    const id = setTimeout(() => ctl.abort(), 4000);
+    try {
+      const res = await safeFetch(target, { headers: fuzzHeaders, signal: ctl.signal });
+      return await res.text();
+    } finally {
+      clearTimeout(id);
+    }
+  };
+
+  for (const t of targets) {
+    if (budget <= 0) break;
+    let endpointPath = t.url;
+    try {
+      endpointPath = new URL(t.url).pathname;
+    } catch {}
+
+    for (const param of t.params.slice(0, MAX_PARAMS_PER_TARGET)) {
+      if (budget <= 0) break;
+      paramsTested++;
+
+      // SQL injection: error-based signature on a discovered parameter.
+      try {
+        budget--;
+        const text = await probe(buildUrl(t.url, param, "' OR 1=1-- -"));
+        const key = `sqli:${endpointPath}:${param}`;
+        if (sqlErrorSig.test(text) && !reported.has(key)) {
+          reported.add(key);
+          findings.push({
+            testName: "SQL Injection (discovered parameter)",
+            payload: `${param}=' OR 1=1-- -`,
+            severity: "critical",
+            description: `Injecting SQL metacharacters into the discovered parameter "${param}" on ${endpointPath} provoked a database error in the response, indicating an exploitable SQL injection.`,
+            fix: "Use parameterized queries / prepared statements for this endpoint; never concatenate request input into SQL.",
+          });
+        }
+      } catch { /* probe failed */ }
+
+      if (budget <= 0) break;
+
+      // Reflected XSS: unique token reflected unencoded.
+      try {
+        budget--;
+        const token = `sx${crypto.randomBytes(4).toString("hex")}`;
+        const payload = `<svg/onload=${token}>`;
+        const text = await probe(buildUrl(t.url, param, payload));
+        const key = `xss:${endpointPath}:${param}`;
+        if (text.includes(payload) && !reported.has(key)) {
+          reported.add(key);
+          findings.push({
+            testName: "Reflected XSS (discovered parameter)",
+            payload: `${param}=${payload}`,
+            severity: "high",
+            description: `The discovered parameter "${param}" on ${endpointPath} reflects unencoded HTML/JavaScript into the response, confirming a reflected Cross-Site Scripting vulnerability.`,
+            fix: "Apply context-aware output encoding for this parameter and deploy a restrictive Content-Security-Policy.",
+          });
+        }
+      } catch { /* probe failed */ }
+    }
+  }
+
+  return { findings, paramsTested };
 }
 
 // Convert diagnostics into structured Category Findings
@@ -701,7 +1006,20 @@ export function compileStaticFindings(diag: DiagnosticResult): {
   findings: Finding[];
 } {
   const findings: Finding[] = [];
-  let score = 100;
+
+  // 0. Surface mapping summary (informational, zero score impact).
+  if (diag.crawl && (diag.crawl.pagesVisited > 1 || diag.crawl.endpointsDiscovered > 0)) {
+    const c = diag.crawl;
+    findings.push({
+      id: "f_" + crypto.randomBytes(4).toString("hex"),
+      title: `Application Surface Mapped (${c.pagesVisited} pages, ${c.endpointsDiscovered} endpoints)`,
+      description: `The crawler mapped ${c.pagesVisited} same-origin page(s) and discovered ${c.endpointsDiscovered} parameterized endpoint(s); ${c.paramsTested} parameter(s) were actively fuzzed.${c.sampleEndpoints.length ? ` Examples: ${c.sampleEndpoints.join(", ")}.` : ""}`,
+      severity: "info",
+      confidence: "high",
+      fix: "No action required — this maps the tested attack surface for context.",
+      category: "DAST",
+    });
+  }
 
   // 1. EASM (External Attack Surface Management) checks
   if (!diag.sslSecure) {
@@ -714,7 +1032,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Deploy a valid SSL/TLS certificate and configure permanent rewrite rules on port 80 to redirect HTTP traffic securely to HTTPS.",
       category: "EASM",
     });
-    score -= 30;
   }
 
   if (diag.techLeaked.length > 0) {
@@ -727,24 +1044,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Disable verbose Server headers in nginx.conf or web.config and strip x-powered-by settings globally.",
       category: "EASM",
     });
-    score -= 5;
-  }
-
-  // Target live subdomains listed under external attack surface boundaries
-  const liveSubs = diag.easmPerimeter.subdomains.filter(
-    (s) => s.status === "live",
-  );
-  if (liveSubs.length > 0) {
-    findings.push({
-      id: "f_" + crypto.randomBytes(4).toString("hex"),
-      title: `Subdomain Attack Surface Discovery (${liveSubs.length} Hosts found)`,
-      description: `Discovered active subdomains resolving external services: ${liveSubs.map((s) => s.domain).join(", ")}. Unmonitored staging or development servers pose significant inventory leak risks.`,
-      severity: "medium",
-      confidence: "low",
-      fix: "Implement robust EASM continuous inventory. Shield staging environment credentials behind VPN access control policies.",
-      category: "EASM",
-    });
-    score -= 10;
   }
 
   // 2. IAST (Interactive Application Security / Defensive Rules) checks
@@ -759,7 +1058,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Deploy restrictive CSP header directives like \"Content-Security-Policy: default-src 'self'; script-src 'self' https://trusted-origin.com\".",
       category: "IAST",
     });
-    score -= 20;
   }
 
   if (diag.missingHeaders.includes("strict-transport-security")) {
@@ -773,7 +1071,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: 'Transmit the header: "Strict-Transport-Security: max-age=31536000; includeSubDomains; preload" over all HTTPS targets.',
       category: "IAST",
     });
-    score -= 10;
   }
 
   if (diag.missingHeaders.includes("x-frame-options")) {
@@ -787,7 +1084,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: 'Enforce "X-Frame-Options: DENY" or deploy CSP "frame-ancestors \'none\'" instructions.',
       category: "IAST",
     });
-    score -= 10;
   }
 
   diag.cookieIssues.forEach((issue) => {
@@ -800,7 +1096,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: "Incorporate HttpOnly, Secure, and SameSite=Lax (or SameSite=Strict) properties inside set-cookie headers.",
       category: "IAST",
     });
-    score -= 10;
   });
 
   // 3. SAST (Static Code Security Analysis) checks
@@ -810,14 +1105,11 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       title: sf.issue,
       description: sf.description,
       severity: sf.severity,
-      confidence: "low",
+      confidence: sf.confidence,
       fix: sf.fix,
       category: "SAST",
     });
-    score -= sf.severity === "critical" ? 35 : sf.severity === "high" ? 25 : 15;
   });
-
-  // Fallback SAST removed to reduce noise
 
   // 4. SCA (Software Composition Analysis) checks
   diag.scaLibraries.forEach((sca) => {
@@ -830,10 +1122,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: sca.fix,
       category: "SCA",
     });
-    score -= sca.severity === "high" ? 25 : 15;
   });
-
-  // Fallback SCA removed to reduce noise
 
   // 5. DAST (Dynamic Application Security Probes) checks
   diag.dastInputs.forEach((dast) => {
@@ -846,7 +1135,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: dast.fix,
       category: "DAST",
     });
-    score -= dast.severity === "high" ? 20 : 10;
   });
 
   // Probed Paths exposures check
@@ -864,10 +1152,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
       fix: `Immediately strip dynamic routes to ${exp.path} inside server rewrite engines or configure .htaccess rules to return 403 blocks.`,
       category: "DAST",
     });
-    score -= 35;
   });
-
-  // Default DAST baseline finding removed to decrease informational noise
 
   // Compile Red Team aggressive probing findings
   if (diag.redTeamFindings && diag.redTeamFindings.length > 0) {
@@ -881,8 +1166,6 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         fix: rt.fix,
         category: "RED_TEAM",
       });
-      // Deduct score dynamically based on aggressive vulnerability findings
-      score -= rt.severity === "critical" ? 25 : 15;
     });
   }
 
@@ -901,19 +1184,30 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         rawRequest: api.rawRequest,
         rawResponse: api.rawResponse,
       });
-      score -= api.severity === "critical" ? 25 : 15;
     });
   }
 
-  // Cap score limits
-  score = Math.max(12, Math.min(100, score));
+  // Template engine findings (exposed panels, config/backup files, actuators).
+  if (diag.templateFindings && diag.templateFindings.length > 0) {
+    findings.push(...diag.templateFindings);
+  }
 
-  // Highest severity calculation
-  let severity: Severity = "low";
-  if (findings.some((f) => f.severity === "critical")) severity = "critical";
-  else if (findings.some((f) => f.severity === "high")) severity = "high";
-  else if (findings.some((f) => f.severity === "medium")) severity = "medium";
-  else if (findings.some((f) => f.severity === "low")) severity = "low";
+  // Final dedupe by title so a check can never double-report the same issue.
+  const seenTitles = new Set<string>();
+  const deduped = findings.filter((f) => {
+    const key = f.title.toLowerCase();
+    if (seenTitles.has(key)) return false;
+    seenTitles.add(key);
+    return true;
+  });
 
-  return { score, severity, findings };
+  // Tag each finding with its OWASP Top 10 (2021) category.
+  for (const f of deduped) {
+    if (!f.owasp) f.owasp = mapOwasp(f.category, f.title);
+  }
+
+  // Score via the shared scoring module so the initial score and any later
+  // recalculation (after suppression) always use identical weights.
+  const { score, severity } = scoreFindings(deduped);
+  return { score, severity, findings: deduped };
 }

@@ -6,6 +6,7 @@ export interface User {
   email: string;
   credits: number;
   apiKey: string;
+  notifyWebhook?: string; // optional Slack-compatible alert webhook
   createdAt: string;
 }
 
@@ -17,6 +18,7 @@ export interface Finding {
   confidence?: 'low' | 'medium' | 'high';
   fix: string;
   category: string;
+  owasp?: string; // mapped OWASP Top 10 2021 category, e.g. "A03:2021 – Injection"
   isFalsePositive?: boolean;
   suppressionReason?: string;
   suppressedAt?: string;

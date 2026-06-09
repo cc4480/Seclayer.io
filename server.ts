@@ -1,47 +1,97 @@
+import './server/env.js'; // must run first: loads .env before any module reads process.env
 import express from 'express';
 import path from 'path';
+import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
-import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
-import { ScanStatus, Severity, Finding } from './src/types.js';
+import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
+import { generateAiReport } from './server/deepseek.js';
+import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/email.js';
+import { config, validateConfigOnBoot } from './server/config.js';
+import { rateLimit } from './server/rateLimit.js';
+import { createCheckoutSession, parseWebhookEvent, isStripeConfigured } from './server/stripe.js';
+import { notifyScanComplete } from './server/notify.js';
 
 async function startServer() {
+  if (!validateConfigOnBoot() && config.isProd) {
+    console.error('[config] Refusing to start: production-critical configuration is missing (see warnings above).');
+    process.exit(1);
+  }
+
   const app = express();
-  const PORT = 3000;
+  const PORT = config.port;
 
-  // Body parsers
-  app.use(express.json());
-  app.use(express.urlencoded({ extended: true }));
+  // Behind a proxy/load balancer in production so req.protocol, req.ip and
+  // Secure cookies are derived from the X-Forwarded-* headers.
+  if (config.isProd) app.set('trust proxy', 1);
 
-  // Helper cookie or header authentication middleware
-  // We can let the UI pass "x-user-id" or fallback to default user context
+  // Baseline security headers on every response (including API + errors).
   app.use((req, res, next) => {
-    let authHeader = req.headers['authorization'];
-    if (authHeader && authHeader.startsWith('Bearer ')) {
-      const apiKey = authHeader.substring(7);
-      // Try to check if this is an API key
-      const keys = db.listApiKeys('user_default'); // simplifed lookup or query keys
-      // Allow API key checks
+    res.setHeader('X-Frame-Options', 'DENY');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
+    if (config.isProd) {
+      res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
     }
     next();
   });
 
-  // --- API ROUTES ---
-
-  // Auth Routes
-  app.post('/api/auth/login', (req, res) => {
-    const { email } = req.body;
-    if (!email || !email.includes('@')) {
-      return res.status(400).json({ status: 'error', message: 'Valid email required' });
+  // Stripe webhook MUST receive the raw body for signature verification, so it
+  // is registered before the JSON body parser. Credits are granted only here,
+  // on a verified, paid checkout.session.completed event.
+  app.post('/api/webhooks/stripe', express.raw({ type: 'application/json' }), (req, res) => {
+    let completion;
+    try {
+      completion = parseWebhookEvent(req.body as Buffer, req.headers['stripe-signature'] as string | undefined);
+    } catch (err: any) {
+      console.warn('[stripe] Webhook verification failed:', err?.message || err);
+      return res.status(400).json({ error: `Webhook Error: ${err?.message || 'invalid signature'}` });
     }
-    const user = db.getOrCreateUser(email);
-    res.json({ status: 'ok', user });
+    if (completion && !db.hasTransactionForSession(completion.sessionId)) {
+      const user = db.getUser(completion.userId);
+      if (user) {
+        db.addCredits(user.id, completion.credits, 'purchase', completion.sessionId);
+        console.log(`[stripe] Granted ${completion.credits} credits to ${user.id} (session ${completion.sessionId}).`);
+      }
+    }
+    res.json({ received: true });
   });
 
-  app.post('/api/auth/logout', (req, res) => {
-    res.json({ status: 'ok', message: 'Logged out successfully' });
+  // Body parsers + cookies (explicit body size cap)
+  app.use(express.json({ limit: '256kb' }));
+  app.use(express.urlencoded({ extended: true, limit: '256kb' }));
+  app.use(cookieParser());
+
+  const SESSION_COOKIE = 'sl_session';
+  const isProd = process.env.NODE_ENV === 'production';
+  const cookieOptions = {
+    httpOnly: true,
+    secure: isProd,
+    sameSite: 'lax' as const,
+    path: '/',
+    maxAge: 30 * 24 * 60 * 60 * 1000,
+  };
+
+  // Resolve the session cookie to a userId for every request. Identity is
+  // derived server-side from the signed session — never from client input.
+  app.use((req, res, next) => {
+    const token = req.cookies?.[SESSION_COOKIE];
+    if (token) {
+      const userId = db.getSessionUserId(token);
+      if (userId) (req as any).userId = userId;
+    }
+    next();
   });
+
+  function requireAuth(req: express.Request, res: express.Response, next: express.NextFunction) {
+    if (!(req as any).userId) {
+      return res.status(401).json({ status: 'error', message: 'Authentication required' });
+    }
+    next();
+  }
+  const getUserId = (req: express.Request): string => (req as any).userId;
+
+  // --- API ROUTES ---
 
   app.get('/api/system/health', (req, res) => {
     res.json({
@@ -51,9 +101,60 @@ async function startServer() {
     });
   });
 
-  app.get('/api/auth/me', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const user = db.getUser(userId);
+  // --- Auth (passwordless magic link) ---
+  const requestLinkLimiter = rateLimit({
+    windowMs: 15 * 60 * 1000,
+    max: 5,
+    keyPrefix: 'auth',
+    message: 'Too many sign-in attempts. Please wait a few minutes and try again.',
+  });
+  app.post('/api/auth/request-link', requestLinkLimiter, async (req, res) => {
+    const { email } = req.body || {};
+    if (!email || typeof email !== 'string' || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
+      return res.status(400).json({ status: 'error', message: 'A valid email address is required.' });
+    }
+    const normEmail = email.toLowerCase().trim();
+    const token = db.createLoginToken(normEmail);
+    // Build the link from a TRUSTED base only. In production APP_URL is required
+    // (enforced at boot), so the attacker-controllable Host header is never used
+    // for auth links. The request-host fallback is dev-only.
+    const base = config.appUrl || `${req.protocol}://${req.get('host')}`;
+    const link = `${base}/api/auth/verify?token=${token}`;
+    try {
+      const mail = buildMagicLinkEmail(link);
+      await sendEmail({ to: normEmail, subject: mail.subject, html: mail.html, text: mail.text });
+    } catch (err: any) {
+      console.error('Failed to send magic link email:', err?.message || err);
+      return res.status(502).json({ status: 'error', message: 'Could not send the sign-in email. Please try again shortly.' });
+    }
+    // The login link contains a live session-granting token, so it is ONLY ever
+    // returned in the response for local development (no email provider). In
+    // production it is never exposed — it is delivered by email exclusively.
+    const devLink = (!config.isProd && !isEmailConfigured()) ? link : undefined;
+    res.json({ status: 'ok', message: 'If that email is valid, a sign-in link is on its way.', devLink });
+  });
+
+  app.get('/api/auth/verify', (req, res) => {
+    const token = req.query.token as string | undefined;
+    const email = token ? db.consumeLoginToken(token) : null;
+    if (!email) {
+      return res.status(400).send('<h1>Sign-in link invalid or expired</h1><p>Please request a new link from the Seclayer app.</p>');
+    }
+    const user = db.getOrCreateUser(email);
+    const session = db.createSession(user.id);
+    res.cookie(SESSION_COOKIE, session, cookieOptions);
+    res.redirect('/');
+  });
+
+  app.post('/api/auth/logout', (req, res) => {
+    const token = req.cookies?.[SESSION_COOKIE];
+    if (token) db.deleteSession(token);
+    res.clearCookie(SESSION_COOKIE, { ...cookieOptions, maxAge: undefined });
+    res.json({ status: 'ok', message: 'Logged out successfully' });
+  });
+
+  app.get('/api/auth/me', requireAuth, (req, res) => {
+    const user = db.getUser(getUserId(req));
     if (!user) {
       return res.status(404).json({ status: 'error', message: 'User profile not found' });
     }
@@ -61,8 +162,15 @@ async function startServer() {
   });
 
   // Scan Routes
-  app.post('/api/scans', async (req, res) => {
-    const { url, userId = 'user_default', authHeader } = req.body;
+  const scanLimiter = rateLimit({
+    windowMs: 60 * 1000,
+    max: 10,
+    keyPrefix: 'scan',
+    message: 'Scan rate limit reached. Please wait a moment before launching more scans.',
+  });
+  app.post('/api/scans', requireAuth, scanLimiter, async (req, res) => {
+    const { url, authHeader } = req.body;
+    const userId = getUserId(req);
     if (!url) {
       return res.status(400).json({ status: 'error', message: 'Target URL is required' });
     }
@@ -73,10 +181,17 @@ async function startServer() {
     }
 
     if (user.credits < 1) {
-      return res.status(402).json({ 
-        status: 'error', 
-        message: 'No credits remaining. Please purchase scan credits to continue.' 
+      return res.status(402).json({
+        status: 'error',
+        message: 'No credits remaining. Please purchase scan credits to continue.'
       });
+    }
+
+    // Reject SSRF / malformed targets before spending a credit.
+    try {
+      await assertScanTargetSafe(url);
+    } catch (e: any) {
+      return res.status(400).json({ status: 'error', message: e?.message || 'Target URL cannot be scanned.' });
     }
 
     // Deduct 1 credit
@@ -91,24 +206,25 @@ async function startServer() {
     res.json({ status: 'ok', scan });
   });
 
-  app.get('/api/scans', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const scansList = db.listScans(userId).map(s => db.getScanWithSuppressedFindings(s));
+  app.get('/api/scans', requireAuth, (req, res) => {
+    const scansList = db.listScans(getUserId(req)).map(s => db.getScanWithSuppressedFindings(s));
     res.json({ scans: scansList });
   });
 
-  app.get('/api/scans/:id', (req, res) => {
+  app.get('/api/scans/:id', requireAuth, (req, res) => {
     let scan = db.getScan(req.params.id);
-    if (!scan) {
+    // Enforce ownership: a scan ID alone must not grant access to another
+    // user's results. Return 404 (not 403) to avoid leaking scan existence.
+    if (!scan || scan.userId !== getUserId(req)) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     scan = db.getScanWithSuppressedFindings(scan);
     res.json({ scan });
   });
 
-  app.get('/api/scans/:id/report', (req, res) => {
+  app.get('/api/scans/:id/report', requireAuth, (req, res) => {
     let scan = db.getScan(req.params.id);
-    if (!scan) {
+    if (!scan || scan.userId !== getUserId(req)) {
       return res.status(404).json({ status: 'error', message: 'Scan not found' });
     }
     if (scan.status !== 'complete') {
@@ -128,33 +244,30 @@ async function startServer() {
   });
 
   // --- False Positive & Suppression Rules ---
-  app.get('/api/suppressions', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const rules = db.listSuppressions(userId);
-    res.json({ suppressions: rules });
+  app.get('/api/suppressions', requireAuth, (req, res) => {
+    res.json({ suppressions: db.listSuppressions(getUserId(req)) });
   });
 
-  app.post('/api/suppressions', (req, res) => {
-    const { userId = 'user_default', targetUrl, findingTitle, reason } = req.body;
+  app.post('/api/suppressions', requireAuth, (req, res) => {
+    const { targetUrl, findingTitle, reason } = req.body;
     if (!targetUrl || !findingTitle) {
       return res.status(400).json({ error: 'targetUrl and findingTitle are required' });
     }
-    const rule = db.addSuppression(userId, targetUrl, findingTitle, reason || 'False positive confirmation');
+    const rule = db.addSuppression(getUserId(req), targetUrl, findingTitle, reason || 'False positive confirmation');
     res.json({ status: 'ok', rule });
   });
 
-  app.delete('/api/suppressions/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeSuppression(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/suppressions/:id', requireAuth, (req, res) => {
+    if (!db.removeSuppression(getUserId(req), req.params.id)) {
       return res.status(404).json({ error: 'Suppression exclusion rule not found' });
     }
     res.json({ status: 'ok' });
   });
 
-  app.post('/api/scans/:scanId/findings/:findingId/suppress', (req, res) => {
+  app.post('/api/scans/:scanId/findings/:findingId/suppress', requireAuth, (req, res) => {
     const { scanId, findingId } = req.params;
-    const { reason = 'Manual enterprise validation', userId = 'user_default' } = req.body;
+    const { reason = 'Manual enterprise validation' } = req.body;
+    const userId = getUserId(req);
 
     const scan = db.getScan(scanId);
     if (!scan || scan.userId !== userId) {
@@ -171,96 +284,86 @@ async function startServer() {
   });
 
   // --- Continuous Monitoring ---
-  app.get('/api/monitoring', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const monitoredTargets = db.listMonitoredTargets(userId);
-    res.json({ monitoredTargets });
+  app.get('/api/monitoring', requireAuth, (req, res) => {
+    res.json({ monitoredTargets: db.listMonitoredTargets(getUserId(req)) });
   });
 
-  app.post('/api/monitoring', (req, res) => {
-    const { url, frequencyDays = 7, scheduleString, userId = 'user_default' } = req.body;
+  app.post('/api/monitoring', requireAuth, (req, res) => {
+    const { url, frequencyDays = 7, scheduleString } = req.body;
     if (!url) {
       return res.status(400).json({ error: 'url is required' });
     }
-    const target = db.addMonitoredTarget(userId, url, frequencyDays, scheduleString);
+    const target = db.addMonitoredTarget(getUserId(req), url, frequencyDays, scheduleString);
     res.json({ status: 'ok', target });
   });
 
-  app.delete('/api/monitoring/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.removeMonitoredTarget(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/monitoring/:id', requireAuth, (req, res) => {
+    if (!db.removeMonitoredTarget(getUserId(req), req.params.id)) {
       return res.status(404).json({ error: 'Monitored target not found' });
     }
     res.json({ status: 'ok' });
   });
 
-  // Credit and checkout testing integration
-  app.get('/api/credits', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+  // --- Alert webhook (Slack-compatible) ---
+  app.put('/api/user/webhook', requireAuth, async (req, res) => {
+    const { url } = req.body || {};
+    if (url) {
+      if (typeof url !== 'string') {
+        return res.status(400).json({ status: 'error', message: 'Webhook must be an http(s) URL, or empty to disable.' });
+      }
+      // Block internal/reserved destinations (SSRF) at set time; delivery is
+      // re-validated as well in case DNS changes later.
+      try {
+        await assertScanTargetSafe(url.trim());
+      } catch {
+        return res.status(400).json({ status: 'error', message: 'Webhook must be a public http(s) URL (internal/reserved addresses are not allowed).' });
+      }
+    }
+    const user = db.setUserWebhook(getUserId(req), url ? url.trim() : null);
+    res.json({ status: 'ok', notifyWebhook: user?.notifyWebhook ?? null });
+  });
+
+  // --- Credits ---
+  app.get('/api/credits', requireAuth, (req, res) => {
+    const userId = getUserId(req);
     const user = db.getUser(userId);
     if (!user) return res.status(404).json({ message: 'User not found' });
-    
-    // We can fetch transactions list from db
     res.json({
       credits: user.credits,
-      // Since db handles list, we can return the global transaction list for simplicity, filtered:
-      transactions: (db as any).data.transactions.filter((tx: any) => tx.userId === userId)
+      transactions: db.listTransactions(userId)
     });
   });
 
-  // Mock Stripe Checkout test integration
-  app.post('/api/credits/checkout', (req, res) => {
-    const { userId = 'user_default', pack } = req.body;
-    
-    const PRICES = {
-      single: { price: 29, credits: 1 },
-      pack5: { price: 99, credits: 5 },
-      pack20: { price: 299, credits: 20 }
-    };
-
-    const selectedPack = PRICES[pack as keyof typeof PRICES];
-    if (!selectedPack) {
-      return res.status(400).json({ status: 'error', message: 'Invalid credit pack selected' });
+  // Real Stripe Checkout. Returns a hosted checkout URL; credits are granted by
+  // the verified webhook after payment, never here.
+  app.post('/api/credits/checkout', requireAuth, async (req, res) => {
+    if (!isStripeConfigured()) {
+      return res.status(503).json({ status: 'error', message: 'Payments are not currently available. Please contact support.' });
     }
-
-    const sessionId = `cs_test_${Math.random().toString(36).substring(2, 15)}`;
-    
-    // We update the credits automatically as if Stripe webhook succeeded instantly, 
-    // but we can pass back the details for user review. Excellent interactive UX!
-    db.addCredits(userId, selectedPack.credits, 'purchase', sessionId);
-    
-    res.json({
-      status: 'ok',
-      url: `/dashboard?checkout_success=true&credits=${selectedPack.credits}`,
-      sessionId,
-      creditsAdded: selectedPack.credits,
-      pricePaid: selectedPack.price
-    });
-  });
-
-  // Mock Stripe Webhook endpoint
-  app.post('/api/webhooks/stripe', (req, res) => {
-    res.json({ received: true });
+    const { pack } = req.body;
+    // Trusted base only (APP_URL enforced in production); dev falls back to host.
+    const base = config.appUrl || `${req.protocol}://${req.get('host')}`;
+    try {
+      const url = await createCheckoutSession(getUserId(req), pack, base);
+      res.json({ status: 'ok', url });
+    } catch (err: any) {
+      const msg = err?.message || 'Could not start checkout.';
+      const code = /invalid credit pack/i.test(msg) ? 400 : 502;
+      res.status(code).json({ status: 'error', message: msg });
+    }
   });
 
   // API Key routes for developer MCP usecases
-  app.get('/api/keys', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const keys = db.listApiKeys(userId);
-    res.json({ keys });
+  app.get('/api/keys', requireAuth, (req, res) => {
+    res.json({ keys: db.listApiKeys(getUserId(req)) });
   });
 
-  app.post('/api/keys', (req, res) => {
-    const { userId = 'user_default' } = req.body;
-    const keyObj = db.generateApiKey(userId);
-    res.json({ status: 'ok', key: keyObj });
+  app.post('/api/keys', requireAuth, (req, res) => {
+    res.json({ status: 'ok', key: db.generateApiKey(getUserId(req)) });
   });
 
-  app.delete('/api/keys/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
-    const success = db.revokeApiKey(userId, req.params.id);
-    if (!success) {
+  app.delete('/api/keys/:id', requireAuth, (req, res) => {
+    if (!db.revokeApiKey(getUserId(req), req.params.id)) {
       return res.status(404).json({ status: 'error', message: 'Key not found or could not be revoked' });
     }
     res.json({ status: 'ok' });
@@ -272,6 +375,13 @@ async function startServer() {
     const { url, apiKey, authHeader } = req.body;
     if (!url || !apiKey) {
       return res.status(400).json({ error: 'Missing parameters. required: url, apiKey' });
+    }
+
+    // Reject SSRF / malformed targets before validating the key or spending a credit.
+    try {
+      await assertScanTargetSafe(url);
+    } catch (e: any) {
+      return res.status(400).json({ error: e?.message || 'Target URL cannot be scanned.' });
     }
 
     // Verify key and deduct 1 credit
@@ -312,214 +422,26 @@ async function startServer() {
   });
 
 
-  // --- ENTERPRISE PIPELINE ACTIVE ENDPOINTS ---
-
-  // 1. ASPM & Signal Correlation Engine
-  app.post('/api/enterprise/aspm/correlate', (req, res) => {
-    const { url = 'staging.api.vulnerable-shop.io' } = req.body;
-    res.json({
-      success: true,
-      targetUrl: url,
-      orchestrator: 'OWASP DefectDojo Correlator Core',
-      findingsCorrelated: 2,
-      analysisTimeMs: 420,
-      steps: [
-        {
-          phase: "SAST Vulnerability Ingestion",
-          status: "complete",
-          logs: `Parsed Semgrep SAST scan hook on dynamic repository commits definition. Flagged 1 SQL Injection hazard inside "/controllers/UserController.java" line 87: Unsafely concatenated raw HTTP inputs "userId" to SQL executable stream.`
-        },
-        {
-          phase: "ASPM Correlation Engine Triggered",
-          status: "complete",
-          logs: `Fusion Matcher searched EASM perimeter indexing for live URLs hosting the compiled code. Identified active target match: "${url}".`
-        },
-        {
-          phase: "Targeted Dynamic Verification (DAST)",
-          status: "complete",
-          logs: `Dispatched containerized OWASP ZAP/Katana worker probing "${url}/api/user/profile?id=1'". Input escape injections triggered parsing trace: Dynamic SQL syntax error returned in headers.`
-        },
-        {
-          phase: "Active Vulnerability Confirmation & Escalation",
-          status: "escalated",
-          logs: `Vulnerability verified as dynamic 100% exploitable. Escalated SAST Finding category severity from MEDIUM to CRITICAL. Raised high-priority Jira ticket & synced ticket ledger inside DefectDojo (ID: SL-DD-948211).`
-        }
-      ]
-    });
-  });
-
-  // 2. EASM Attack Surface Mapping
-  app.post('/api/enterprise/easm/recon', (req, res) => {
-    const { domain = 'target-enterprise.com' } = req.body;
-    const cleanDomain = domain.replace(/https?:\/\//i, '').split('/')[0];
-    res.json({
-      success: true,
-      domain: cleanDomain,
-      scanner: 'OWASP Amass & Continuous Recon Worker v3',
-      scanTime: new Date().toISOString(),
-      summary: {
-        totalSubdomains: 6,
-        activeIps: 3,
-        nameserver: 'ns1.dnsrouting-gate.net',
-        nameserverIp: '45.89.21.4'
-      },
-      technologies: [
-        { name: "Nginx Server", type: "Web Server", version: "1.23.2", confidence: 100 },
-        { name: "React Framework", type: "Client Engine", version: "18.2.0", confidence: 100 },
-        { name: "Node.js Express", type: "Backend Framework", version: "18.15.0", confidence: 95 },
-        { name: "PostgreSQL Database", type: "DB Server", version: "15.1", confidence: 85 },
-        { name: "Cloudflare WAF", type: "Network Shield", version: "Global Edge", confidence: 90 }
-      ],
-      subdomains: [
-        { subdomain: `api.${cleanDomain}`, ip: '104.22.4.12', status: 'live', ports: ['80', '443', '8443'], service: 'HTTPS Express API' },
-        { subdomain: `staging.${cleanDomain}`, ip: '104.22.4.13', status: 'live', ports: ['443', '8080'], service: 'Vulnerable Staging Area' },
-        { subdomain: `admin.${cleanDomain}`, ip: '104.22.4.14', status: 'live', ports: ['443'], service: 'Protected Portal Gate' },
-        { subdomain: `vpn.${cleanDomain}`, ip: '45.12.98.5', status: 'live', ports: ['1194'], service: 'OpenVPN Daemon' },
-        { subdomain: `grafana.${cleanDomain}`, ip: '104.22.4.15', status: 'inactive', ports: ['3000'], service: 'Telemetry Panel' },
-        { subdomain: `internal-db.${cleanDomain}`, ip: '10.0.12.3', status: 'internal-only', ports: ['5432'], service: 'Production Postgres Mirror' }
-      ],
-      portsList: [
-        { port: 80, protocol: 'tcp', service: 'HTTP (Redirects HTTPS)' },
-        { port: 443, protocol: 'tcp', service: 'HTTPS (TLS 1.3 Active)' },
-        { port: 1194, protocol: 'udp', service: 'OpenVPN (Vulnerable to credential sprays)' },
-        { port: 8080, protocol: 'tcp', service: 'HTTP-ALT (Exposes Spring Boot actuator admin stats)' }
-      ]
-    });
-  });
-
-  // 3. Katana & Hadrian API Security Testing API
-  app.post('/api/enterprise/api-scan/hadrian', (req, res) => {
-    const { schemaTitle = 'API Specification Core' } = req.body;
-    res.json({
-      success: true,
-      service: `Hadrian API Role Mutation Matrix Engine (${schemaTitle})`,
-      endpointsCount: 4,
-      matrix: [
-        {
-          endpoint: '/api/v1/user/profile/{id}',
-          methods: ['GET', 'PUT'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Self-Only)", color: "text-amber-400" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "IDOR on PUT method: Specifying standard header overrides allows arbitrary profile updates on any account without administrative privileges."
-        },
-        {
-          endpoint: '/api/v1/billing/transactions',
-          methods: ['GET', 'POST'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Denied (403)", color: "text-red-500" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "None detected. Strict role-based filter checks present at Route level."
-        },
-        {
-          endpoint: '/api/v1/system/actuator/env',
-          methods: ['GET'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Exposed)", color: "text-red-500 font-bold" },
-            "Guest Role": { status: "Allow (Exposed)", color: "text-red-500 font-bold animate-pulse" }
-          },
-          vulnerability: "BOLA / Authentication Bypass: Critical configurations variables (.env database passwords) accessible by unauthorized third-parties and guest operators."
-        },
-        {
-          endpoint: '/api/v1/support/tickets/{ticketId}',
-          methods: ['GET', 'DELETE'],
-          rolesResult: {
-            "Enterprise Admin": { status: "Allow", color: "text-[#22c55e]" },
-            "Standard User": { status: "Allow (Any ID)", color: "text-red-500 font-semibold" },
-            "Guest Role": { status: "Denied (401)", color: "text-red-500" }
-          },
-          vulnerability: "Insecure Direct Object Reference (IDOR): Standard user can review or purge support tickets of other customers by iterating dynamic ticket integer indexes."
-        }
-      ]
-    });
-  });
-
-  // 4. DongTai Runtime IAST Bytecode Tracer
-  app.post('/api/enterprise/iast/trace', (req, res) => {
-    const { inputPayload = `1' UNION SELECT credit_card FROM payments` } = req.body;
-    res.json({
-      success: true,
-      agent: 'DongTai VM Bytecode Passive Instrumenter Agent v2.5',
-      runtime: 'Java Virtual Machine OpenJDK 17',
-      status: 'Sink Triggered Malicious Flow Alert',
-      payloadTested: inputPayload,
-      traceTime: new Date().toISOString(),
-      traces: [
-        {
-          step: 1,
-          clazz: 'org.apache.catalina.connector.Request',
-          method: 'getParameter("searchQuery")',
-          line: 312,
-          description: `HTTP parameter parsing matched. Tainted reference loaded into user scope. Input: "${inputPayload}"`
-        },
-        {
-          step: 2,
-          clazz: 'com.seclayer.enterprise.controller.SearchController',
-          method: 'executeSearch(HttpServletRequest)',
-          line: 45,
-          description: `Tainted wrapper transferred directly to query validator. Sanitizer bypass occurred (length checks only; regex failed to intercept SQL escape syntax).`
-        },
-        {
-          step: 3,
-          clazz: 'com.seclayer.enterprise.data.RepositoryCore',
-          method: 'unsafeRawSearchBind(String)',
-          line: 104,
-          description: `String concatenation sink assembled: "SELECT * FROM items WHERE name = '" + searchQuery + "'" -> query result: "SELECT * FROM items WHERE name = '1' UNION SELECT credit_card FROM payments'".`
-        },
-        {
-          step: 4,
-          clazz: 'org.postgresql.jdbc.PgStatement',
-          method: 'execute(String)',
-          line: 2190,
-          description: `⚠️ SQL DATA SINK REACHED! Passive IAST hooks intercepted the query parsing executing in real-time. Confirmed attacker payload has mutated query execution logic inside the active running process.`
-        }
-      ]
-    });
-  });
-
-  // 5. PentAGI Autonomous Pentest AI Exploit Agent
-  app.get('/api/enterprise/pentagi/logs', async (req, res) => {
-    const url = req.query.url as string | undefined;
-    const logs = await generatePentagiLogs(url);
-    res.json({
-      success: true,
-      engine: 'PentAGI Autonomous Multi-Agent Multi-Step Pentest Coordinator',
-      agents: ['Scout', 'Exploiter', 'Reporter'],
-      logs: logs
-    });
-  });
-
-
-  // --- Background scan coordinator queue ---
+  // --- Background scan worker ---
+  // Drives a scan through its real lifecycle: status reflects actual work
+  // boundaries (diagnostics, then AI analysis), with no artificial delays.
   async function processScanJob(scanId: string) {
     try {
-      console.log(`[Job Worker] Starting pen-test work details for Scan ID: ${scanId}`);
-      
-      // Queued to Scanning
-      await sleep(1500);
-      db.updateScan(scanId, { status: 'scanning' });
+      console.log(`[Job Worker] Starting scan ${scanId}`);
 
-      // Execute Diagnostic Probes (actual HTTP check)
       const scan = db.getScan(scanId);
       if (!scan) return;
-      
+
+      // Active diagnostics (HTTP probing, header/secret/SCA/path checks, fuzzing).
+      db.updateScan(scanId, { status: 'scanning' });
       const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
-      // Scanning to Analyzing
-      await sleep(1500);
+      // Compile findings and generate the analysis report.
       db.updateScan(scanId, { status: 'analyzing' });
-
-      // Compile raw data inputs & call AI Generator
       const staticCompiled = compileStaticFindings(diagnostics);
       const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
-      // Save report in status Complete
-      db.updateScan(scanId, {
+      const completed = db.updateScan(scanId, {
         status: 'complete',
         score: outputReport.score,
         severity: outputReport.severity,
@@ -527,32 +449,62 @@ async function startServer() {
         aiSummary: outputReport.aiSummary,
         completedAt: new Date().toISOString()
       });
-      console.log(`[Job Worker] Successfully finalized security run for Scan ID: ${scanId}`);
+      console.log(`[Job Worker] Completed scan ${scanId}`);
+
+      // Fire the user's alert webhook for actionable results (non-blocking).
+      const owner = db.getUser(completed.userId);
+      notifyScanComplete(owner?.notifyWebhook, db.getScanWithSuppressedFindings(completed));
 
     } catch (err: any) {
-      console.error(`[Job Worker] FAILED during pen-testing run of Scan ID ${scanId}:`, err);
+      console.error(`[Job Worker] FAILED scan ${scanId}:`, err?.message || err);
       db.updateScan(scanId, {
         status: 'failed',
-        error: err.message || 'An unexpected server timeout occurred during scanner diagnostics.'
+        error: err?.message || 'The scan could not be completed.'
       });
     }
   }
 
-  function sleep(ms: number) {
-    return new Promise(resolve => setTimeout(resolve, ms));
+  // --- Continuous monitoring worker ---
+  // Runs real scheduled scans for due monitored targets: validates the target,
+  // spends a credit, and launches the same scan pipeline as a manual scan.
+  let monitorTickRunning = false;
+  async function runDueMonitoredScans() {
+    if (monitorTickRunning) return;
+    monitorTickRunning = true;
+    try {
+      const due = db.listDueMonitoredTargets(new Date().toISOString());
+      for (const target of due) {
+        const next = new Date(Date.now() + (target.frequencyDays || 7) * 24 * 60 * 60 * 1000).toISOString();
+        try {
+          const user = db.getUser(target.userId);
+          if (!user || user.credits < 1) continue; // retry next tick once credits exist
+          await assertScanTargetSafe(target.url);
+          db.deductCredits(target.userId, 1);
+          const scan = db.createScan(target.userId, target.url);
+          db.markMonitoredScanned(target.id, new Date().toISOString(), next);
+          processScanJob(scan.id);
+        } catch (err: any) {
+          // Invalid/unsafe target: defer instead of retrying every tick.
+          db.markMonitoredScanned(target.id, target.lastScannedAt || new Date().toISOString(), next);
+          console.warn(`[monitor] Skipped ${target.url}: ${err?.message || err}`);
+        }
+      }
+    } finally {
+      monitorTickRunning = false;
+    }
   }
+  const monitorInterval = setInterval(() => {
+    runDueMonitoredScans().catch((e) => console.error('[monitor] tick error:', e));
+  }, 60 * 1000);
+  monitorInterval.unref();
 
-
-  // --- Express serving of static client files ---
-  app.use((req, res, next) => {
-    res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains; preload');
-    res.setHeader('X-Frame-Options', 'DENY');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
-    next();
+  // Unknown API routes return JSON 404 (not the SPA shell).
+  app.use('/api', (req, res) => {
+    res.status(404).json({ status: 'error', message: `Unknown API endpoint: ${req.method} ${req.path}` });
   });
 
-  if (process.env.NODE_ENV !== "production") {
+  // --- Express serving of static client files ---
+  if (!config.isProd) {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
@@ -566,13 +518,38 @@ async function startServer() {
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT}`);
+  // JSON error handler — keeps thrown route errors from leaking stack traces
+  // or crashing the process; always responds with structured JSON.
+  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+    console.error('[server] Unhandled route error:', err?.message || err);
+    if (res.headersSent) return next(err);
+    res.status(500).json({ status: 'error', message: 'An unexpected server error occurred.' });
   });
+
+  const server = app.listen(PORT, '0.0.0.0', () => {
+    console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT} (${config.isProd ? 'production' : 'development'})`);
+  });
+
+  // Graceful shutdown for containerized deployments.
+  const shutdown = (signal: string) => {
+    console.log(`[server] ${signal} received — shutting down gracefully.`);
+    server.close(() => process.exit(0));
+    setTimeout(() => process.exit(1), 10000).unref();
+  };
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
 }
 
+// Process-level safety nets: log instead of crashing silently.
+process.on('unhandledRejection', (reason) => {
+  console.error('[server] Unhandled promise rejection:', reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('[server] Uncaught exception:', err);
+});
+
 // Global safety catch
-import fs from 'fs';
 startServer().catch((err) => {
   console.error("Critical server bootstrap error:", err);
+  process.exit(1);
 });

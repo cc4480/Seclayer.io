@@ -41,7 +41,6 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          userId: scan.userId || 'user_default',
           reason: suppressReason.trim() || 'Verified acceptable risk / false positive audit confirmation.'
         })
       });
@@ -65,7 +64,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const handleRemoveSuppressionDirectly = async (findingTitle: string) => {
     setIsSuppressing(true);
     try {
-      const listRes = await fetch(`/api/suppressions?userId=${scan.userId || 'user_default'}`);
+      const listRes = await fetch(`/api/suppressions`);
       if (!listRes.ok) throw new Error('Could not read exclusion lists');
       const listData = await listRes.json();
       const matchingRule = (listData.suppressions || []).find((s: any) => 
@@ -77,7 +76,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
         throw new Error('Suppression rule on this target was not found in database.');
       }
 
-      const delRes = await fetch(`/api/suppressions/${matchingRule.id}?userId=${scan.userId || 'user_default'}`, {
+      const delRes = await fetch(`/api/suppressions/${matchingRule.id}`, {
         method: 'DELETE'
       });
       if (delRes.ok) {
@@ -378,7 +377,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                 <div className="bg-black/40 p-5 rounded border border-[#27272a] relative">
                   <div className="absolute right-4 top-4 font-mono text-[9px] text-[#22c55e] uppercase border border-[#22c55e]/30 px-2 py-0.5 rounded flex items-center space-x-1 select-none">
                     <Sparkles className="w-3 h-3" />
-                    <span>Gemini AI Analyst Verified</span>
+                    <span>DeepSeek AI Analyst Verified</span>
                   </div>
                   <h3 className="text-xs font-bold font-mono text-white mb-2 uppercase tracking-wider flex items-center space-x-1.5">
                     <span>Executive Summary</span>
@@ -553,6 +552,14 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                                   'border-zinc-500/30 text-zinc-500'
                                 }`}>
                                   Conf: {finding.confidence}
+                                </span>
+                              )}
+                              {finding.owasp && (
+                                <span
+                                  title={finding.owasp}
+                                  className="text-[9px] font-mono uppercase px-2 py-0.5 rounded border border-purple-500/30 bg-black text-purple-300"
+                                >
+                                  {finding.owasp.split(' – ')[0]}
                                 </span>
                               )}
                               <h5 className={`text-xs font-bold font-mono tracking-tight leading-snug ${finding.isFalsePositive ? 'text-zinc-500 line-through' : 'text-white'}`}>{finding.title}</h5>
