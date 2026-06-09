@@ -735,4 +735,401 @@ export const TEMPLATES: Template[] = [
       },
     ],
   },
+
+  // --- Exposed datastores / services over HTTP ---
+  {
+    id: "elasticsearch-exposed",
+    name: "Elasticsearch Cluster Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An Elasticsearch HTTP API is publicly reachable, allowing index enumeration and unauthenticated data access.",
+    fix: "Bind Elasticsearch to an internal interface and require authentication (e.g. X-Pack/security).",
+    requests: [
+      {
+        path: "/_cluster/health",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"cluster_name"', '"number_of_nodes"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "couchdb-exposed",
+    name: "Apache CouchDB Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A CouchDB instance/admin UI is publicly reachable, exposing databases to unauthenticated access.",
+    fix: "Restrict CouchDB to internal networks and configure an admin account.",
+    requests: [
+      {
+        path: "/_utils/",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Fauxton", "couchdb"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "kubernetes-api-exposed",
+    name: "Kubernetes API Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Kubernetes API server version endpoint is publicly reachable, indicating an exposed control plane.",
+    fix: "Restrict the Kubernetes API to trusted networks and disable anonymous auth.",
+    requests: [
+      {
+        path: "/version",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"gitVersion"', '"goVersion"', '"compiler"'], condition: "and" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "rabbitmq-management-exposed",
+    name: "RabbitMQ Management API Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The RabbitMQ management API is publicly reachable, disclosing broker version and topology.",
+    fix: "Restrict the RabbitMQ management plugin to internal access.",
+    requests: [
+      {
+        path: "/api/overview",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["rabbitmq_version", "management_version"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Monitoring / observability dashboards ---
+  {
+    id: "prometheus-metrics-exposed",
+    name: "Prometheus Metrics Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Prometheus metrics endpoint is publicly reachable, leaking internal performance, hostnames, and operational detail.",
+    fix: "Restrict /metrics to internal scrapers or require authentication.",
+    requests: [
+      {
+        path: "/metrics",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["# HELP", "# TYPE"], condition: "and" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "grafana-exposed",
+    name: "Grafana Instance Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Grafana dashboard login is publicly reachable, providing a brute-force surface and (on old versions) known exploits.",
+    fix: "Place Grafana behind SSO/VPN and keep it patched.",
+    requests: [
+      {
+        path: "/login",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Grafana", "grafana-app"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "kibana-exposed",
+    name: "Kibana Instance Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Kibana interface is publicly reachable, exposing dashboards over the underlying Elasticsearch data.",
+    fix: "Restrict Kibana to internal/authenticated access.",
+    requests: [
+      {
+        path: "/app/kibana",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["kbn-injected-metadata", "kibana"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Cloud / key material ---
+  {
+    id: "gcp-service-account-exposed",
+    name: "GCP Service Account Key Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Google Cloud service-account key file is publicly readable, granting programmatic access to cloud resources.",
+    fix: "Remove the key from the web root and revoke/rotate the service-account key immediately.",
+    requests: [
+      {
+        path: "/service-account.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"private_key"', '"client_email"'], condition: "and" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/credentials.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"private_key"', '"client_email"'], condition: "and" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "ssh-private-key-exposed",
+    name: "SSH Private Key Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An SSH private key is publicly downloadable from the web root, enabling direct server access.",
+    fix: "Remove the key from the web root and rotate it (and any authorized_keys it maps to) immediately.",
+    requests: [
+      {
+        path: "/.ssh/id_rsa",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["PRIVATE KEY-----"] },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/id_rsa",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["PRIVATE KEY-----"] },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "npmrc-token-exposed",
+    name: "npm Auth Token (.npmrc) Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An .npmrc containing an npm auth token is publicly readable, allowing package publish/install under that account.",
+    fix: "Remove .npmrc from the web root and revoke the npm token.",
+    requests: [
+      {
+        path: "/.npmrc",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["_authToken", "_auth="], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- CMS-specific exposures ---
+  {
+    id: "wp-debug-log-exposed",
+    name: "WordPress debug.log Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "WordPress debug logging is enabled and the log is publicly readable, leaking stack traces, paths, and sometimes secrets.",
+    fix: "Disable WP_DEBUG_LOG in production and remove the exposed log file.",
+    requests: [
+      {
+        path: "/wp-content/debug.log",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["PHP Notice", "PHP Warning", "PHP Fatal error", "WordPress database error", "Stack trace"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "wp-xmlrpc-enabled",
+    name: "WordPress XML-RPC Enabled",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "xmlrpc.php is enabled, providing an amplification surface for credential brute-force and pingback-based DDoS.",
+    fix: "Disable XML-RPC if unused, or restrict and rate-limit it.",
+    requests: [
+      {
+        path: "/xmlrpc.php",
+        matchers: [
+          { type: "status", status: [200, 405] },
+          { type: "word", words: ["XML-RPC server accepts POST requests only"] },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "drupal-changelog-exposed",
+    name: "Drupal Version Disclosed (CHANGELOG.txt)",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "Drupal's CHANGELOG.txt is publicly readable, disclosing the exact core version for targeted exploitation.",
+    fix: "Remove or block access to CHANGELOG.txt and keep core patched.",
+    requests: [
+      {
+        path: "/CHANGELOG.txt",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Drupal "] },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/core/CHANGELOG.txt",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Drupal "] },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "joomla-config-backup-exposed",
+    name: "Joomla configuration.php Backup Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A backup of Joomla's configuration.php is publicly readable, exposing database credentials and secrets.",
+    fix: "Remove the backup from the web root and rotate the exposed credentials.",
+    requests: [
+      {
+        path: "/configuration.php~",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["JConfig", "public $password", "public $db"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Dev / CI tooling exposed ---
+  {
+    id: "laravel-debugbar-exposed",
+    name: "Laravel Debugbar Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "Laravel Debugbar assets are reachable, indicating debug mode in production and leaking queries/requests.",
+    fix: "Disable Debugbar and set APP_DEBUG=false in production.",
+    requests: [
+      {
+        path: "/_debugbar/open",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["phpdebugbar", "PhpDebugBar"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "jenkins-exposed",
+    name: "Jenkins Login Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Jenkins CI login is publicly reachable, presenting a high-value RCE target if misconfigured or unpatched.",
+    fix: "Place Jenkins behind a VPN/SSO and keep it updated; never expose it directly.",
+    requests: [
+      {
+        path: "/login",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Jenkins", "j_username"], condition: "and" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "server-log-exposed",
+    name: "Server Log File Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A server/application log file is publicly readable, leaking stack traces, internal paths, and request details.",
+    fix: "Store logs outside the web root and deny direct access to log files.",
+    requests: [
+      {
+        path: "/error_log",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["PHP Fatal error", "PHP Warning", "[error]", "Stack trace"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/logs/error.log",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["PHP Fatal error", "PHP Warning", "[error]", "Stack trace"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
 ];
