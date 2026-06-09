@@ -65,6 +65,30 @@ test('runTemplates aggregates across the pack', async () => {
   assert.ok(findings.some((f) => /docker-compose/i.test(f.title)));
 });
 
+test('backup-archive template fires on a zip content-type, not on an HTML page', async () => {
+  const tpl = TEMPLATES.find((t) => t.id === 'backup-archive-exposed')!;
+  const zip: any = async () => new Response('PK\x03\x04', { status: 200, headers: { 'content-type': 'application/zip' } });
+  const html: any = async () => new Response('<!doctype html>', { status: 200, headers: { 'content-type': 'text/html' } });
+  assert.ok(await runTemplate(tpl, 'https://app.test', zip));
+  assert.equal(await runTemplate(tpl, 'https://app.test', html), null);
+});
+
+test('htpasswd template regex matches a hashed credential line', async () => {
+  const tpl = TEMPLATES.find((t) => t.id === 'htpasswd-exposed')!;
+  const hit: any = async () => new Response('admin:$apr1$xyz$abcdef', { status: 200, headers: { 'content-type': 'text/plain' } });
+  const miss: any = async () => new Response('just some text', { status: 200, headers: { 'content-type': 'text/plain' } });
+  assert.ok(await runTemplate(tpl, 'https://app.test', hit));
+  assert.equal(await runTemplate(tpl, 'https://app.test', miss), null);
+});
+
+test('wp user-enumeration requires both slug and name (and condition)', async () => {
+  const tpl = TEMPLATES.find((t) => t.id === 'wp-user-enumeration')!;
+  const users: any = async () => new Response('[{"id":1,"name":"Admin","slug":"admin"}]', { status: 200, headers: { 'content-type': 'application/json' } });
+  const partial: any = async () => new Response('{"slug":"x"}', { status: 200, headers: { 'content-type': 'application/json' } });
+  assert.ok(await runTemplate(tpl, 'https://app.test', users));
+  assert.equal(await runTemplate(tpl, 'https://app.test', partial), null);
+});
+
 test('shipped templates are well-formed', () => {
   const cats = new Set(['DAST', 'SAST', 'IAST', 'SCA', 'EASM', 'RED_TEAM']);
   const ids = new Set<string>();

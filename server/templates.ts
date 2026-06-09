@@ -266,4 +266,473 @@ export const TEMPLATES: Template[] = [
       },
     ],
   },
+
+  // --- Source / VCS / config file exposure ---
+  {
+    id: "git-credentials-exposed",
+    name: "Git Credentials File Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A .git-credentials file is publicly readable and embeds credentials directly inside repository URLs.",
+    fix: "Remove the file from the web root and rotate the exposed credentials.",
+    requests: [
+      {
+        path: "/.git-credentials",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: "https?://[^:/]+:[^@]+@" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "web-config-exposed",
+    name: "IIS web.config Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An ASP.NET/IIS web.config is publicly readable, often exposing connection strings, machine keys, and app settings.",
+    fix: "Block direct access to web.config and rotate any exposed connection strings or machine keys.",
+    requests: [
+      {
+        path: "/web.config",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["<configuration", "<system.webServer", "<connectionStrings"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "webinf-web-xml-exposed",
+    name: "Java WEB-INF/web.xml Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Java deployment descriptor WEB-INF/web.xml is publicly readable, disclosing servlet mappings, parameters, and internal structure.",
+    fix: "Ensure the servlet container denies direct access to /WEB-INF/.",
+    requests: [
+      {
+        path: "/WEB-INF/web.xml",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["<web-app", "<servlet"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "htaccess-exposed",
+    name: "Apache .htaccess Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An .htaccess file is publicly readable, revealing rewrite rules, access controls, and internal path structure.",
+    fix: "Configure the server to deny access to files beginning with a dot.",
+    requests: [
+      {
+        path: "/.htaccess",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["RewriteEngine", "RewriteRule", "<IfModule", "Order allow"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "htpasswd-exposed",
+    name: "Apache .htpasswd Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An .htpasswd file is publicly readable, exposing usernames and password hashes for offline cracking.",
+    fix: "Deny web access to .htpasswd and rotate the affected credentials.",
+    requests: [
+      {
+        path: "/.htpasswd",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: ":\\$(apr1|2[aby]|1|5|6)\\$" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Environment variants & database dumps ---
+  {
+    id: "env-production-exposed",
+    name: "Production Environment File Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A production environment file (.env.production / .env.local) is publicly readable and typically contains live secrets.",
+    fix: "Remove the file from the web root and rotate every exposed secret.",
+    requests: [
+      {
+        path: "/.env.production",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: "^[A-Z][A-Z0-9_]*\\s*=" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/.env.local",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "regex", regex: "^[A-Z][A-Z0-9_]*\\s*=" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "sql-dump-exposed",
+    name: "Database Dump Exposed",
+    severity: "critical",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A SQL database dump is publicly downloadable, exposing complete schema and data including potentially credentials and PII.",
+    fix: "Remove database dumps from the web root immediately and assess for data exposure.",
+    requests: [
+      {
+        path: "/backup.sql",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["INSERT INTO", "CREATE TABLE", "DROP TABLE", "MySQL dump", "PostgreSQL database dump"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/database.sql",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["INSERT INTO", "CREATE TABLE", "DROP TABLE", "MySQL dump"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/dump.sql",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["INSERT INTO", "CREATE TABLE", "DROP TABLE", "MySQL dump"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "backup-archive-exposed",
+    name: "Backup Archive Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A site/source backup archive is publicly downloadable from the web root, frequently containing source code and secrets.",
+    fix: "Remove archive files from the web root and store backups outside the document root.",
+    requests: [
+      {
+        path: "/backup.zip",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", part: "header", words: ["application/zip", "application/x-zip", "application/octet-stream"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/backup.tar.gz",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", part: "header", words: ["application/gzip", "application/x-gzip", "application/x-tar", "application/octet-stream"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Deployment / CI / package manifests ---
+  {
+    id: "vscode-sftp-exposed",
+    name: "VS Code SFTP Config Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A .vscode/sftp.json deployment config is publicly readable and commonly contains SFTP/SSH host credentials.",
+    fix: "Remove the file from the web root and rotate the exposed deployment credentials.",
+    requests: [
+      {
+        path: "/.vscode/sftp.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"password"', '"privateKeyPath"', '"host"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "gitlab-ci-exposed",
+    name: "GitLab CI Config Exposed",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A .gitlab-ci.yml is publicly readable, disclosing pipeline structure and occasionally embedded variables.",
+    fix: "Avoid serving CI configuration from the web root.",
+    requests: [
+      {
+        path: "/.gitlab-ci.yml",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["stages:", "script:", "image:"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "composer-json-exposed",
+    name: "composer.json Exposed",
+    severity: "low",
+    category: "SCA",
+    confidence: "high",
+    description:
+      "composer.json is served from the web root, disclosing the PHP dependency list and versions for CVE correlation.",
+    fix: "Do not serve dependency manifests from the public web root.",
+    requests: [
+      {
+        path: "/composer.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"require"', '"require-dev"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "composer-lock-exposed",
+    name: "composer.lock Exposed",
+    severity: "low",
+    category: "SCA",
+    confidence: "high",
+    description:
+      "composer.lock is served from the web root, disclosing exact PHP dependency versions for CVE correlation.",
+    fix: "Do not serve lockfiles from the public web root.",
+    requests: [
+      {
+        path: "/composer.lock",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"packages"', '"content-hash"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- Framework actuators / dev tooling exposed in production ---
+  {
+    id: "jolokia-exposed",
+    name: "Jolokia JMX Endpoint Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A Jolokia endpoint exposes JMX over HTTP, allowing enumeration (and sometimes invocation) of MBeans — a known RCE vector.",
+    fix: "Disable Jolokia in production or restrict it to authenticated internal access.",
+    requests: [
+      {
+        path: "/jolokia/list",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["jolokia", '"agent"', '"request"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "actuator-configprops-exposed",
+    name: "Spring Actuator /configprops Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Spring Actuator configprops endpoint is reachable, disclosing bound configuration properties and infrastructure details.",
+    fix: "Restrict actuator exposure and require authentication on management endpoints.",
+    requests: [
+      {
+        path: "/actuator/configprops",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["contexts", "beans", "configProps", "prefix"], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "symfony-profiler-exposed",
+    name: "Symfony Profiler Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Symfony web profiler is reachable in production, exposing requests, queries, sessions, and configuration.",
+    fix: "Disable the profiler/web toolbar in the production environment.",
+    requests: [
+      {
+        path: "/_profiler",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Symfony Profiler", "sf-toolbar", "WebProfilerBundle"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "rails-info-exposed",
+    name: "Rails Application Info Exposed",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Rails /rails/info endpoints are reachable, indicating development mode in production and disclosing routes and versions.",
+    fix: "Run Rails in the production environment and ensure detailed error/info pages are disabled.",
+    requests: [
+      {
+        path: "/rails/info/properties",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Ruby version", "Rails version", "Middleware"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "wp-user-enumeration",
+    name: "WordPress REST User Enumeration",
+    severity: "medium",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The WordPress REST users endpoint returns the list of accounts, enabling username enumeration for targeted brute-force.",
+    fix: "Restrict or disable the wp/v2/users REST endpoint for unauthenticated requests.",
+    requests: [
+      {
+        path: "/wp-json/wp/v2/users",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"slug"', '"name"'], condition: "and" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "solr-admin-exposed",
+    name: "Apache Solr Admin Exposed",
+    severity: "high",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "The Apache Solr admin interface is publicly reachable, exposing core management and a known RCE surface.",
+    fix: "Restrict the Solr admin UI/API to trusted internal networks.",
+    requests: [
+      {
+        path: "/solr/",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["Solr Admin", "Apache SOLR", "solr-admin"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+
+  // --- API specs / GraphQL tooling ---
+  {
+    id: "openapi-spec-exposed",
+    name: "OpenAPI/Swagger Spec Exposed",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "A machine-readable OpenAPI/Swagger specification is publicly reachable, fully documenting the API surface for attackers.",
+    fix: "Restrict API specifications to authenticated/internal consumers in production.",
+    requests: [
+      {
+        path: "/openapi.json",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"openapi"', '"swagger"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+      {
+        path: "/v2/api-docs",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ['"swagger"', '"openapi"', '"paths"'], condition: "or" },
+          NOT_HTML,
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
+  {
+    id: "graphiql-exposed",
+    name: "GraphiQL / GraphQL Playground Exposed",
+    severity: "low",
+    category: "DAST",
+    confidence: "high",
+    description:
+      "An interactive GraphQL IDE is publicly reachable, easing schema exploration and query crafting against the API.",
+    fix: "Disable GraphiQL/Playground in production.",
+    requests: [
+      {
+        path: "/graphiql",
+        matchers: [
+          { type: "status", status: [200] },
+          { type: "word", words: ["graphiql", "GraphQL Playground", "GraphiQL"], condition: "or" },
+        ],
+        matchersCondition: "and",
+      },
+    ],
+  },
 ];
