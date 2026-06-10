@@ -11,7 +11,7 @@ The scan engine performs real network diagnostics — security-header analysis,
 TLS checks, SAST/SCA pattern matching on returned markup, DAST form inspection,
 subdomain/EASM enumeration via DNS, sensitive-path probing, and active red-team
 fuzzing (SQLi / XSS / command injection / SSRF probes) — then optionally enriches
-the report with the Gemini API (with a deterministic local fallback when no key
+the report with DeepSeek (with a deterministic local fallback when no key
 is configured).
 
 ## Tech stack
@@ -19,7 +19,7 @@ is configured).
 - **Frontend:** React 19 + Vite 6 + Tailwind CSS 4
 - **Backend:** Express 4 (TypeScript), bundled to a single CJS file with esbuild
 - **Datastore:** append-safe JSON file store (atomic writes)
-- **AI:** Google Gemini (`@google/genai`), optional
+- **AI:** DeepSeek via the OpenAI-compatible API (`openai` SDK), optional
 
 ## Quick start
 
@@ -27,11 +27,11 @@ is configured).
 
 ```bash
 npm install
-cp .env.example .env      # optionally set GEMINI_API_KEY
+cp .env.example .env      # optionally set DEEPSEEK_API_KEY
 npm run dev               # http://localhost:3000
 ```
 
-The app is fully functional without a Gemini key — report summaries fall back to
+The app is fully functional without a DeepSeek key — report summaries fall back to
 a deterministic local generator.
 
 ## Scripts
@@ -52,7 +52,7 @@ All configuration is environment-driven and validated at startup; see
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `GEMINI_API_KEY` | _(unset)_ | Enables AI report enrichment; falls back to local summaries when absent. |
+| `DEEPSEEK_API_KEY` | _(unset)_ | Enables DeepSeek AI report enrichment; falls back to local summaries when absent. |
 | `PORT` / `HOST` | `3000` / `0.0.0.0` | HTTP bind. |
 | `NODE_ENV` | `development` | `development` \| `production` \| `test`. |
 | `LOG_LEVEL` / `LOG_JSON` | `info` / `true` (prod) | Logging verbosity and format. |
@@ -87,7 +87,7 @@ notes.
 
 ```bash
 docker build -t seclayer .
-docker run -p 3000:3000 -e GEMINI_API_KEY=... -e NODE_ENV=production seclayer
+docker run -p 3000:3000 -e DEEPSEEK_API_KEY=... -e NODE_ENV=production seclayer
 ```
 
 The image runs as a non-root user and includes a container `HEALTHCHECK`.

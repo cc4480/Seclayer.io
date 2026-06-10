@@ -24,9 +24,9 @@ function parseBoolEnv(value: string | undefined, fallback: boolean): boolean {
 const nodeEnv = (process.env.NODE_ENV as NodeEnv) || 'development';
 const isProduction = nodeEnv === 'production';
 
-const geminiApiKey = (process.env.GEMINI_API_KEY || '').trim();
-const geminiConfigured =
-  geminiApiKey !== '' && geminiApiKey !== 'MY_GEMINI_API_KEY';
+const deepseekApiKey = (process.env.DEEPSEEK_API_KEY || '').trim();
+const deepseekConfigured =
+  deepseekApiKey !== '' && deepseekApiKey !== 'MY_DEEPSEEK_API_KEY';
 
 export const config = {
   nodeEnv,
@@ -60,10 +60,17 @@ export const config = {
   /** Path to the JSON datastore file. */
   dbFile: process.env.DB_FILE || 'db.json',
 
-  gemini: {
-    apiKey: geminiApiKey,
-    configured: geminiConfigured,
-    model: process.env.GEMINI_MODEL || 'gemini-3.5-flash',
+  deepseek: {
+    apiKey: deepseekApiKey,
+    configured: deepseekConfigured,
+    /** OpenAI-compatible base URL for the DeepSeek API. */
+    baseUrl: process.env.DEEPSEEK_BASE_URL || 'https://api.deepseek.com',
+    /** Higher-quality model used for analytical pentest report generation. */
+    reportModel: process.env.DEEPSEEK_REPORT_MODEL || 'deepseek-v4-pro',
+    /** Faster/cheaper model used for the PentAGI log simulation. */
+    logModel: process.env.DEEPSEEK_LOG_MODEL || 'deepseek-v4-flash',
+    /** Per-request timeout (ms) for AI calls. */
+    timeoutMs: parseIntEnv(process.env.DEEPSEEK_TIMEOUT_MS, 30_000),
   },
 
   rateLimit: {
@@ -93,9 +100,9 @@ export const config = {
 export function validateConfig(): string[] {
   const warnings: string[] = [];
 
-  if (!config.gemini.configured) {
+  if (!config.deepseek.configured) {
     warnings.push(
-      'GEMINI_API_KEY is not set — AI report generation will use the deterministic local fallback.',
+      'DEEPSEEK_API_KEY is not set — AI report generation will use the deterministic local fallback.',
     );
   }
 

@@ -4,7 +4,7 @@ import type { Server } from 'http';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
-import { generateAiReport, generatePentagiLogs } from './server/gemini.js';
+import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
 import { config, validateConfig } from './server/config.js';
 import { logger } from './server/logger.js';
 import {
@@ -67,7 +67,7 @@ export async function createApp() {
     res.status(ready ? 200 : 503).json({
       status: ready ? 'ready' : 'degraded',
       datastore: ready ? 'ok' : 'unavailable',
-      aiProvider: config.gemini.configured ? 'configured' : 'local-fallback',
+      aiProvider: config.deepseek.configured ? 'deepseek' : 'local-fallback',
       timestamp: new Date().toISOString(),
     });
   });
