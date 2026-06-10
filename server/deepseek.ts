@@ -66,6 +66,35 @@ function jsonParams(
   };
 }
 
+/**
+ * Run a strict-JSON DeepSeek chat completion and parse the response.
+ *
+ * Replaces placeholder hostnames the model may emit (despite instructions)
+ * with the real target hostname before parsing, so callers never need to
+ * post-process raw completion text themselves.
+ */
+async function runJsonCompletion(
+  ai: OpenAI,
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  temperature: number,
+  url: string,
+): Promise<any> {
+  const completion = await ai.chat.completions.create(
+    jsonParams(model, systemPrompt, userPrompt, temperature),
+  );
+
+  let bodyText = completionText(completion);
+  try {
+    const u = url.startsWith('http') ? url : `https://${url}`;
+    const parsedUrl = new URL(u);
+    bodyText = bodyText.replace(/example\.com/gi, parsedUrl.hostname);
+    bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
+  } catch (e) {}
+  return JSON.parse(bodyText);
+}
+
 export async function generateAiReport(
   url: string,
   diagnostics: any,
@@ -113,23 +142,14 @@ Return ONLY a JSON object (no markdown, no code fences) with exactly these keys:
 
 Ensure the returned output is strictly valid JSON compliant with the required structure.`;
 
-    const completion = await ai.chat.completions.create(
-      jsonParams(
-        config.deepseek.reportModel,
-        'You are a precise security analysis engine that always responds with strictly valid JSON.',
-        prompt,
-        0.3,
-      ),
+    const data = await runJsonCompletion(
+      ai,
+      config.deepseek.reportModel,
+      'You are a precise security analysis engine that always responds with strictly valid JSON.',
+      prompt,
+      0.3,
+      url,
     );
-
-    let bodyText = completionText(completion);
-    try {
-        const u = url.startsWith('http') ? url : `https://${url}`;
-        const parsedUrl = new URL(u);
-        bodyText = bodyText.replace(/example\.com/gi, parsedUrl.hostname);
-        bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
-    } catch(e) {}
-    const data = JSON.parse(bodyText);
 
     // Safeguard values
     const finalScore = Math.max(10, Math.min(100, Number(data.adjustedScore ?? staticCompiled.score)));
@@ -219,23 +239,14 @@ Return ONLY a JSON object (no markdown, no code fences) containing a single "log
 Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
-    const completion = await ai.chat.completions.create(
-      jsonParams(
-        config.deepseek.logModel,
-        'You are a security simulation engine that always responds with strictly valid JSON.',
-        prompt,
-        0.7,
-      ),
+    const data = await runJsonCompletion(
+      ai,
+      config.deepseek.logModel,
+      'You are a security simulation engine that always responds with strictly valid JSON.',
+      prompt,
+      0.7,
+      defaultUrl,
     );
-
-    let bodyText = completionText(completion);
-    try {
-        const u = defaultUrl.startsWith('http') ? defaultUrl : `https://${defaultUrl}`;
-        const parsedUrl = new URL(u);
-        bodyText = bodyText.replace(/example\.com/gi, parsedUrl.hostname);
-        bodyText = bodyText.replace(/yourdomain\.com/gi, parsedUrl.hostname);
-    } catch(e) {}
-    const data = JSON.parse(bodyText);
 
     if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
       return data.logs;
