@@ -1,18 +1,19 @@
 import { GoogleGenAI, Type } from "@google/genai";
 import { Finding, Severity } from '../src/types.js';
+import { config } from './config.js';
+import { logger } from './logger.js';
 
 let aiInstance: GoogleGenAI | null = null;
 
 function getAiClient(): GoogleGenAI | null {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey || apiKey === "MY_GEMINI_API_KEY" || apiKey.trim() === "") {
+  if (!config.gemini.configured) {
     // Graceful check, let's keep it silent unless a call is made
     return null;
   }
-  
+
   if (!aiInstance) {
     aiInstance = new GoogleGenAI({
-      apiKey: apiKey,
+      apiKey: config.gemini.apiKey,
       httpOptions: {
         headers: {
           'User-Agent': 'aistudio-build',
@@ -31,7 +32,7 @@ export async function generateAiReport(
   
   const ai = getAiClient();
   if (!ai) {
-    console.log("No valid GEMINI_API_KEY set. Generating elegant local-mode executive summary.");
+    logger.debug("GEMINI_API_KEY not configured; using deterministic local executive summary.");
     const defaultSecSummary = compileLocalSummary(url, staticCompiled);
     return {
       ...staticCompiled,
@@ -71,7 +72,7 @@ Please return a JSON response containing:
 Ensure the returned output is strictly compliant with the required JSON structure.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: config.gemini.model,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -144,7 +145,7 @@ Ensure the returned output is strictly compliant with the required JSON structur
     };
 
   } catch (err: any) {
-    console.warn(`Gemini API call or parsing failed, using high-quality local summary: ${err?.message || err}`);
+    logger.warn("Gemini report generation failed; falling back to local summary.", { err });
     return {
       ...staticCompiled,
       aiSummary: compileLocalSummary(url, staticCompiled)
@@ -198,7 +199,7 @@ Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
     const response = await ai.models.generateContent({
-      model: "gemini-3.5-flash",
+      model: config.gemini.model,
       contents: prompt,
       config: {
         responseMimeType: "application/json",
@@ -237,7 +238,7 @@ Return ONLY valid JSON compliant with the requested schema.`;
     }
     return fallbackLogs;
   } catch (err: any) {
-    console.warn(`Gemini PentAGI generation failed, using fallback logs: ${err?.message || err}`);
+    logger.warn("Gemini PentAGI log generation failed; using fallback logs.", { err });
     return fallbackLogs;
   }
 }

@@ -2,8 +2,12 @@ import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
 import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
+import { config } from './config.js';
+import { logger } from './logger.js';
 
-const DB_FILE = path.join(process.cwd(), 'db.json');
+const DB_FILE = path.isAbsolute(config.dbFile)
+  ? config.dbFile
+  : path.join(process.cwd(), config.dbFile);
 
 interface DbSchema {
   users: Record<string, User>;
@@ -154,15 +158,35 @@ class LocalFileDb {
         this.save();
       }
     } catch (err) {
-      console.error('Error loading DB file:', err);
+      logger.error('Failed to load datastore; starting from in-memory defaults.', { err, dbFile: DB_FILE });
     }
   }
 
   private save() {
+    // Atomic write: serialize to a temp file then rename so a crash mid-write
+    // cannot leave a truncated / corrupt db.json behind.
+    const tmpFile = `${DB_FILE}.${process.pid}.tmp`;
     try {
-      fs.writeFileSync(DB_FILE, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.writeFileSync(tmpFile, JSON.stringify(this.data, null, 2), 'utf8');
+      fs.renameSync(tmpFile, DB_FILE);
     } catch (err) {
-      console.error('Error saving DB file:', err);
+      logger.error('Failed to persist datastore.', { err, dbFile: DB_FILE });
+      try {
+        if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
+      } catch {
+        /* best-effort cleanup */
+      }
+    }
+  }
+
+  /** Readiness probe: confirm the datastore directory is writable. */
+  isHealthy(): boolean {
+    try {
+      const dir = path.dirname(DB_FILE);
+      fs.accessSync(dir, fs.constants.W_OK);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -240,6 +264,12 @@ class LocalFileDb {
     if (!user || user.credits < amount) return false;
     this.addCredits(userId, -amount, 'scan_debit');
     return true;
+  }
+
+  // --- Transactions ---
+  listTransactions(userId: string): CreditTransaction[] {    return this.data.transactions
+      .filter((tx) => tx.userId === userId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
   }
 
   // --- Scans ---

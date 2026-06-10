@@ -6,3 +6,8 @@ coverage/
 *.log
 .env*
 !.env.example
+
+# Runtime datastore (JSON file DB) and test artifacts
+db.json
+*.tmp
+.tmp-test-db.json

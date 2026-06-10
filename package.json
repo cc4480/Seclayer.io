@@ -1,14 +1,20 @@
 {
-  "name": "react-example",
+  "name": "seclayer",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.1.0",
   "type": "module",
   "scripts": {
     "dev": "tsx server.ts",
     "build": "vite build && esbuild server.ts --bundle --platform=node --format=cjs --packages=external --sourcemap --outfile=dist/server.cjs",
     "start": "node dist/server.cjs",
-    "clean": "rm -rf dist server.js",
-    "lint": "tsc --noEmit"
+    "clean": "rm -rf dist server.js .tmp-test-db.json",
+    "lint": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "test": "NODE_ENV=test SCANNER_ALLOW_PRIVATE_TARGETS=false DB_FILE=.tmp-test-db.json node --import tsx --test tests/*.test.ts",
+    "ci": "npm run typecheck && npm test && npm run build"
+  },
+  "engines": {
+    "node": ">=20.0.0"
   },
   "dependencies": {
     "@google/genai": "^2.4.0",
