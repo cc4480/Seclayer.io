@@ -71,6 +71,8 @@ export const config = {
     logModel: process.env.DEEPSEEK_LOG_MODEL || 'deepseek-v4-flash',
     /** Per-request timeout (ms) for AI calls. */
     timeoutMs: parseIntEnv(process.env.DEEPSEEK_TIMEOUT_MS, 30_000),
+    /** Max output tokens — capped to prevent JSON truncation in JSON mode. */
+    maxTokens: parseIntEnv(process.env.DEEPSEEK_MAX_TOKENS, 4096),
   },
 
   rateLimit: {

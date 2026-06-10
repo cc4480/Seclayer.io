@@ -34,6 +34,38 @@ function completionText(completion: OpenAI.Chat.Completions.ChatCompletion): str
   return completion.choices?.[0]?.message?.content?.trim() ?? '';
 }
 
+// `thinking` is a DeepSeek extension to the OpenAI chat-completions schema.
+type DeepSeekChatParams = OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming & {
+  thinking?: { type: 'enabled' | 'disabled' };
+};
+
+/**
+ * Build chat-completion params for a strict-JSON request against DeepSeek V4.
+ *
+ * DeepSeek's JSON mode is only reliable in NON-thinking mode — with thinking
+ * enabled, V4 can emit malformed/empty structured output. We therefore disable
+ * thinking explicitly and cap max_tokens to avoid mid-object truncation.
+ */
+function jsonParams(
+  model: string,
+  systemPrompt: string,
+  userPrompt: string,
+  temperature: number,
+): DeepSeekChatParams {
+  return {
+    model,
+    messages: [
+      { role: 'system', content: systemPrompt },
+      { role: 'user', content: userPrompt },
+    ],
+    response_format: { type: 'json_object' },
+    temperature,
+    max_tokens: config.deepseek.maxTokens,
+    // DeepSeek-specific: force non-thinking mode for dependable JSON output.
+    thinking: { type: 'disabled' },
+  };
+}
+
 export async function generateAiReport(
   url: string,
   diagnostics: any,
@@ -81,15 +113,14 @@ Return ONLY a JSON object (no markdown, no code fences) with exactly these keys:
 
 Ensure the returned output is strictly valid JSON compliant with the required structure.`;
 
-    const completion = await ai.chat.completions.create({
-      model: config.deepseek.reportModel,
-      messages: [
-        { role: 'system', content: 'You are a precise security analysis engine that always responds with strictly valid JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.3,
-    });
+    const completion = await ai.chat.completions.create(
+      jsonParams(
+        config.deepseek.reportModel,
+        'You are a precise security analysis engine that always responds with strictly valid JSON.',
+        prompt,
+        0.3,
+      ),
+    );
 
     let bodyText = completionText(completion);
     try {
@@ -188,15 +219,14 @@ Return ONLY a JSON object (no markdown, no code fences) containing a single "log
 Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
-    const completion = await ai.chat.completions.create({
-      model: config.deepseek.logModel,
-      messages: [
-        { role: 'system', content: 'You are a security simulation engine that always responds with strictly valid JSON.' },
-        { role: 'user', content: prompt },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0.7,
-    });
+    const completion = await ai.chat.completions.create(
+      jsonParams(
+        config.deepseek.logModel,
+        'You are a security simulation engine that always responds with strictly valid JSON.',
+        prompt,
+        0.7,
+      ),
+    );
 
     let bodyText = completionText(completion);
     try {
