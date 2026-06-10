@@ -186,18 +186,7 @@ export function useAppData() {
   };
 
   return {
-    user,
-    scans,
-    apiKeys,
-    credits,
-    transactions,
-    isPerformingAction,
-    loadUserContext,
-    initiateScan,
-    generateKey,
-    revokeKey,
-    purchaseCredits,
-    login,
-    logout,
+    user, scans, apiKeys, credits, transactions, isPerformingAction,
+    loadUserContext, initiateScan, generateKey, revokeKey, purchaseCredits, login, logout,
   };
 }
