@@ -1,4 +1,4 @@
-import { Finding, Severity } from "../src/types.js";
+import { Finding, Severity, ScanDiagnosticsSummary } from "../src/types.js";
 import crypto from "crypto";
 
 export interface DiagnosticResult {
@@ -35,6 +35,7 @@ export interface DiagnosticResult {
       domain: string;
       status: "live" | "inactive";
       port: string;
+      ip?: string;
     }>;
     ip: string;
     nameserver: string;
@@ -94,8 +95,8 @@ export async function runDiagnostics(
     scaLibraries: [],
     easmPerimeter: {
       subdomains: [],
-      ip: "104.244.42.1", // default fallback, will resolve if possible
-      nameserver: "ns1.seclayer-dns.net",
+      ip: "unresolved",
+      nameserver: "unresolved",
       protocol: url.startsWith("https://")
         ? "TLS 1.3 / HTTPS"
         : "HTTP/1.1 Cleartext",
@@ -376,8 +377,6 @@ export async function runDiagnostics(
       "pop",
       "imap",
     ];
-    result.easmPerimeter.ip = "104.244.42.1"; // Standard DNS estimation fallback
-
     try {
       // Need dynamic import to avoid altering the top-level imports significantly or we can just require it
       const dns = await import("dns/promises");
@@ -385,6 +384,16 @@ export async function runDiagnostics(
       const ipRecords = await dns.resolve4(hostname).catch(() => []);
       if (ipRecords && ipRecords.length > 0) {
         result.easmPerimeter.ip = ipRecords[0];
+      }
+
+      // Resolve the authoritative nameserver, when delegated for this hostname.
+      try {
+        const nsRecords = await dns.resolveNs(hostname);
+        if (nsRecords && nsRecords.length > 0) {
+          result.easmPerimeter.nameserver = nsRecords[0];
+        }
+      } catch {
+        // No NS records delegated directly to this hostname; leave "unresolved".
       }
 
       // Check for Wildcard DNS to prevent false positive subdomain bloating
@@ -692,6 +701,34 @@ export async function runDiagnostics(
   result.apiSecFindings = apiSecFindings;
 
   return result;
+}
+
+/** Trim a full diagnostic run down to the subset persisted alongside a scan for report rendering. */
+export function summarizeDiagnostics(diag: DiagnosticResult): ScanDiagnosticsSummary {
+  return {
+    responseStatus: diag.responseStatus,
+    sslSecure: diag.sslSecure,
+    headers: diag.headers,
+    missingHeaders: diag.missingHeaders,
+    techLeaked: diag.techLeaked,
+    cookieIssues: diag.cookieIssues,
+    probedPaths: diag.probedPaths,
+    dastInputs: diag.dastInputs.map((d) => ({
+      formAction: d.formAction,
+      method: d.method,
+      csrfPresent: d.csrfPresent,
+    })),
+    easmPerimeter: {
+      ip: diag.easmPerimeter.ip,
+      nameserver: diag.easmPerimeter.nameserver,
+      protocol: diag.easmPerimeter.protocol,
+      subdomains: diag.easmPerimeter.subdomains.map((s) => ({
+        domain: s.domain,
+        status: s.status,
+        port: s.port,
+      })),
+    },
+  };
 }
 
 // Convert diagnostics into structured Category Findings

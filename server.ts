@@ -3,7 +3,7 @@ import path from 'path';
 import type { Server } from 'http';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
-import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
+import { runDiagnostics, compileStaticFindings, summarizeDiagnostics } from './server/scanner.js';
 import { generateAiReport, generatePentagiLogs } from './server/deepseek.js';
 import { config, validateConfig } from './server/config.js';
 import { logger } from './server/logger.js';
@@ -335,6 +335,7 @@ export async function createApp() {
         severity: aiReport.severity,
         findings: aiReport.findings,
         aiSummary: aiReport.aiSummary,
+        diagnostics: summarizeDiagnostics(diagnostics),
         completedAt: new Date().toISOString(),
       });
 
@@ -351,177 +352,268 @@ export async function createApp() {
   );
 
   // --- ENTERPRISE PIPELINE ACTIVE ENDPOINTS ---
+  // Each module below runs the same real diagnostics engine used by /api/scans
+  // against the user-supplied target and derives its response entirely from the
+  // findings actually observed — there is no canned/hardcoded result data.
 
   // 1. ASPM & Signal Correlation Engine
-  app.post('/api/enterprise/aspm/correlate', (req, res) => {
-    const { url = 'staging.api.vulnerable-shop.io' } = req.body;
-    res.json({
-      success: true,
-      targetUrl: url,
-      orchestrator: 'OWASP DefectDojo Correlator Core',
-      findingsCorrelated: 2,
-      analysisTimeMs: 420,
-      steps: [
-        {
-          phase: 'SAST Vulnerability Ingestion',
-          status: 'complete',
-          logs: `Parsed Semgrep SAST scan hook on dynamic repository commits definition. Flagged 1 SQL Injection hazard inside "/controllers/UserController.java" line 87: Unsafely concatenated raw HTTP inputs "userId" to SQL executable stream.`,
-        },
-        {
-          phase: 'ASPM Correlation Engine Triggered',
-          status: 'complete',
-          logs: `Fusion Matcher searched EASM perimeter indexing for live URLs hosting the compiled code. Identified active target match: "${url}".`,
-        },
-        {
-          phase: 'Targeted Dynamic Verification (DAST)',
-          status: 'complete',
-          logs: `Dispatched containerized OWASP ZAP/Katana worker probing "${url}/api/user/profile?id=1'". Input escape injections triggered parsing trace: Dynamic SQL syntax error returned in headers.`,
-        },
-        {
-          phase: 'Active Vulnerability Confirmation & Escalation',
-          status: 'escalated',
-          logs: `Vulnerability verified as dynamic 100% exploitable. Escalated SAST Finding category severity from MEDIUM to CRITICAL. Raised high-priority Jira ticket & synced ticket ledger inside DefectDojo (ID: SL-DD-948211).`,
-        },
-      ],
-    });
-  });
+  app.post(
+    '/api/enterprise/aspm/correlate',
+    scanLimiter,
+    asyncHandler(async (req, res) => {
+      const target = await assertSafeScanTarget(req.body?.url);
+      const startedAt = Date.now();
+      const diag = await runDiagnostics(target);
+      const compiled = compileStaticFindings(diag);
+      const analysisTimeMs = Date.now() - startedAt;
+
+      const liveSubCount = diag.easmPerimeter.subdomains.filter((s) => s.status === 'live').length;
+      const dynamicLogs = [
+        ...diag.dastInputs.map((d) => `${d.vulnerability}: ${d.description}`),
+        ...(diag.redTeamFindings ?? []).map((rt) => `${rt.testName}: ${rt.description}`),
+      ];
+      const escalate = compiled.severity === 'critical' || compiled.severity === 'high';
+      const hostname = new URL(target).hostname;
+
+      res.json({
+        success: true,
+        targetUrl: target,
+        orchestrator: 'Seclayer ASPM Fusion Correlation Engine',
+        findingsCorrelated: compiled.findings.length,
+        analysisTimeMs,
+        steps: [
+          {
+            phase: 'SAST Vulnerability Ingestion',
+            status: 'complete',
+            logs:
+              diag.sastFindings.length > 0
+                ? diag.sastFindings
+                    .map((f) => `[${f.severity.toUpperCase()}] ${f.issue} (${f.file}): ${f.description}`)
+                    .join('\n')
+                : `Static analysis of client-served source for "${target}" found no hardcoded secrets, unsafe sinks, or debug-data leaks.`,
+          },
+          {
+            phase: 'ASPM Correlation Engine Triggered',
+            status: 'complete',
+            logs:
+              liveSubCount > 0
+                ? `Fusion Matcher cross-referenced EASM perimeter indexing for live hosts sharing this attack surface. Identified ${liveSubCount} additional live subdomain(s) resolving alongside "${hostname}".`
+                : `Fusion Matcher cross-referenced EASM perimeter indexing for "${hostname}". No additional live subdomains were found sharing this attack surface.`,
+          },
+          {
+            phase: 'Targeted Dynamic Verification (DAST)',
+            status: 'complete',
+            logs:
+              dynamicLogs.length > 0
+                ? `Dispatched dynamic verification probes against "${target}". ${dynamicLogs.join(' ')}`
+                : `Dispatched dynamic verification probes against "${target}". No dynamic exploitation vectors were confirmed.`,
+          },
+          {
+            phase: 'Active Vulnerability Confirmation & Escalation',
+            status: escalate ? 'escalated' : 'complete',
+            logs: escalate
+              ? `Correlated ${compiled.findings.length} finding(s) verified against the live attack surface. Posture severity escalated to ${compiled.severity.toUpperCase()}; prioritize remediation.`
+              : `${compiled.findings.length} finding(s) correlated. None met the automatic escalation threshold; current posture severity is ${compiled.severity.toUpperCase()}.`,
+          },
+        ],
+      });
+    }),
+  );
 
   // 2. EASM Attack Surface Mapping
-  app.post('/api/enterprise/easm/recon', (req, res) => {
-    const { domain = 'target-enterprise.com' } = req.body;
-    const cleanDomain = String(domain).replace(/https?:\/\//i, '').split('/')[0];
-    res.json({
-      success: true,
-      domain: cleanDomain,
-      scanner: 'OWASP Amass & Continuous Recon Worker v3',
-      scanTime: new Date().toISOString(),
-      summary: {
-        totalSubdomains: 6,
-        activeIps: 3,
-        nameserver: 'ns1.dnsrouting-gate.net',
-        nameserverIp: '45.89.21.4',
-      },
-      technologies: [
-        { name: 'Nginx Server', type: 'Web Server', version: '1.23.2', confidence: 100 },
-        { name: 'React Framework', type: 'Client Engine', version: '18.2.0', confidence: 100 },
-        { name: 'Node.js Express', type: 'Backend Framework', version: '18.15.0', confidence: 95 },
-        { name: 'PostgreSQL Database', type: 'DB Server', version: '15.1', confidence: 85 },
-        { name: 'Cloudflare WAF', type: 'Network Shield', version: 'Global Edge', confidence: 90 },
-      ],
-      subdomains: [
-        { subdomain: `api.${cleanDomain}`, ip: '104.22.4.12', status: 'live', ports: ['80', '443', '8443'], service: 'HTTPS Express API' },
-        { subdomain: `staging.${cleanDomain}`, ip: '104.22.4.13', status: 'live', ports: ['443', '8080'], service: 'Vulnerable Staging Area' },
-        { subdomain: `admin.${cleanDomain}`, ip: '104.22.4.14', status: 'live', ports: ['443'], service: 'Protected Portal Gate' },
-        { subdomain: `vpn.${cleanDomain}`, ip: '45.12.98.5', status: 'live', ports: ['1194'], service: 'OpenVPN Daemon' },
-        { subdomain: `grafana.${cleanDomain}`, ip: '104.22.4.15', status: 'inactive', ports: ['3000'], service: 'Telemetry Panel' },
-        { subdomain: `internal-db.${cleanDomain}`, ip: '10.0.12.3', status: 'internal-only', ports: ['5432'], service: 'Production Postgres Mirror' },
-      ],
-      portsList: [
-        { port: 80, protocol: 'tcp', service: 'HTTP (Redirects HTTPS)' },
-        { port: 443, protocol: 'tcp', service: 'HTTPS (TLS 1.3 Active)' },
-        { port: 1194, protocol: 'udp', service: 'OpenVPN (Vulnerable to credential sprays)' },
-        { port: 8080, protocol: 'tcp', service: 'HTTP-ALT (Exposes Spring Boot actuator admin stats)' },
-      ],
-    });
-  });
+  app.post(
+    '/api/enterprise/easm/recon',
+    scanLimiter,
+    asyncHandler(async (req, res) => {
+      const target = await assertSafeScanTarget(req.body?.domain);
+      const diag = await runDiagnostics(target);
+      const hostname = new URL(diag.url).hostname;
 
-  // 3. Katana & Hadrian API Security Testing API
-  app.post('/api/enterprise/api-scan/hadrian', (req, res) => {
-    const { schemaTitle = 'API Specification Core' } = req.body;
-    res.json({
-      success: true,
-      service: `Hadrian API Role Mutation Matrix Engine (${schemaTitle})`,
-      endpointsCount: 4,
-      matrix: [
-        {
-          endpoint: '/api/v1/user/profile/{id}',
-          methods: ['GET', 'PUT'],
-          rolesResult: {
-            'Enterprise Admin': { status: 'Allow', color: 'text-[#22c55e]' },
-            'Standard User': { status: 'Allow (Self-Only)', color: 'text-amber-400' },
-            'Guest Role': { status: 'Denied (401)', color: 'text-red-500' },
-          },
-          vulnerability:
-            'IDOR on PUT method: Specifying standard header overrides allows arbitrary profile updates on any account without administrative privileges.',
+      const liveSubs = diag.easmPerimeter.subdomains.filter((s) => s.status === 'live');
+      const uniqueIps = new Set<string>();
+      if (diag.easmPerimeter.ip !== 'unresolved') uniqueIps.add(diag.easmPerimeter.ip);
+      liveSubs.forEach((s) => {
+        if (s.ip) uniqueIps.add(s.ip);
+      });
+
+      const technologies: Array<{ name: string; type: string; version: string; confidence: number }> = [];
+      if (diag.sslSecure) {
+        technologies.push({
+          name: diag.easmPerimeter.protocol,
+          type: 'Transport Security',
+          version: 'Negotiated',
+          confidence: 100,
+        });
+      }
+      diag.techLeaked.forEach((t) => {
+        const [label, value] = t.split(': ');
+        technologies.push({ name: (value ?? label).trim(), type: label.trim(), version: 'Detected', confidence: 90 });
+      });
+      diag.scaLibraries.forEach((lib) => {
+        technologies.push({ name: lib.name, type: 'Client-Side Library', version: lib.version, confidence: 80 });
+      });
+      if (technologies.length === 0) {
+        technologies.push({
+          name: 'No fingerprintable technology signatures detected',
+          type: 'Unknown',
+          version: '-',
+          confidence: 0,
+        });
+      }
+
+      res.json({
+        success: true,
+        domain: hostname,
+        scanner: 'Seclayer EASM Recon Engine (Live DNS Enumeration & HTTP Fingerprinting)',
+        scanTime: diag.scannedAt,
+        summary: {
+          totalSubdomains: liveSubs.length,
+          activeIps: uniqueIps.size,
+          nameserver: diag.easmPerimeter.nameserver,
+          nameserverIp: diag.easmPerimeter.ip,
         },
-        {
-          endpoint: '/api/v1/billing/transactions',
+        technologies,
+        subdomains: liveSubs.map((s) => ({
+          subdomain: s.domain,
+          ip: s.ip ?? diag.easmPerimeter.ip,
+          status: s.status,
+          ports: [s.port],
+          service: inferServiceFromPort(s.port, s.domain),
+        })),
+      });
+    }),
+  );
+
+  // 3. API Security & Role Authorization Probing
+  app.post(
+    '/api/enterprise/api-scan/hadrian',
+    scanLimiter,
+    asyncHandler(async (req, res) => {
+      const target = await assertSafeScanTarget(req.body?.url);
+      const schemaTitle = optionalString(req.body?.schemaTitle, 'schemaTitle') || 'Discovered API Surface';
+      const authHeader = optionalString(req.body?.authHeader, 'authHeader');
+      const diag = await runDiagnostics(target, authHeader);
+
+      const matrix: Array<{
+        endpoint: string;
+        methods: string[];
+        rolesResult: Record<string, { status: string; color: string }>;
+        vulnerability: string | null;
+      }> = [];
+
+      (diag.apiSecFindings ?? []).forEach((f) => {
+        matrix.push({
+          endpoint: f.endpoint,
           methods: ['GET', 'POST'],
           rolesResult: {
-            'Enterprise Admin': { status: 'Allow', color: 'text-[#22c55e]' },
-            'Standard User': { status: 'Denied (403)', color: 'text-red-500' },
-            'Guest Role': { status: 'Denied (401)', color: 'text-red-500' },
+            'Unauthenticated Request': { status: 'Allow (Vulnerable)', color: 'text-red-500 font-bold' },
+            'Supplied Credentials': authHeader
+              ? { status: 'Allow', color: 'text-amber-400' }
+              : { status: 'Not Tested (No Credentials Supplied)', color: 'text-zinc-500' },
+            'Object/Schema Access': { status: 'Exposed', color: 'text-red-500 font-bold' },
           },
-          vulnerability: 'None detected. Strict role-based filter checks present at Route level.',
-        },
-        {
-          endpoint: '/api/v1/system/actuator/env',
+          vulnerability: `${f.testName}: ${f.description}`,
+        });
+      });
+
+      diag.dastInputs.forEach((d) => {
+        matrix.push({
+          endpoint: d.formAction,
+          methods: [d.method],
+          rolesResult: {
+            'Unauthenticated Request': { status: 'Allow', color: 'text-amber-400' },
+            'Supplied Credentials': authHeader
+              ? { status: 'Allow', color: 'text-amber-400' }
+              : { status: 'Not Tested (No Credentials Supplied)', color: 'text-zinc-500' },
+            'CSRF Token Check': d.csrfPresent
+              ? { status: 'Present', color: 'text-[#22c55e]' }
+              : { status: 'Missing', color: 'text-red-500 font-bold' },
+          },
+          vulnerability: d.csrfPresent ? null : `${d.vulnerability}: ${d.description}`,
+        });
+      });
+
+      diag.probedPaths
+        .filter((p) => p.exposed)
+        .forEach((p) => {
+          matrix.push({
+            endpoint: p.path,
+            methods: ['GET'],
+            rolesResult: {
+              'Unauthenticated Request': { status: `Allow (HTTP ${p.status})`, color: 'text-red-500 font-bold' },
+              'Supplied Credentials': authHeader
+                ? { status: `Allow (HTTP ${p.status})`, color: 'text-red-500 font-bold' }
+                : { status: 'Not Tested (No Credentials Supplied)', color: 'text-zinc-500' },
+              'Resource Exposure': { status: 'Publicly Accessible', color: 'text-red-500 font-bold' },
+            },
+            vulnerability: `Sensitive resource "${p.path}" is publicly accessible (HTTP ${p.status}) on "${target}". This may expose configuration, credentials, or version-control metadata.`,
+          });
+        });
+
+      if (matrix.length === 0) {
+        matrix.push({
+          endpoint: new URL(target).pathname || '/',
           methods: ['GET'],
           rolesResult: {
-            'Enterprise Admin': { status: 'Allow', color: 'text-[#22c55e]' },
-            'Standard User': { status: 'Allow (Exposed)', color: 'text-red-500 font-bold' },
-            'Guest Role': { status: 'Allow (Exposed)', color: 'text-red-500 font-bold animate-pulse' },
+            'Unauthenticated Request': { status: `HTTP ${diag.responseStatus || 'N/A'}`, color: 'text-zinc-300' },
+            'Supplied Credentials': authHeader
+              ? { status: `HTTP ${diag.responseStatus || 'N/A'}`, color: 'text-zinc-300' }
+              : { status: 'Not Tested (No Credentials Supplied)', color: 'text-zinc-500' },
+            'Object/Schema Access': { status: 'Not Exposed', color: 'text-[#22c55e]' },
           },
-          vulnerability:
-            'BOLA / Authentication Bypass: Critical configurations variables (.env database passwords) accessible by unauthorized third-parties and guest operators.',
-        },
-        {
-          endpoint: '/api/v1/support/tickets/{ticketId}',
-          methods: ['GET', 'DELETE'],
-          rolesResult: {
-            'Enterprise Admin': { status: 'Allow', color: 'text-[#22c55e]' },
-            'Standard User': { status: 'Allow (Any ID)', color: 'text-red-500 font-semibold' },
-            'Guest Role': { status: 'Denied (401)', color: 'text-red-500' },
-          },
-          vulnerability:
-            'Insecure Direct Object Reference (IDOR): Standard user can review or purge support tickets of other customers by iterating dynamic ticket integer indexes.',
-        },
-      ],
-    });
-  });
+          vulnerability: null,
+        });
+      }
 
-  // 4. DongTai Runtime IAST Bytecode Tracer
-  app.post('/api/enterprise/iast/trace', (req, res) => {
-    const { inputPayload = `1' UNION SELECT credit_card FROM payments` } = req.body;
-    res.json({
-      success: true,
-      agent: 'DongTai VM Bytecode Passive Instrumenter Agent v2.5',
-      runtime: 'Java Virtual Machine OpenJDK 17',
-      status: 'Sink Triggered Malicious Flow Alert',
-      payloadTested: inputPayload,
-      traceTime: new Date().toISOString(),
-      traces: [
-        {
+      res.json({
+        success: true,
+        service: `Seclayer API Security Probe (${schemaTitle})`,
+        targetUrl: target,
+        endpointsCount: matrix.length,
+        matrix,
+      });
+    }),
+  );
+
+  // 4. Black-box taint-flow reconstruction from active fuzzing probes
+  app.post(
+    '/api/enterprise/iast/trace',
+    scanLimiter,
+    asyncHandler(async (req, res) => {
+      const target = await assertSafeScanTarget(req.body?.url);
+      const inputPayload = optionalString(req.body?.inputPayload, 'inputPayload');
+      const diag = await runDiagnostics(target);
+
+      const findings = diag.redTeamFindings ?? [];
+      const traces = findings.map((rt, idx) => ({
+        step: idx + 1,
+        clazz: 'HTTP Request Handler',
+        method: rt.testName,
+        line: idx + 1,
+        description: `Payload "${rt.payload}" sent to "${target}". ${rt.description}`,
+      }));
+
+      if (traces.length === 0) {
+        traces.push({
           step: 1,
-          clazz: 'org.apache.catalina.connector.Request',
-          method: 'getParameter("searchQuery")',
-          line: 312,
-          description: `HTTP parameter parsing matched. Tainted reference loaded into user scope. Input: "${inputPayload}"`,
-        },
-        {
-          step: 2,
-          clazz: 'com.seclayer.enterprise.controller.SearchController',
-          method: 'executeSearch(HttpServletRequest)',
-          line: 45,
-          description: `Tainted wrapper transferred directly to query validator. Sanitizer bypass occurred (length checks only; regex failed to intercept SQL escape syntax).`,
-        },
-        {
-          step: 3,
-          clazz: 'com.seclayer.enterprise.data.RepositoryCore',
-          method: 'unsafeRawSearchBind(String)',
-          line: 104,
-          description: `String concatenation sink assembled: "SELECT * FROM items WHERE name = '" + searchQuery + "'" -> query result: "SELECT * FROM items WHERE name = '1' UNION SELECT credit_card FROM payments'".`,
-        },
-        {
-          step: 4,
-          clazz: 'org.postgresql.jdbc.PgStatement',
-          method: 'execute(String)',
-          line: 2190,
-          description: `⚠️ SQL DATA SINK REACHED! Passive IAST hooks intercepted the query parsing executing in real-time. Confirmed attacker payload has mutated query execution logic inside the active running process.`,
-        },
-      ],
-    });
-  });
+          clazz: 'HTTP Request Handler',
+          method: 'Active Fuzzing Probes (SQLi / XSS / Command Injection / SSRF)',
+          line: 0,
+          description: `Active red-team probes against "${target}" did not trigger any observable taint sink — no reflected payloads or backend errors were detected in the responses.`,
+        });
+      }
+
+      res.json({
+        success: true,
+        agent: 'Seclayer Black-Box Active Probe Tracer',
+        runtime: new URL(target).hostname,
+        status: findings.length > 0 ? 'Sink Triggered Malicious Flow Alert' : 'No Taint Sink Triggered',
+        payloadTested: inputPayload ?? null,
+        traceTime: diag.scannedAt,
+        traces,
+      });
+    }),
+  );
 
   // 5. PentAGI Autonomous Pentest AI Exploit Agent
   app.get(
@@ -591,6 +683,7 @@ async function processScanJob(scanId: string) {
       severity: outputReport.severity,
       findings: outputReport.findings,
       aiSummary: outputReport.aiSummary,
+      diagnostics: summarizeDiagnostics(diagnostics),
       completedAt: new Date().toISOString(),
     });
     jobLog.info('scan job completed', { score: outputReport.score, severity: outputReport.severity });
@@ -612,6 +705,23 @@ async function processScanJob(scanId: string) {
 
 function sleep(ms: number) {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** Best-effort service label for a discovered subdomain, based on its probed port and name. */
+function inferServiceFromPort(port: string, subdomain: string): string {
+  switch (port) {
+    case '1194':
+      return 'OpenVPN Daemon';
+    case '25':
+      return 'SMTP Mail Relay';
+    case '443':
+      if (/^api\./.test(subdomain)) return 'HTTPS API Endpoint';
+      if (/^admin\./.test(subdomain)) return 'HTTPS Admin Portal';
+      if (/^(staging|dev|test|qa)\./.test(subdomain)) return 'HTTPS Non-Production Environment';
+      return 'HTTPS Web Service';
+    default:
+      return 'Unresponsive / Filtered';
+  }
 }
 
 async function startServer() {

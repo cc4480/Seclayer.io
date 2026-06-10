@@ -70,7 +70,9 @@ All configuration is environment-driven and validated at startup; see
 - `GET  /api/system/ready` — readiness probe (datastore + AI provider status).
 
 Suppression rules, continuous monitoring, credits/checkout, API-key management,
-and the enterprise pipeline demos (`/api/enterprise/*`) are also exposed.
+and the enterprise orchestrator endpoints (`/api/enterprise/*` — ASPM, EASM,
+API security, and IAST modules, all SSRF-guarded and backed by the same
+diagnostics engine as `/api/scans`) are also exposed.
 
 ## Production readiness
 

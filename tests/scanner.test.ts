@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileStaticFindings, type DiagnosticResult } from '../server/scanner.ts';
+import { compileStaticFindings, summarizeDiagnostics, type DiagnosticResult } from '../server/scanner.ts';
 
 function baseDiagnostics(overrides: Partial<DiagnosticResult> = {}): DiagnosticResult {
   return {
@@ -58,4 +58,30 @@ test('score is clamped to the 12-100 range even with many findings', () => {
     }),
   );
   assert.ok(result.score >= 12 && result.score <= 100);
+});
+
+test('summarizeDiagnostics trims a diagnostic run down to report-renderable fields', () => {
+  const diag = baseDiagnostics({
+    headers: { server: 'nginx' },
+    probedPaths: [{ path: '/.env', status: 200, exposed: true }],
+    dastInputs: [
+      { formAction: '/login', method: 'POST', csrfPresent: false, vulnerability: 'CSRF', severity: 'high', description: 'd', fix: 'f' },
+    ],
+    easmPerimeter: {
+      subdomains: [{ domain: 'api.example.test', status: 'live', port: '443', ip: '5.6.7.8' }],
+      ip: '1.2.3.4',
+      nameserver: 'ns1.example.test',
+      protocol: 'TLS 1.3 / HTTPS',
+    },
+  });
+
+  const summary = summarizeDiagnostics(diag);
+
+  assert.equal(summary.responseStatus, 200);
+  assert.deepEqual(summary.headers, { server: 'nginx' });
+  assert.deepEqual(summary.probedPaths, [{ path: '/.env', status: 200, exposed: true }]);
+  assert.deepEqual(summary.dastInputs, [{ formAction: '/login', method: 'POST', csrfPresent: false }]);
+  assert.equal(summary.easmPerimeter.ip, '1.2.3.4');
+  assert.equal(summary.easmPerimeter.nameserver, 'ns1.example.test');
+  assert.deepEqual(summary.easmPerimeter.subdomains, [{ domain: 'api.example.test', status: 'live', port: '443' }]);
 });

@@ -51,6 +51,14 @@ export default function Dashboard({
   const [prevCredits, setPrevCredits] = useState(credits);
   const [showToast, setShowToast] = useState(false);
   const [toastMsg, setToastMsg] = useState('');
+  const [toastVariant, setToastVariant] = useState<'success' | 'error'>('success');
+
+  const notify = (msg: string, variant: 'success' | 'error' = 'success') => {
+    setToastMsg(msg);
+    setToastVariant(variant);
+    setShowToast(true);
+    setTimeout(() => setShowToast(false), variant === 'error' ? 5000 : 3000);
+  };
 
   // --- Enterprise Orchestrator Microservices State Hooks ---
   const [orchSubTab, setOrchSubTab] = useState<'aspm' | 'easm' | 'apiscan' | 'iast' | 'pentagi'>('pentagi');
@@ -66,11 +74,13 @@ export default function Dashboard({
   const [easmData, setEasmData] = useState<any | null>(null);
 
   // 3. Hadrian/APISCAN API Security state
+  const [apiScanUrl, setApiScanUrl] = useState('staging.api.vulnerable-shop.io');
   const [apiSpecTitle, setApiSpecTitle] = useState('Swagger User Management Core');
   const [apiScanRunning, setApiScanRunning] = useState(false);
   const [apiMatrix, setApiMatrix] = useState<any | null>(null);
 
   // 4. IAST state
+  const [iastUrl, setIastUrl] = useState('staging.api.vulnerable-shop.io');
   const [iastPayload, setIastPayload] = useState("1' UNION SELECT credit_card_number FROM customers");
   const [iastRunning, setIastRunning] = useState(false);
   const [iastResult, setIastResult] = useState<any | null>(null);
@@ -89,12 +99,15 @@ export default function Dashboard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ url: aspmUrl })
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setAspmOutput(data);
+      } else {
+        notify(data?.message || 'ASPM correlation failed.', 'error');
       }
     } catch (err) {
       console.error(err);
+      notify('ASPM correlation failed.', 'error');
     } finally {
       setAspmRunning(false);
     }
@@ -109,12 +122,15 @@ export default function Dashboard({
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain: easmDomain })
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setEasmData(data);
+      } else {
+        notify(data?.message || 'EASM recon failed.', 'error');
       }
     } catch (err) {
       console.error(err);
+      notify('EASM recon failed.', 'error');
     } finally {
       setEasmRunning(false);
     }
@@ -127,14 +143,17 @@ export default function Dashboard({
       const res = await fetch('/api/enterprise/api-scan/hadrian', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ schemaTitle: apiSpecTitle })
+        body: JSON.stringify({ url: apiScanUrl, schemaTitle: apiSpecTitle })
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setApiMatrix(data);
+      } else {
+        notify(data?.message || 'API security probe failed.', 'error');
       }
     } catch (err) {
       console.error(err);
+      notify('API security probe failed.', 'error');
     } finally {
       setApiScanRunning(false);
     }
@@ -147,14 +166,17 @@ export default function Dashboard({
       const res = await fetch('/api/enterprise/iast/trace', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ inputPayload: iastPayload })
+        body: JSON.stringify({ url: iastUrl, inputPayload: iastPayload })
       });
+      const data = await res.json();
       if (res.ok) {
-        const data = await res.json();
         setIastResult(data);
+      } else {
+        notify(data?.message || 'IAST trace failed.', 'error');
       }
     } catch (err) {
       console.error(err);
+      notify('IAST trace failed.', 'error');
     } finally {
       setIastRunning(false);
     }
@@ -270,9 +292,7 @@ export default function Dashboard({
   // Toast notifier for balance changes
   useEffect(() => {
     if (credits > prevCredits) {
-      setToastMsg(`Sandbox Top-up Successful! Added ${credits - prevCredits} scan credits.`);
-      setShowToast(true);
-      setTimeout(() => setShowToast(false), 4000);
+      notify(`Sandbox Top-up Successful! Added ${credits - prevCredits} scan credits.`);
     }
     setPrevCredits(credits);
   }, [credits, prevCredits]);
@@ -1211,34 +1231,46 @@ export default function Dashboard({
                     </p>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex flex-col gap-3">
                     <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <span className="text-[#52525b] px-2 whitespace-nowrap">Swagger Spec Title:</span>
+                      <Globe className="w-4 h-4 text-[#52525b] mx-2" />
                       <input
                         type="text"
                         className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="Swagger User Management Core"
-                        value={apiSpecTitle}
-                        onChange={(e) => setApiSpecTitle(e.target.value)}
+                        placeholder="staging.api.vulnerable-shop.io"
+                        value={apiScanUrl}
+                        onChange={(e) => setApiScanUrl(e.target.value)}
                       />
                     </div>
-                    <button
-                      onClick={runHadrianScan}
-                      disabled={apiScanRunning || !apiSpecTitle.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {apiScanRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Fuzzing Routes...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Assemble Schema-Driven API Mutation Scans</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+                        <span className="text-[#52525b] px-2 whitespace-nowrap">Swagger Spec Title:</span>
+                        <input
+                          type="text"
+                          className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
+                          placeholder="Swagger User Management Core"
+                          value={apiSpecTitle}
+                          onChange={(e) => setApiSpecTitle(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        onClick={runHadrianScan}
+                        disabled={apiScanRunning || !apiScanUrl.trim() || !apiSpecTitle.trim()}
+                        className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
+                      >
+                        {apiScanRunning ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin text-black" />
+                            <span>Fuzzing Routes...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="w-3.5 h-3.5 fill-black text-black" />
+                            <span>Assemble Schema-Driven API Mutation Scans</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {apiMatrix && (
@@ -1297,41 +1329,61 @@ export default function Dashboard({
                     </p>
                   </div>
 
-                  <div className="flex flex-col sm:flex-row gap-3">
+                  <div className="flex flex-col gap-3">
                     <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
-                      <span className="text-[#52525b] px-2 whitespace-nowrap">Input Payload:</span>
+                      <Globe className="w-4 h-4 text-[#52525b] mx-2" />
                       <input
                         type="text"
                         className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
-                        placeholder="1' UNION SELECT credit_card_number FROM customers"
-                        value={iastPayload}
-                        onChange={(e) => setIastPayload(e.target.value)}
+                        placeholder="staging.api.vulnerable-shop.io"
+                        value={iastUrl}
+                        onChange={(e) => setIastUrl(e.target.value)}
                       />
                     </div>
-                    <button
-                      onClick={runIastTrace}
-                      disabled={iastRunning || !iastPayload.trim()}
-                      className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
-                    >
-                      {iastRunning ? (
-                        <>
-                          <RefreshCw className="w-4 h-4 animate-spin text-black" />
-                          <span>Hooking Bytecode...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play className="w-3.5 h-3.5 fill-black text-black" />
-                          <span>Instrument Bytecode Passive Hooks</span>
-                        </>
-                      )}
-                    </button>
+                    <div className="flex flex-col sm:flex-row gap-3">
+                      <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+                        <span className="text-[#52525b] px-2 whitespace-nowrap">Input Payload:</span>
+                        <input
+                          type="text"
+                          className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
+                          placeholder="1' UNION SELECT credit_card_number FROM customers"
+                          value={iastPayload}
+                          onChange={(e) => setIastPayload(e.target.value)}
+                        />
+                      </div>
+                      <button
+                        onClick={runIastTrace}
+                        disabled={iastRunning || !iastUrl.trim() || !iastPayload.trim()}
+                        className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer"
+                      >
+                        {iastRunning ? (
+                          <>
+                            <RefreshCw className="w-4 h-4 animate-spin text-black" />
+                            <span>Hooking Bytecode...</span>
+                          </>
+                        ) : (
+                          <>
+                            <Play className="w-3.5 h-3.5 fill-black text-black" />
+                            <span>Instrument Bytecode Passive Hooks</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
                   </div>
 
                   {iastResult && (
                     <div className="space-y-4 pt-2">
-                      <div className="flex justify-between items-center text-[#a1a1aa] p-3 bg-red-950/10 border border-red-900/30 rounded">
+                      <div className={`flex justify-between items-center text-[#a1a1aa] p-3 rounded border ${
+                        iastResult.status === 'Sink Triggered Malicious Flow Alert'
+                          ? 'bg-red-950/10 border-red-900/30'
+                          : 'bg-[#22c55e]/5 border-[#22c55e]/30'
+                      }`}>
                         <span>Agent Target: <code className="text-white font-bold">{iastResult.runtime}</code></span>
-                        <span className="font-bold text-[#f87171] animate-pulse">SINK CRITICAL TAINT INTERCEPT</span>
+                        {iastResult.status === 'Sink Triggered Malicious Flow Alert' ? (
+                          <span className="font-bold text-[#f87171] animate-pulse">SINK CRITICAL TAINT INTERCEPT</span>
+                        ) : (
+                          <span className="font-bold text-[#22c55e]">NO TAINT SINK TRIGGERED</span>
+                        )}
                       </div>
 
                       <div className="space-y-3 relative before:absolute before:left-[17px] before:top-4 before:bottom-4 before:w-0.5 before:bg-[#27272a]">
@@ -1577,9 +1629,7 @@ export default function Dashboard({
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
                             navigator.clipboard.writeText(`{\n  "url": "https://example.com",     // (Required) The fully qualified domain name to scan\n  "apiKey": "sec_b7x9...",          // (Required) Your provisioned MCP API key\n  "authHeader": "Bearer ey..."      // (Optional) Authorization header to pass to the target\n}`);
-                            setToastMsg('Schema snippet copied to clipboard');
-                            setShowToast(true);
-                            setTimeout(() => setShowToast(false), 3000);
+                            notify('Schema snippet copied to clipboard');
                           }}
                         >
                           <Copy className="w-3.5 h-3.5" />
@@ -1604,9 +1654,7 @@ export default function Dashboard({
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
                             navigator.clipboard.writeText(`curl -X POST ${window.location.origin}/api/mcp/scan -H "Content-Type: application/json" -d '{\n  "url": "https://example.com", \n  "apiKey": "YOUR_API_KEY"\n}'`);
-                            setToastMsg('cURL snippet copied to clipboard');
-                            setShowToast(true);
-                            setTimeout(() => setShowToast(false), 3000);
+                            notify('cURL snippet copied to clipboard');
                           }}
                         >
                           <Copy className="w-3.5 h-3.5" />
@@ -1640,9 +1688,7 @@ export default function Dashboard({
                           className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                           onClick={() => {
                             navigator.clipboard.writeText(`{\n  "success": true,\n  "targetUrl": "https://staging.api.vulnerable.org",\n  "postureScore": 85,\n  "vulnerabilityLevel": "medium",\n  "analysisSummary": "Seclayer automated assessment identified 1 or more...",\n  "securityFindings": [\n    {\n      "testName": "GraphQL Schema Introspection Exposed",\n      "endpoint": "/graphql",\n      "severity": "high",\n      "description": "An active API endpoint probe discovered...",\n      "fix": "Disable introspection blocks in the production backend..."\n    }\n  ],\n  "creditsRemaining": 90\n}`);
-                            setToastMsg('Response envelope snippet copied to clipboard');
-                            setShowToast(true);
-                            setTimeout(() => setShowToast(false), 3000);
+                            notify('Response envelope snippet copied to clipboard');
                           }}
                         >
                           <Copy className="w-3.5 h-3.5" />
@@ -1683,9 +1729,7 @@ export default function Dashboard({
                         className="absolute top-2 right-2 bg-[#27272a]/80 hover:bg-[#3f3f46] text-[#a1a1aa] hover:text-white p-1.5 rounded transition-all opacity-0 group-hover:opacity-100 cursor-pointer"
                         onClick={() => {
                           navigator.clipboard.writeText(`async function runSeclayerScan(target: string, key: string) {\n  const response = await fetch('${window.location.origin}/api/mcp/scan', {\n    method: 'POST',\n    headers: { 'Content-Type': 'application/json' },\n    body: JSON.stringify({ url: target, apiKey: key })\n  });\n\n  if (!response.ok) throw new Error('Scan failed');\n  \n  const report = await response.json();\n  console.log(\`Score: \${report.postureScore}/100\`);\n  return report.securityFindings;\n}`);
-                          setToastMsg('TypeScript snippet copied to clipboard');
-                          setShowToast(true);
-                          setTimeout(() => setShowToast(false), 3000);
+                          notify('TypeScript snippet copied to clipboard');
                         }}
                       >
                         <Copy className="w-3.5 h-3.5" />
@@ -1704,8 +1748,16 @@ export default function Dashboard({
 
       {/* Floating Status Toast Notifier */}
       {showToast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-[#0c0c0e] border border-[#22c55e] text-[#22c55e] px-4 py-3 rounded shadow-2xl shadow-green-950/20 font-mono text-xs flex items-center space-x-2 animate-bounce">
-          <CheckCircle className="w-4 h-4 text-[#22c55e] shrink-0 animate-pulse" />
+        <div className={`fixed bottom-6 right-6 z-50 bg-[#0c0c0e] px-4 py-3 rounded shadow-2xl font-mono text-xs flex items-center space-x-2 animate-bounce border ${
+          toastVariant === 'error'
+            ? 'border-red-500 text-red-400 shadow-red-950/20'
+            : 'border-[#22c55e] text-[#22c55e] shadow-green-950/20'
+        }`}>
+          {toastVariant === 'error' ? (
+            <AlertTriangle className="w-4 h-4 text-red-400 shrink-0 animate-pulse" />
+          ) : (
+            <CheckCircle className="w-4 h-4 text-[#22c55e] shrink-0 animate-pulse" />
+          )}
           <span>{toastMsg}</span>
         </div>
       )}

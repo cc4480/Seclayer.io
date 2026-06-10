@@ -34,6 +34,23 @@ export interface SuppressionRule {
   createdAt: string;
 }
 
+export interface ScanDiagnosticsSummary {
+  responseStatus: number;
+  sslSecure: boolean;
+  headers: Record<string, string>;
+  missingHeaders: string[];
+  techLeaked: string[];
+  cookieIssues: string[];
+  probedPaths: Array<{ path: string; status: number; exposed: boolean }>;
+  dastInputs: Array<{ formAction: string; method: string; csrfPresent: boolean }>;
+  easmPerimeter: {
+    ip: string;
+    nameserver: string;
+    protocol: string;
+    subdomains: Array<{ domain: string; status: 'live' | 'inactive'; port: string }>;
+  };
+}
+
 export interface Scan {
   id: string;
   userId: string;
@@ -44,6 +61,7 @@ export interface Scan {
   severity?: Severity;
   findings?: Finding[];
   aiSummary?: string;
+  diagnostics?: ScanDiagnosticsSummary;
   error?: string;
   createdAt: string;
   completedAt?: string;

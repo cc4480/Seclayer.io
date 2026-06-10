@@ -32,6 +32,8 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const [expandedApiRows, setExpandedApiRows] = useState<Record<string, boolean>>({});
 
   const findings = scan.findings || [];
+  const diag = scan.diagnostics;
+  const hostname = scan.url.replace(/https?:\/\//i, '').replace(/\/+$/, '');
 
   const handleSaveSuppression = async (finding: Finding) => {
     setIsSuppressing(true);
@@ -425,19 +427,23 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
                         <span className="text-[#52525b]">Resolved Target IP:</span>
-                        <span className="text-zinc-300">104.244.42.1 (Anycast Route)</span>
+                        <span className="text-zinc-300">{diag && diag.easmPerimeter.ip !== 'unresolved' ? diag.easmPerimeter.ip : 'Not resolved'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
                         <span className="text-[#52525b]">Nameservers Detected:</span>
-                        <span className="text-zinc-300">ns1.seclayer-dns.net</span>
+                        <span className="text-zinc-300">{diag && diag.easmPerimeter.nameserver !== 'unresolved' ? diag.easmPerimeter.nameserver : 'Not resolved'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">TLS Connection standard:</span>
-                        <span className="text-zinc-300">{scan.score && scan.score >= 80 ? 'TLS 1.3 Secure ECC-Curve' : 'HTTP plaintext link standard'}</span>
+                        <span className="text-[#52525b]">Connection Protocol:</span>
+                        <span className="text-zinc-300">{diag ? diag.easmPerimeter.protocol : (scan.score && scan.score >= 80 ? 'TLS 1.3 Secure ECC-Curve' : 'HTTP plaintext link standard')}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-[#52525b]">Scanned Subdomains:</span>
-                        <span className="text-amber-400">api.${scan.url.replace(/https?:\/\//i, '')}</span>
+                        <span className="text-[#52525b]">Discovered Subdomains:</span>
+                        <span className="text-amber-400">
+                          {diag && diag.easmPerimeter.subdomains.length > 0
+                            ? `${diag.easmPerimeter.subdomains.filter(s => s.status === 'live').length} live / ${diag.easmPerimeter.subdomains.length} probed`
+                            : 'None discovered'}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -447,19 +453,23 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
                         <span className="text-[#52525b]">Sensitive Probed Paths:</span>
-                        <span className="text-zinc-300">/.env, /.git/config, /admin</span>
+                        <span className="text-zinc-300">{diag && diag.probedPaths.length > 0 ? diag.probedPaths.map(p => p.path).join(', ') : 'None probed'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Unsecured Form Post actions:</span>
-                        <span className="text-zinc-300">No token form methods scrutinized</span>
+                        <span className="text-[#52525b]">Form Inputs Inspected:</span>
+                        <span className="text-zinc-300">
+                          {diag && diag.dastInputs.length > 0
+                            ? `${diag.dastInputs.length} form(s), ${diag.dastInputs.filter(d => !d.csrfPresent).length} missing CSRF tokens`
+                            : 'No HTML forms detected'}
+                        </span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Static Javascript payloads scanned:</span>
-                        <span className="text-zinc-300">Inline HTML blocks, script assets</span>
+                        <span className="text-[#52525b]">HTTP Response Status:</span>
+                        <span className="text-zinc-300">{diag ? diag.responseStatus : 'N/A'}</span>
                       </div>
                       <div className="flex justify-between">
                         <span className="text-[#52525b]">Technology Composition:</span>
-                        <span className="text-zinc-300">Bootstrap, jQuery version reviews</span>
+                        <span className="text-zinc-300">{diag && diag.techLeaked.length > 0 ? diag.techLeaked.join(', ') : 'No fingerprintable technology signatures detected'}</span>
                       </div>
                     </div>
                   </div>
@@ -748,30 +758,47 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
               <div className="bg-black p-4 rounded font-mono text-[10px] text-zinc-400 space-y-2 border border-[#27272a] max-h-96 overflow-y-auto">
                 <span className="text-[#52525b] text-[9px] uppercase font-bold block mb-1">Raw pen-testing log sequences</span>
                 <p className="text-zinc-200">{'GET / HTTP/1.1'}</p>
-                <p className="text-zinc-200">Host: {scan.url.replace(/https?:\/\//i, '')}</p>
-                <p className="text-[#52525b]">User-Agent: Seclayer-Security-Scanner/2.0</p>
-                <p className="text-[#52525b]">Accept: text/html,application/xhtml+xml,application/xml</p>
-                
+                <p className="text-zinc-200">Host: {hostname}</p>
+                <p className="text-[#52525b]">User-Agent: Seclayer-Security-Scanner/2.0 (seclayer.io; scanner@seclayer.io)</p>
+                <p className="text-[#52525b]">Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8</p>
+
                 <p className="text-[#22c55e] font-bold mt-3">{'[EASM EDGE SCAN CHECKS]'}</p>
                 <p className="text-zinc-400">Target host: {scan.url}</p>
-                <p className="text-zinc-400">DNS Resolution IP (Detected/Anycast Route): 104.244.42.1</p>
-                <p className="text-zinc-400">Nameservers resolved properly: DNS Sec verified</p>
-                
+                <p className="text-zinc-400">DNS Resolution IP: {diag && diag.easmPerimeter.ip !== 'unresolved' ? diag.easmPerimeter.ip : 'Unresolved'}</p>
+                <p className="text-zinc-400">Nameservers: {diag && diag.easmPerimeter.nameserver !== 'unresolved' ? diag.easmPerimeter.nameserver : 'Unresolved'}</p>
+                {diag && diag.easmPerimeter.subdomains.length > 0 ? (
+                  diag.easmPerimeter.subdomains.map((s, i) => (
+                    <p key={i} className="text-zinc-300">Subdomain: {s.domain} - {s.status.toUpperCase()} (port {s.port})</p>
+                  ))
+                ) : (
+                  <p className="text-zinc-300">No live subdomains discovered.</p>
+                )}
+
                 <p className="text-[#22c55e] font-bold mt-3">{'[DAST DIRECTORY AUDIT CHECKS]'}</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/.env</span> - Status: 404 Not Found (Protected)</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/.git/config</span> - Status: 404 Not Found (Protected)</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/admin</span> - Status: 403 Forbidden (Blocked)</p>
-                
+                {diag && diag.probedPaths.length > 0 ? (
+                  diag.probedPaths.map((p, i) => (
+                    <p key={i} className="text-zinc-200">Path: <span className="text-amber-400">{p.path}</span> - Status: {p.status} ({p.exposed ? 'Exposed' : 'Protected'})</p>
+                  ))
+                ) : (
+                  <p className="text-zinc-300">No directory probes recorded for this scan.</p>
+                )}
+
                 <p className="text-[#22c55e] font-bold mt-4">{'[HTTP RESPONSE HEADERS]'}</p>
-                <p className="text-zinc-300">Server: Nginx/1.18.0 (Ubuntu)</p>
-                <p className="text-zinc-350">Date: {new Date(scan.createdAt).toUTCString()}</p>
-                <p className="text-zinc-300">Content-Type: text/html; charset=UTF-8</p>
-                <p className="text-zinc-300">Connection: keep-alive</p>
-                
+                {diag ? (
+                  <>
+                    <p className="text-zinc-300">Status: {diag.responseStatus}</p>
+                    <p className="text-zinc-300">Server: {diag.headers['server'] || 'Not disclosed'}</p>
+                    <p className="text-zinc-300">Content-Type: {diag.headers['content-type'] || 'N/A'}</p>
+                    <p className="text-zinc-300">Date: {new Date(scan.createdAt).toUTCString()}</p>
+                  </>
+                ) : (
+                  <p className="text-zinc-300">Header capture not available for this scan.</p>
+                )}
+
                 <p className="text-[#22c55e] font-bold mt-4">{'[IAST CONTROLS CHECK]'}</p>
-                <p className="text-zinc-450">Content-Security-Policy header verified: {findings.some(f => f.title.includes('CSP')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>
-                <p className="text-zinc-450">Strict-Transport-Security verified: {findings.some(f => f.title.includes('Strict-Transport-Security')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>
-                <p className="text-zinc-450">X-Frame-Options framing locks: {findings.some(f => f.title.includes('Clickjacking')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>
+                <p className="text-zinc-400">Content-Security-Policy header: {diag ? (diag.missingHeaders.includes('content-security-policy') ? 'ABSENT' : 'ACTIVE') : (findings.some(f => f.title.includes('CSP')) ? 'ABSENT' : 'ACTIVE')}</p>
+                <p className="text-zinc-400">Strict-Transport-Security header: {diag ? (diag.missingHeaders.includes('strict-transport-security') ? 'ABSENT' : 'ACTIVE') : (findings.some(f => f.title.includes('Strict-Transport-Security')) ? 'ABSENT' : 'ACTIVE')}</p>
+                <p className="text-zinc-400">X-Frame-Options header: {diag ? (diag.missingHeaders.includes('x-frame-options') ? 'ABSENT' : 'ACTIVE') : (findings.some(f => f.title.includes('Clickjacking')) ? 'ABSENT' : 'ACTIVE')}</p>
 
                 <p className="text-red-500 font-bold mt-4">{'[RED TEAM ACTIVE FUZZING PROBES]'}</p>
                 <p className="text-zinc-400">Target host: {scan.url}</p>
