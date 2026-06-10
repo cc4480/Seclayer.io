@@ -1,0 +1,135 @@
+import React from 'react';
+import { Clock, Globe, Plus, RefreshCw } from 'lucide-react';
+import { MonitorFormState } from './useMonitorForm.js';
+
+interface MonitoringTabProps {
+  monitoredTargets: any[];
+  form: MonitorFormState;
+}
+
+/** Continuous monitoring tab: add-monitor scheduler form and active targets list. */
+export default function MonitoringTab({ monitoredTargets, form }: MonitoringTabProps) {
+  const {
+    monitorUrl, setMonitorUrl,
+    monitorFreq, setMonitorFreq,
+    monitorDay, setMonitorDay,
+    monitorTime, setMonitorTime,
+    isAddingMonitor,
+    handleAddMonitor,
+    handleDeleteMonitor,
+  } = form;
+
+  return (
+    <div className="space-y-6 animate-fade-in text-xs font-mono">
+      <div className="bg-[#18181b]/35 border border-[#27272a] rounded p-4 flex items-start space-x-3.5">
+        <Clock className="w-5 h-5 text-[#22c55e] shrink-0 mt-0.5" />
+        <div className="space-y-1">
+          <h4 className="text-white text-xs uppercase font-bold">Continuous Security Monitoring</h4>
+          <p className="text-[11px] text-[#a1a1aa] leading-relaxed">
+            Set up automated, recurring scans for your critical infrastructure. Monitoring tasks will automatically deduct credits from your balance per execution.
+          </p>
+        </div>
+      </div>
+
+      <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5">
+        <h3 className="text-sm font-bold font-mono text-white mb-4">Add Monitor Target</h3>
+        <form onSubmit={handleAddMonitor} className="flex flex-col gap-3">
+          <div className="flex-1 bg-black border border-[#27272a] rounded p-1.5 focus-within:border-[#22c55e] transition-colors flex items-center">
+            <Globe className="w-4 h-4 text-[#52525b] mx-2" />
+            <input
+              type="text"
+              className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1"
+              placeholder="https://production.api.yoursite.com"
+              value={monitorUrl}
+              onChange={(e) => setMonitorUrl(e.target.value)}
+              disabled={isAddingMonitor}
+            />
+          </div>
+          <div className="flex flex-col sm:flex-row gap-3">
+            <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+              <select
+                value={monitorFreq}
+                onChange={(e) => setMonitorFreq(Number(e.target.value))}
+                className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer"
+                disabled={isAddingMonitor}
+              >
+                <option value={1} className="bg-black">Daily</option>
+                <option value={7} className="bg-black">Weekly</option>
+                <option value={30} className="bg-black">Monthly</option>
+              </select>
+            </div>
+
+            {monitorFreq === 7 && (
+              <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+                <select
+                  value={monitorDay}
+                  onChange={(e) => setMonitorDay(e.target.value)}
+                  className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer"
+                  disabled={isAddingMonitor}
+                >
+                  <option value="Monday" className="bg-black">Monday</option>
+                  <option value="Tuesday" className="bg-black">Tuesday</option>
+                  <option value="Wednesday" className="bg-black">Wednesday</option>
+                  <option value="Thursday" className="bg-black">Thursday</option>
+                  <option value="Friday" className="bg-black">Friday</option>
+                  <option value="Saturday" className="bg-black">Saturday</option>
+                  <option value="Sunday" className="bg-black">Sunday</option>
+                </select>
+              </div>
+            )}
+
+            <div className="w-full sm:w-auto bg-black border border-[#27272a] rounded p-1.5 flex items-center">
+              <input
+                type="time"
+                value={monitorTime}
+                onChange={(e) => setMonitorTime(e.target.value)}
+                className="bg-transparent text-white text-xs font-mono w-full focus:outline-none p-1 cursor-pointer [color-scheme:dark]"
+                disabled={isAddingMonitor}
+              />
+            </div>
+
+            <button
+              type="submit"
+              disabled={isAddingMonitor || !monitorUrl.trim()}
+              className="px-5 py-2.5 bg-[#22c55e] hover:bg-[#4ade80] text-black text-xs font-bold uppercase tracking-wider rounded disabled:opacity-40 disabled:cursor-not-allowed transition-all flex items-center justify-center space-x-2 shrink-0 cursor-pointer w-full sm:w-auto ml-auto"
+            >
+              {isAddingMonitor ? <RefreshCw className="w-4 h-4 animate-spin text-black" /> : <Plus className="w-4 h-4 text-black" />}
+              <span>Add Monitor</span>
+            </button>
+          </div>
+        </form>
+      </div>
+
+      <div className="space-y-3">
+        {monitoredTargets.length === 0 ? (
+          <div className="text-center py-8 bg-black rounded border border-[#27272a]">
+            <span className="text-xs text-[#52525b] font-mono">No active monitoring targets configured</span>
+          </div>
+        ) : (
+          monitoredTargets.map((target) => (
+            <div key={target.id} className="p-4 bg-black border border-[#27272a] rounded flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex items-center space-x-2">
+                  <Globe className="w-4 h-4 text-[#52525b]" />
+                  <span className="text-white font-bold uppercase text-xs">{target.url}</span>
+                  <span className="bg-[#22c55e]/10 text-[#22c55e] text-[9px] px-2 py-0.5 rounded border border-[#22c55e]/30">ACTIVE</span>
+                </div>
+                <div className="text-[#a1a1aa] text-[10px] flex items-center space-x-3">
+                  <span>Schedule: {target.scheduleString || `Every ${target.frequencyDays} ${target.frequencyDays === 1 ? 'day' : 'days'}`}</span>
+                  <span>&bull;</span>
+                  <span>Next scan: {new Date(target.nextScanAt).toLocaleDateString()}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => handleDeleteMonitor(target.id)}
+                className="px-3 py-1.5 bg-[#18181b] border border-[#27272a] hover:bg-[#f87171] hover:text-white text-[#f87171] rounded text-[10px] uppercase font-bold tracking-wider transition-all cursor-pointer w-fit"
+              >
+                Remove
+              </button>
+            </div>
+          ))
+        )}
+      </div>
+    </div>
+  );
+}
