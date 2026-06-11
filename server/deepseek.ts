@@ -225,6 +225,7 @@ function preserveValidatedEvidence(aiFindings: Finding[], staticFindings: Findin
     if (match) {
       match.rawRequest = v.rawRequest;
       match.rawResponse = v.rawResponse;
+      match.validated = v.validated;
       if (!match.endpoint && v.endpoint) match.endpoint = v.endpoint;
     } else {
       merged.push(v);

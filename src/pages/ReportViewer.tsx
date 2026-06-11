@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Shield, ArrowLeft, Download, Share2, Check } from 'lucide-react';
+import { Shield, ArrowLeft, Download, Share2, Check, ShieldCheck } from 'lucide-react';
 import { Scan } from '../types.js';
 import { generateAuditPdf } from '../lib/pdf-report.js';
 import { SecCategory, categoryTabLabels, getCategoryCount } from './report/categories.js';
@@ -21,9 +21,11 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const [expandedApiRows, setExpandedApiRows] = useState<Record<string, boolean>>({});
+  const [validatedOnly, setValidatedOnly] = useState(false);
 
   const suppression = useSuppression(scan, onRefreshScans);
   const findings = scan.findings || [];
+  const validatedCount = findings.filter(f => f.validated && !f.isFalsePositive).length;
 
   const handleShareClick = () => {
     navigator.clipboard.writeText(window.location.href);
@@ -75,6 +77,28 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
         {/* Audit Meta Summary Card */}
         <div className="bg-[#0c0c0e] border border-[#27272a] rounded overflow-hidden shadow-2xl">
           <ScanMetaHeader scan={scan} previousScan={previousScan} findings={findings} />
+
+          {/* Validated-only filter: surface re-confirmed exploit proofs */}
+          {validatedCount > 0 && (
+            <div className="flex items-center justify-between px-5 py-3 border-b border-[#27272a] bg-[#22c55e]/[0.03]">
+              <span className="flex items-center space-x-2 text-[10px] font-mono uppercase tracking-wider text-[#22c55e]">
+                <ShieldCheck className="w-3.5 h-3.5 shrink-0" />
+                <span>{validatedCount} validated exploit{validatedCount === 1 ? '' : 's'} with reproducible PoC</span>
+              </span>
+              <button
+                onClick={() => setValidatedOnly(v => !v)}
+                className={`px-3 py-1 rounded border text-[10px] font-mono uppercase tracking-wider transition-colors cursor-pointer flex items-center space-x-1.5 ${
+                  validatedOnly
+                    ? 'border-[#22c55e]/50 bg-[#22c55e]/10 text-[#22c55e]'
+                    : 'border-[#27272a] text-[#52525b] hover:text-[#a1a1aa] hover:border-[#3f3f46]'
+                }`}
+                id="report-validated-filter"
+              >
+                {validatedOnly && <Check className="w-3 h-3 shrink-0" />}
+                <span>Validated only</span>
+              </button>
+            </div>
+          )}
 
           {/* Core AppSec Framework Segmented Matrix tabs */}
           <div className="flex overflow-x-auto border-b border-[#27272a] bg-black/20 select-none scrollbar-none">
@@ -129,6 +153,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
               <ModuleFindingsTab
                 category={activeTab}
                 findings={findings}
+                validatedOnly={validatedOnly}
                 copiedCodeId={copiedCodeId}
                 onCopyCode={handleCopyCode}
                 expandedApiRows={expandedApiRows}

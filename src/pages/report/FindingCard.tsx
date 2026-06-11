@@ -1,5 +1,5 @@
 import React from 'react';
-import { Check, Clipboard, Terminal, ChevronDown, ChevronUp, Copy } from 'lucide-react';
+import { Check, Clipboard, Terminal, ChevronDown, ChevronUp, Copy, ShieldCheck } from 'lucide-react';
 import { Finding } from '../../types.js';
 import SuppressionPanel from './SuppressionPanel.js';
 
@@ -71,6 +71,15 @@ export default function FindingCard({
               Conf: {finding.confidence}
             </span>
           )}
+          {finding.validated && !finding.isFalsePositive && (
+            <span
+              className="text-[9px] font-mono uppercase px-2 py-0.5 rounded border border-[#22c55e]/40 bg-[#22c55e]/10 text-[#22c55e] inline-flex items-center space-x-1"
+              title="Re-confirmed by an active probe with a reproducible proof-of-concept"
+            >
+              <ShieldCheck className="w-3 h-3 shrink-0" />
+              <span>Validated PoC</span>
+            </span>
+          )}
           <h5 className={`text-xs font-bold font-mono tracking-tight leading-snug ${finding.isFalsePositive ? 'text-zinc-500 line-through' : 'text-white'}`}>{finding.title}</h5>
         </div>
         <span className="text-[10px] text-[#52525b] font-mono tracking-wide">ID: {finding.id}</span>
@@ -116,9 +125,11 @@ export default function FindingCard({
             onClick={onToggleExpanded}
             className="w-full flex items-center justify-between p-3 rounded bg-zinc-950/40 hover:bg-zinc-900 border border-zinc-800/80 transition-colors cursor-pointer group"
           >
-            <span className="flex items-center space-x-2 text-[10px] font-mono text-zinc-400 group-hover:text-amber-400 transition-colors uppercase tracking-wider font-bold">
-              <Terminal className="w-3.5 h-3.5 shrink-0" />
-              <span>Raw HTTP Probes & Response Dump</span>
+            <span className={`flex items-center space-x-2 text-[10px] font-mono uppercase tracking-wider font-bold transition-colors ${
+              finding.validated ? 'text-[#22c55e] group-hover:text-[#4ade80]' : 'text-zinc-400 group-hover:text-amber-400'
+            }`}>
+              {finding.validated ? <ShieldCheck className="w-3.5 h-3.5 shrink-0" /> : <Terminal className="w-3.5 h-3.5 shrink-0" />}
+              <span>{finding.validated ? 'Validated Exploit — Reproducible PoC (curl)' : 'Raw HTTP Probes & Response Dump'}</span>
             </span>
             {expanded ? <ChevronUp className="w-4 h-4 text-zinc-500" /> : <ChevronDown className="w-4 h-4 text-zinc-500" />}
           </button>

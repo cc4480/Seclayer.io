@@ -7,6 +7,7 @@ import FindingCard from './FindingCard.js';
 interface ModuleFindingsTabProps {
   category: SecCategory;
   findings: Finding[];
+  validatedOnly: boolean;
   copiedCodeId: string | null;
   onCopyCode: (id: string, text: string) => void;
   expandedApiRows: Record<string, boolean>;
@@ -28,6 +29,7 @@ interface ModuleFindingsTabProps {
 export default function ModuleFindingsTab({
   category,
   findings,
+  validatedOnly,
   copiedCodeId,
   onCopyCode,
   expandedApiRows,
@@ -35,7 +37,9 @@ export default function ModuleFindingsTab({
   suppression,
 }: ModuleFindingsTabProps) {
   const catMeta = categoryTabLabels.find(c => c.key === category);
-  const catFindings = findings.filter(f => f.category === category);
+  const catFindings = findings
+    .filter(f => f.category === category)
+    .filter(f => !validatedOnly || f.validated);
 
   return (
     <div className="space-y-6 animate-fade-in">
@@ -57,7 +61,15 @@ export default function ModuleFindingsTab({
       </div>
 
       {/* Filtered list of findings */}
-      {catFindings.length === 0 ? (
+      {catFindings.length === 0 && validatedOnly ? (
+        <div className="text-center py-16 bg-black/40 rounded border border-dashed border-[#27272a] flex flex-col items-center">
+          <CheckCircle2 className="w-10 h-10 text-[#52525b] mb-3" />
+          <span className="text-xs text-white font-bold font-mono uppercase block">No Validated Exploits in This Module</span>
+          <p className="text-[11px] text-[#52525b] mt-1.5 font-mono max-w-md">
+            No finding in {catMeta?.label} was re-confirmed with a reproducible proof-of-concept. Turn off "Validated only" to view all findings.
+          </p>
+        </div>
+      ) : catFindings.length === 0 ? (
         <div className="text-center py-16 bg-black/40 rounded border border-dashed border-[#27272a] flex flex-col items-center">
           <CheckCircle2 className="w-10 h-10 text-[#22c55e] mb-3" />
           <span className="text-xs text-white font-bold font-mono uppercase block">Zero Vulnerabilities Outstanding</span>

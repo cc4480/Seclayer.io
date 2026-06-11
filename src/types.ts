@@ -23,6 +23,8 @@ export interface Finding {
   endpoint?: string;
   rawRequest?: string;
   rawResponse?: string;
+  /** True when an active probe re-confirmed this finding with a reproducible PoC. */
+  validated?: boolean;
 }
 
 export interface SuppressionRule {

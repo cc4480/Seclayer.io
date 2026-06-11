@@ -77,6 +77,7 @@ export interface DiagnosticResult {
     fix: string;
     rawRequest?: string;
     rawResponse?: string;
+    validated?: boolean;
   }>;
   apiSecFindings?: Array<{
     testName: string;
@@ -86,6 +87,7 @@ export interface DiagnosticResult {
     endpoint: string;
     rawRequest: string;
     rawResponse: string;
+    validated?: boolean;
   }>;
   /** Bounded, re-confirmed exploit proofs with reproducible PoC artifacts. */
   validatedExploits?: ValidatedExploit[];
@@ -677,6 +679,7 @@ async function runRedTeamProbes(
           fix: d.fix,
           rawRequest: art.rawRequest,
           rawResponse: art.rawResponse,
+          validated: exploit.validationStatus === "validated",
         });
         exploits.push(exploit);
       } catch (e) {
@@ -757,6 +760,7 @@ async function runApiSecurityProbes(
           fix: "Disable introspection blocks in the production GraphQL backend. Shield API with explicit token authentication schemas.",
           rawRequest: art.rawRequest,
           rawResponse: art.rawResponse,
+          validated: exploit.validationStatus === "validated",
         });
         exploits.push(exploit);
       }
@@ -811,6 +815,7 @@ async function runApiSecurityProbes(
           fix: "Enforce stringent object-level resource verification. Explicitly map authorization states against the retrieved user objects inside controller logic.",
           rawRequest: art.rawRequest,
           rawResponse: art.rawResponse,
+          validated: exploit.validationStatus === "validated",
         });
         exploits.push(exploit);
       }
@@ -1153,6 +1158,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         category: "RED_TEAM",
         rawRequest: rt.rawRequest,
         rawResponse: rt.rawResponse,
+        validated: rt.validated,
       });
       // Deduct score dynamically based on aggressive vulnerability findings
       score -= rt.severity === "critical" ? 25 : 15;
@@ -1173,6 +1179,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         endpoint: api.endpoint,
         rawRequest: api.rawRequest,
         rawResponse: api.rawResponse,
+        validated: api.validated,
       });
       score -= api.severity === "critical" ? 25 : 15;
     });
