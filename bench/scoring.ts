@@ -42,6 +42,8 @@ export const ACTIVE_CHECKS: ActiveCheck[] = [
   // Multi-page / authenticated chains
   { id: 'stored_xss', label: 'Stored XSS (multi-page)', detect: (f) => has(f, (x) => /stored cross-site scripting|stored xss/i.test(x.title)) },
   { id: 'idor', label: 'IDOR chain (authenticated)', detect: (f) => has(f, (x) => /insecure direct object reference|idor/i.test(x.title)) },
+  // Crawl-driven parameter fuzzing
+  { id: 'crawl_injection', label: 'Injection on a crawl-discovered parameter', detect: (f) => has(f, (x) => /discovered parameter/i.test(x.title)) },
 ];
 
 export interface TargetScore {

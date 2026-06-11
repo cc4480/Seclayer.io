@@ -22,12 +22,15 @@ Local fixture targets with a known ground truth (`bench/fixtures.ts`):
   `.env`, exposed `.git/config`, exposed `phpinfo()`, a hardcoded secret (SAST),
   an outdated library (SCA), and a CSRF-unprotected form.
 
-- **Chain target (authenticated, multi-page)** — two vulnerabilities reachable
-  only after the crawler follows links behind a Bearer token: **stored XSS** (a
-  guestbook persists a comment and renders it unencoded on a later GET) and an
+- **Chain target (authenticated, multi-page)** — vulnerabilities reachable only
+  after the crawler follows links behind a Bearer token: **stored XSS** (a
+  guestbook persists a comment and renders it unencoded on a later GET), an
   **IDOR chain** (`/api/orders/{id}` returns any order to any authenticated
-  caller). This exercises the crawler, authenticated flow, and the multi-request
-  chain detectors — **14 vulnerability classes** in total.
+  caller), and **reflected injection on a crawl-discovered parameter**
+  (`/search?term=` — an endpoint the fixed homepage probes never touch, found
+  and fuzzed only because the crawler reached it). This exercises the crawler,
+  authenticated flow, the multi-request chain detectors, and crawl-driven
+  parameter fuzzing — **15 vulnerability classes** in total.
 
 - **Clean targets** — a hardened single-page app and a hardened chain app,
   together a deliberate **false-positive trap**. The single-page one answers
@@ -58,11 +61,11 @@ active probes, which is what the calibration and validation logic governs.
 
 | Metric | Result |
 | --- | --- |
-| Detection rate (recall) | **100%** (14 / 14) |
-| False-positive rate | **0%** (0 / 14) |
+| Detection rate (recall) | **100%** (15 / 15) |
+| False-positive rate | **0%** (0 / 15) |
 | Precision | **100%** |
-| Re-confirmed PoCs | **8** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA, stored XSS, IDOR) |
-| Authenticated, multi-page scanning | **proven** (reaches gated stored-XSS / IDOR chains) |
+| Re-confirmed PoCs | **9** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA, stored XSS, IDOR, crawl-discovered injection) |
+| Authenticated, multi-page scanning | **proven** (reaches gated chains + crawl-discovered endpoints) |
 
 The clean target's decoys — which would each trip a substring-based scanner —
 are all suppressed by the soft-404 baseline calibration and the

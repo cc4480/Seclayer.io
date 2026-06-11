@@ -21,6 +21,7 @@ import {
 } from "./exploit-validation.js";
 import { crawl as crawlSite } from "./crawler.js";
 import { detectStoredXss, detectIdor } from "./chain-detectors.js";
+import { runParamFuzzing } from "./param-fuzzer.js";
 
 export interface DiagnosticResult {
   url: string;
@@ -960,6 +961,13 @@ export async function runDiagnostics(
     if (idor.findings.length > 0) {
       result.apiSecFindings = [...(result.apiSecFindings ?? []), ...idor.findings];
       chainExploits.push(...idor.exploits);
+    }
+
+    // Fuzz crawl-discovered GET parameters for reflected XSS / SQLi.
+    const fuzz = await runParamFuzzing(crawlResult, headers);
+    if (fuzz.findings.length > 0) {
+      result.redTeamFindings = [...(result.redTeamFindings ?? []), ...fuzz.findings];
+      chainExploits.push(...fuzz.exploits);
     }
   } catch (err) {
     console.warn("Crawl / chain detection encountered a top-level error", err);

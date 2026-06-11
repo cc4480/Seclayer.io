@@ -182,6 +182,7 @@ export function startChainTarget(token: string): Promise<BenchTarget> {
   const comments: string[] = [];
   return listen(async (req, res) => {
     const path = normalizePath(req.url || '/');
+    const q = query(req.url || '');
     const authed = (req.headers['authorization'] || '') === `Bearer ${token}`;
     if (!authed) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -222,12 +223,22 @@ export function startChainTarget(token: string): Promise<BenchTarget> {
       return;
     }
 
+    // Search page reachable only by crawling; reflects `term` UNENCODED (XSS on
+    // a parameter the fixed homepage probes never touch).
+    if (path === '/search') {
+      const term = q.get('term') || '';
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<html><body><h1>Search</h1><div>Results for: ${term}</div></body></html>`);
+      return;
+    }
+
     if (path === '/' || path === '') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(
         '<html><body><h1>Members Area</h1><ul>' +
           '<li><a href="/guestbook">Guestbook</a></li>' +
           '<li><a href="/api/orders/1">Your order #1</a></li>' +
+          '<li><a href="/search?term=demo">Search</a></li>' +
           '</ul></body></html>',
       );
       return;
@@ -239,14 +250,15 @@ export function startChainTarget(token: string): Promise<BenchTarget> {
 
 /**
  * The hardened counterpart: same authenticated multi-page surface, but the
- * guestbook output-encodes comments and /api/orders enforces ownership. A
- * correct scanner finds neither chain vulnerability here.
+ * guestbook output-encodes comments, /api/orders enforces ownership, and the
+ * search page encodes its reflected parameter. A correct scanner finds nothing.
  */
 export function startCleanChainTarget(token: string): Promise<BenchTarget> {
   const comments: string[] = [];
   const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
   return listen(async (req, res) => {
     const path = normalizePath(req.url || '/');
+    const q = query(req.url || '');
     const authed = (req.headers['authorization'] || '') === `Bearer ${token}`;
     if (!authed) {
       res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -285,12 +297,21 @@ export function startCleanChainTarget(token: string): Promise<BenchTarget> {
       return;
     }
 
+    // Search page encodes the reflected parameter (no XSS).
+    if (path === '/search') {
+      const term = escape(q.get('term') || '');
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<html><body><h1>Search</h1><div>Results for: ${term}</div></body></html>`);
+      return;
+    }
+
     if (path === '/' || path === '') {
       res.writeHead(200, { 'Content-Type': 'text/html' });
       res.end(
         '<html><body><h1>Members Area</h1><ul>' +
           '<li><a href="/guestbook">Guestbook</a></li>' +
           '<li><a href="/api/orders/1">Your order #1</a></li>' +
+          '<li><a href="/search?term=demo">Search</a></li>' +
           '</ul></body></html>',
       );
       return;
@@ -307,6 +328,7 @@ export function startCleanChainTarget(token: string): Promise<BenchTarget> {
 export function startAuthenticatedTarget(token: string): Promise<BenchTarget> {
   return listen((req, res) => {
     const path = normalizePath(req.url || '/');
+    const q = query(req.url || '');
     const authed = (req.headers['authorization'] || '') === `Bearer ${token}`;
 
     if (path === '/api/v1/users/admin') {
