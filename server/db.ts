@@ -56,7 +56,9 @@ class LocalFileDb {
         };
         
         this.data.users[defaultUser.id] = defaultUser;
-        this.data.scans = { ...INITIAL_DEMO_SCANS };
+        // Illustrative scans are seeded only when explicitly enabled (default in
+        // development) so a production datastore never starts with fake results.
+        this.data.scans = config.seedDemoData ? { ...INITIAL_DEMO_SCANS } : {};
         
         // Seed default transactions
         this.data.transactions.push({

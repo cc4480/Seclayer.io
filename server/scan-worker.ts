@@ -9,20 +9,18 @@ export async function processScanJob(scanId: string) {
   try {
     jobLog.info('scan job started');
 
-    await sleep(1500);
-    db.updateScan(scanId, { status: 'scanning' });
-
     const scan = db.getScan(scanId);
     if (!scan) {
       jobLog.warn('scan disappeared before diagnostics could run');
       return;
     }
 
+    // Each status transition brackets real work: live diagnostics, then AI
+    // analysis. Progress reflects actual scanner activity rather than a timer.
+    db.updateScan(scanId, { status: 'scanning' });
     const diagnostics = await runDiagnostics(scan.url, scan.authHeader);
 
-    await sleep(1500);
     db.updateScan(scanId, { status: 'analyzing' });
-
     const staticCompiled = compileStaticFindings(diagnostics);
     const outputReport = await generateAiReport(scan.url, diagnostics, staticCompiled);
 
@@ -50,8 +48,4 @@ export async function processScanJob(scanId: string) {
       jobLog.error('failed to record scan failure state', { err: updateErr });
     }
   }
-}
-
-function sleep(ms: number) {
-  return new Promise((resolve) => setTimeout(resolve, ms));
 }

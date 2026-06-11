@@ -60,6 +60,13 @@ export const config = {
   /** Path to the JSON datastore file. */
   dbFile: process.env.DB_FILE || 'db.json',
 
+  /**
+   * Seed illustrative demo scans into a fresh datastore. Convenient for local
+   * development and demos; disabled by default in production so a real
+   * deployment never ships with fabricated scan results.
+   */
+  seedDemoData: parseBoolEnv(process.env.SEED_DEMO_DATA, !isProduction),
+
   deepseek: {
     apiKey: deepseekApiKey,
     configured: deepseekConfigured,
@@ -71,8 +78,13 @@ export const config = {
     logModel: process.env.DEEPSEEK_LOG_MODEL || 'deepseek-v4-flash',
     /** Per-request timeout (ms) for AI calls. */
     timeoutMs: parseIntEnv(process.env.DEEPSEEK_TIMEOUT_MS, 30_000),
-    /** Max output tokens — capped to prevent JSON truncation in JSON mode. */
-    maxTokens: parseIntEnv(process.env.DEEPSEEK_MAX_TOKENS, 4096),
+    /**
+     * Max output tokens. Sized to fit a complete multi-finding pentest report
+     * (executive summary + enriched findings) without mid-object truncation in
+     * JSON mode. DeepSeek V4 supports large completions; raise via env if a
+     * target surfaces an unusually large number of findings.
+     */
+    maxTokens: parseIntEnv(process.env.DEEPSEEK_MAX_TOKENS, 8000),
   },
 
   rateLimit: {
