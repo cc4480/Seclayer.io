@@ -5,6 +5,7 @@ import PentagiDemoSection from './landing/PentagiDemoSection.js';
 import PricingSection from './landing/PricingSection.js';
 import McpIntegrationTabs from './landing/McpIntegrationTabs.js';
 import SampleReportSection from './landing/SampleReportSection.js';
+import BenchmarkBadge from './landing/BenchmarkBadge.js';
 
 interface LandingProps {
   onStartTrial: (initialUrl: string) => void;
@@ -101,6 +102,9 @@ export default function Landing({ onStartTrial, onNavigate, onSelectPack, userEm
             <span className="text-[#27272a]">|</span>
             <span>[+] API Endpoint coverage up to TLS 1.3</span>
           </div>
+
+          {/* Verifiable accuracy trust signal (CI-enforced benchmark numbers) */}
+          <BenchmarkBadge />
 
           {/* Autonomous AI PentAGI Section */}
           <PentagiDemoSection onStartTrial={onStartTrial} />

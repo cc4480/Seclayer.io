@@ -18,14 +18,27 @@ export interface ActiveCheck {
 
 const has = (findings: Finding[], pred: (f: Finding) => boolean) => findings.some(pred);
 
+const exposedPath = (f: Finding, needle: RegExp) =>
+  /exposed/i.test(f.title) && needle.test(f.title + f.description);
+
 export const ACTIVE_CHECKS: ActiveCheck[] = [
+  // Red-team active probes
   { id: 'xss', label: 'Reflected XSS', detect: (f) => has(f, (x) => /reflected xss/i.test(x.title)) },
   { id: 'sqli', label: 'SQL Injection', detect: (f) => has(f, (x) => /sql injection/i.test(x.title)) },
   { id: 'cmdi', label: 'OS Command Injection', detect: (f) => has(f, (x) => /command injection/i.test(x.title)) },
   { id: 'ssrf', label: 'SSRF', detect: (f) => has(f, (x) => /server-side request forgery|ssrf/i.test(x.title)) },
+  // API security
   { id: 'graphql', label: 'GraphQL Introspection', detect: (f) => has(f, (x) => /graphql/i.test(x.title)) },
   { id: 'bola', label: 'Broken Object Level Authorization', detect: (f) => has(f, (x) => /object level authorization|bola/i.test(x.title)) },
-  { id: 'env', label: 'Exposed .env file', detect: (f) => has(f, (x) => /exposed/i.test(x.title) && /\.env/i.test(x.title + x.description)) },
+  // Exposed sensitive resources
+  { id: 'env', label: 'Exposed .env file', detect: (f) => has(f, (x) => exposedPath(x, /\.env/i)) },
+  { id: 'git', label: 'Exposed .git/config', detect: (f) => has(f, (x) => exposedPath(x, /\.git/i)) },
+  { id: 'phpinfo', label: 'Exposed phpinfo()', detect: (f) => has(f, (x) => exposedPath(x, /phpinfo/i)) },
+  // Static analysis & composition
+  { id: 'secret', label: 'Hardcoded Secret (SAST)', detect: (f) => has(f, (x) => /hardcoded credential|credential exposure/i.test(x.title)) },
+  { id: 'outdated_lib', label: 'Outdated Library (SCA)', detect: (f) => has(f, (x) => /outdated library/i.test(x.title)) },
+  // Dynamic analysis
+  { id: 'csrf', label: 'Missing CSRF Token', detect: (f) => has(f, (x) => /csrf/i.test(x.title)) },
 ];
 
 export interface TargetScore {

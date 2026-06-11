@@ -2,8 +2,11 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import type { Finding } from '../src/types.ts';
 import { runDiagnostics, compileStaticFindings } from '../server/scanner.ts';
-import { startVulnerableTarget, startCleanTarget } from '../bench/fixtures.ts';
+import { startVulnerableTarget, startCleanTarget, startAuthenticatedTarget } from '../bench/fixtures.ts';
 import { scoreTarget, aggregate, ACTIVE_CHECKS, ALL_CHECK_IDS } from '../bench/scoring.ts';
+import { BENCHMARK_STATS } from '../src/lib/benchmark-stats.ts';
+
+const bola = (findings: Finding[]) => findings.some((f) => /object level authorization|bola/i.test(f.title));
 
 function f(title: string, extra: Partial<Finding> = {}): Finding {
   return { id: 'x', title, description: '', severity: 'high', fix: '', category: 'RED_TEAM', ...extra };
@@ -58,9 +61,41 @@ test('benchmark: scanner achieves full detection and zero false positives on the
 
     // The active exploit probes (XSS/SQLi/cmd/SSRF/GraphQL/BOLA) are re-confirmed.
     assert.ok(
-      vulnScore.validatedCount >= 5,
-      `Expected >=5 validated findings, got ${vulnScore.validatedCount}`,
+      vulnScore.validatedCount >= BENCHMARK_STATS.validatedVectors,
+      `Expected >=${BENCHMARK_STATS.validatedVectors} validated findings, got ${vulnScore.validatedCount}`,
     );
+  } finally {
+    await vuln.close();
+    await clean.close();
+  }
+});
+
+test('benchmark: authenticated scanning reaches a finding an anonymous scan cannot', async () => {
+  const TOKEN = 'bench-secret-token';
+  const target = await startAuthenticatedTarget(TOKEN);
+  try {
+    const anon = compileStaticFindings(await runDiagnostics(target.url)).findings;
+    const authed = compileStaticFindings(await runDiagnostics(target.url, `Bearer ${TOKEN}`)).findings;
+    assert.equal(bola(anon), false, 'Anonymous scan should not reach the gated BOLA endpoint');
+    assert.equal(bola(authed), true, 'Authenticated scan should reach the gated BOLA endpoint');
+  } finally {
+    await target.close();
+  }
+});
+
+test('published landing-page stats match the live benchmark (no drift)', async () => {
+  // The numbers shown on the site are CI-enforced against the real scanner.
+  assert.equal(BENCHMARK_STATS.totalChecks, ACTIVE_CHECKS.length);
+
+  const vuln = await startVulnerableTarget();
+  const clean = await startCleanTarget();
+  try {
+    const vulnScore = scoreTarget(compileStaticFindings(await runDiagnostics(vuln.url)).findings, ALL_CHECK_IDS);
+    const cleanScore = scoreTarget(compileStaticFindings(await runDiagnostics(clean.url)).findings, []);
+    const metrics = aggregate(vulnScore, cleanScore);
+
+    assert.equal(metrics.detectionRate, BENCHMARK_STATS.detectionRate, 'detection rate drifted from published stat');
+    assert.equal(metrics.falsePositiveRate, BENCHMARK_STATS.falsePositiveRate, 'false-positive rate drifted from published stat');
   } finally {
     await vuln.close();
     await clean.close();
