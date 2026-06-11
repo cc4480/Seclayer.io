@@ -11,3 +11,6 @@ coverage/
 db.json
 *.tmp
 .tmp-test-db.json
+
+# Generated benchmark results (regenerate with `npm run benchmark`)
+bench/results.json

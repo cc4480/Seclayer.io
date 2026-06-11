@@ -11,6 +11,7 @@
     "lint": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "NODE_ENV=test SCANNER_ALLOW_PRIVATE_TARGETS=false DB_FILE=.tmp-test-db.json node --import tsx --test tests/*.test.ts",
+    "benchmark": "SCANNER_ALLOW_PRIVATE_TARGETS=true tsx bench/run.ts",
     "ci": "npm run typecheck && npm test && npm run build"
   },
   "engines": {
