@@ -1,5 +1,16 @@
 import { Finding, Severity, ScanDiagnosticsSummary } from "../src/types.js";
 import crypto from "crypto";
+import {
+  signature,
+  buildBaseline,
+  isPathGenuinelyExposed,
+  isGraphqlIntrospection,
+  isUserObjectLeak,
+  isSqlInjectionEvidence,
+  isCommandInjectionEvidence,
+  isSsrfEvidence,
+  type SoftNotFoundBaseline,
+} from "./scan-calibration.js";
 
 export interface DiagnosticResult {
   url: string;
@@ -119,8 +130,11 @@ async function probeHeaders(
   }
 
   // Technology leaks checking (X-Powered-By, Server, etc.)
+  // Only a Server header that discloses a *version* is a real information leak;
+  // a bare product name ("nginx", "cloudflare") is not actionable and flagging
+  // it produces noise/false positives.
   const serverHeader = result.headers["server"];
-  if (serverHeader && !/cloudflare/i.test(serverHeader)) {
+  if (serverHeader && /\d/.test(serverHeader) && !/cloudflare/i.test(serverHeader)) {
     result.techLeaked.push(`Server: ${serverHeader}`);
   }
   const poweredBy = result.headers["x-powered-by"];
@@ -266,12 +280,10 @@ function runScaScan(
   ];
 
   libraries.forEach((lib) => {
-    if (
-      lib.match.test(htmlText) ||
-      (setCookie &&
-        lib.name === "jQuery 1.x / 2.x" &&
-        /jquery/i.test(htmlText))
-    ) {
+    // Flag only when the actual vulnerable version signature is present. (The
+    // previous "page mentions jquery + sets a cookie" heuristic flagged any
+    // jQuery version, including patched 3.x, as vulnerable — a false positive.)
+    if (lib.match.test(htmlText)) {
       result.scaLibraries.push({
         name: lib.name,
         version: lib.version,
@@ -289,26 +301,54 @@ function runScaScan(
 function runDastAnalysis(htmlText: string, result: DiagnosticResult): void {
   if (!htmlText) return;
 
-  // Find form tags
-  const formRegex = /<form([^>]*action=["']([^"']*)["']([^>]*))>/gi;
+  let targetHost = "";
+  try {
+    targetHost = new URL(result.url).hostname;
+  } catch {
+    /* result.url should always parse; ignore */
+  }
+
+  // Match each <form>...</form> block so the CSRF-token check is scoped to the
+  // individual form rather than the whole page (a token anywhere on the page no
+  // longer masks an unprotected form, and vice-versa).
+  const formBlockRegex = /<form\b([^>]*)>([\s\S]*?)<\/form>/gi;
   let formMatch;
-  while ((formMatch = formRegex.exec(htmlText)) !== null) {
-    const action = formMatch[2];
-    const attrContent = formMatch[1] + formMatch[3];
-    const isPost = /method=["']post["']/i.test(attrContent);
+  while ((formMatch = formBlockRegex.exec(htmlText)) !== null) {
+    const attrs = formMatch[1] || "";
+    const inner = formMatch[2] || "";
+    const isPost = /method=["']?\s*post/i.test(attrs);
+    if (!isPost) continue; // GET forms are not CSRF-state-changing
 
-    // Analyze if CSRF token is present in elements inside or nearby (e.g. check for anti-csrf input tag)
-    // For simplicity: check if we see "csrf" or "token" fields
-    const hasCsrfInput = /csrf|token|xsrf/i.test(htmlText);
+    const actionMatch = attrs.match(/action=["']([^"']*)["']/i);
+    const action = actionMatch ? actionMatch[1] : "";
 
-    if (isPost && !hasCsrfInput) {
+    // Skip forms that submit to a different origin — their CSRF posture is the
+    // third party's responsibility, not this target's (a common false positive
+    // for embedded search, payment, and SSO widgets).
+    if (/^https?:\/\//i.test(action)) {
+      try {
+        if (new URL(action).hostname !== targetHost) continue;
+      } catch {
+        /* malformed action URL; fall through and evaluate it */
+      }
+    }
+
+    // A CSRF defense can be a hidden token field or a framework-specific token
+    // name inside this form. Only inspect this form's own markup.
+    const formMarkup = attrs + inner;
+    const hasCsrfToken =
+      /name=["'][^"']*(csrf|xsrf|_token|authenticity_token|__requestverificationtoken|nonce)[^"']*["']/i.test(
+        formMarkup,
+      ) || /csrf[-_]?token|xsrf[-_]?token/i.test(formMarkup);
+
+    if (!hasCsrfToken) {
       result.dastInputs.push({
-        formAction: action,
+        formAction: action || "(same document)",
         method: "POST",
         csrfPresent: false,
         vulnerability: "Missing Anti-CSRF Token Security Guard",
         severity: "high" as Severity,
-        description: `Vulnerable endpoint detected: Form posting to "${action}" lacks an authenticated anti-forgery token. Attackers can execute unauthorized state-changing operations on behalf of users via malicious cross-site forms.`,
+        description: `Vulnerable endpoint detected: Form posting to "${action || "the current document"}" lacks an authenticated anti-forgery token. Attackers can execute unauthorized state-changing operations on behalf of users via malicious cross-site forms.`,
         fix: `Implement standard CSRF secure tokens. Embed anti-csrf validation fields inside stateful forms and verify matching headers on target backend services.`,
       });
     }
@@ -320,6 +360,7 @@ async function runEasmRecon(
   host: string,
   hostname: string,
   result: DiagnosticResult,
+  baseline: SoftNotFoundBaseline,
 ): Promise<void> {
   // Perform active Domain audit map
   const commonSubdomains = [
@@ -462,7 +503,10 @@ async function runEasmRecon(
       });
       clearTimeout(probeId);
 
-      const isExposed = probeRes.status === 200;
+      const probeBody = await probeRes.text().catch(() => "");
+      // Calibrated check: a 200 alone is not exposure. The response must differ
+      // from the soft-404/SPA baseline and (for known files) match the artifact.
+      const isExposed = isPathGenuinelyExposed(p, probeRes.status, probeBody, baseline);
       result.probedPaths.push({
         path: p,
         status: probeRes.status,
@@ -487,6 +531,24 @@ async function runRedTeamProbes(
   try {
     const fuzzHeaders = { ...headers, "Cache-Control": "no-cache" };
 
+    // Benign control response for the same parameter shape. Injection findings
+    // are only reported when an error/output signature appears here that the
+    // control did NOT contain — eliminating pages that statically include the
+    // signature strings (docs, tutorials, generic error templates).
+    let controlText = "";
+    try {
+      const ctlCtl = new AbortController();
+      const ctlId = setTimeout(() => ctlCtl.abort(), 4000);
+      const ctlRes = await fetch(`${url}/?id=seclayer_control_1`, {
+        headers: fuzzHeaders,
+        signal: ctlCtl.signal,
+      });
+      clearTimeout(ctlId);
+      controlText = await ctlRes.text().catch(() => "");
+    } catch (e) {
+      /* Control unavailable; injection checks below stay conservative. */
+    }
+
     // 1. SQL Injection Active Probe
     try {
       const sqlCtl = new AbortController();
@@ -497,12 +559,7 @@ async function runRedTeamProbes(
       });
       clearTimeout(sqlId);
       const sqlText = await sqlRes.text();
-      if (
-        sqlText.includes("syntax error") ||
-        sqlText.includes("SQL syntax") ||
-        sqlText.includes("ORA-") ||
-        sqlText.includes("PostgreSQL query failed")
-      ) {
+      if (isSqlInjectionEvidence(sqlText, controlText)) {
         redTeamFindings.push({
           testName: "Active SQL Injection Probe",
           payload: "' OR 1=1--",
@@ -551,7 +608,7 @@ async function runRedTeamProbes(
       });
       clearTimeout(cmdId);
       const cmdText = await cmdRes.text();
-      if (cmdText.includes("uid=") && cmdText.includes("gid=")) {
+      if (isCommandInjectionEvidence(cmdText, controlText)) {
         redTeamFindings.push({
           testName: "Active OS Command Injection",
           payload: "; id",
@@ -576,10 +633,7 @@ async function runRedTeamProbes(
       });
       clearTimeout(ssrfId);
       const ssrfText = await ssrfRes.text();
-      if (
-        ssrfText.includes("SSH-2.0-OpenSSH") ||
-        ssrfText.includes("Protocol mismatch")
-      ) {
+      if (isSsrfEvidence(ssrfText, controlText)) {
         redTeamFindings.push({
           testName: "Active Server-Side Request Forgery (SSRF)",
           payload: "http://127.0.0.1:22",
@@ -607,6 +661,7 @@ async function runApiSecurityProbes(
   url: string,
   hostname: string,
   headers: Record<string, string>,
+  baseline: SoftNotFoundBaseline,
 ): Promise<NonNullable<DiagnosticResult["apiSecFindings"]>> {
   const apiSecFindings: NonNullable<DiagnosticResult["apiSecFindings"]> = [];
   try {
@@ -628,7 +683,10 @@ async function runApiSecurityProbes(
       const gqlText = await gqlRes.text();
       const resRaw = `HTTP/1.1 ${gqlRes.status} ${gqlRes.statusText}\n\n${gqlText.substring(0, 500)}...`;
 
-      if (gqlText.includes("__schema") || gqlText.includes("__Type")) {
+      // Require a genuinely parsed introspection result. (A raw substring match
+      // false-positives because the request body itself contains "__schema",
+      // which servers frequently echo back in error messages.)
+      if (isGraphqlIntrospection(gqlText)) {
         apiSecFindings.push({
           testName: "GraphQL Schema Introspection Exposed",
           endpoint: "/graphql",
@@ -656,12 +714,12 @@ async function runApiSecurityProbes(
       });
       clearTimeout(idorId);
       const idorText = await idorRes.text();
-      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorRes.headers.get("content-type") || "text/plain"}\n\n${idorText.substring(0, 500)}...`;
+      const idorContentType = idorRes.headers.get("content-type") || "text/plain";
+      const resRawIdor = `HTTP/1.1 ${idorRes.status} ${idorRes.statusText}\nContent-Type: ${idorContentType}\n\n${idorText.substring(0, 500)}...`;
 
-      if (
-        idorRes.status === 200 &&
-        (idorText.includes("email") || idorText.includes('"role"'))
-      ) {
+      // Require an actual JSON user object distinct from the soft-404 baseline,
+      // not merely the word "email" appearing in an HTML/SPA shell.
+      if (isUserObjectLeak(idorContentType, idorRes.status, idorText, baseline)) {
         apiSecFindings.push({
           testName: "Broken Object Level Authorization (BOLA)",
           endpoint: "/api/v1/users/admin",
@@ -681,6 +739,37 @@ async function runApiSecurityProbes(
   }
 
   return apiSecFindings;
+}
+
+/**
+ * Calibrate what a "does-not-exist" response looks like for this target so the
+ * path and API probes can distinguish a genuine exposure from a soft-404 / SPA
+ * shell. Combines the homepage render with the response to a random unlikely
+ * path (two views of the target's generic template).
+ */
+async function calibrateSoftNotFound(
+  host: string,
+  headers: Record<string, string>,
+  homepageBody: string,
+): Promise<SoftNotFoundBaseline> {
+  const homepageSig = homepageBody ? signature(200, homepageBody) : null;
+  let randomSig: ReturnType<typeof signature> | null = null;
+  try {
+    const ctl = new AbortController();
+    const id = setTimeout(() => ctl.abort(), 2500);
+    const randomPath = `/seclayer-probe-${crypto.randomBytes(8).toString("hex")}`;
+    const res = await fetch(`${host}${randomPath}`, {
+      method: "GET",
+      headers,
+      signal: ctl.signal,
+    });
+    clearTimeout(id);
+    const body = await res.text().catch(() => "");
+    randomSig = signature(res.status, body);
+  } catch (e) {
+    /* No baseline from the random path; the homepage signature still helps. */
+  }
+  return buildBaseline(homepageSig, randomSig);
 }
 
 export async function runDiagnostics(
@@ -730,12 +819,17 @@ export async function runDiagnostics(
     headers["Authorization"] = authHeader;
   }
 
+  // Baseline of how the target answers non-existent content; used to suppress
+  // soft-404 / SPA-shell false positives across the path and API probes.
+  let baseline: SoftNotFoundBaseline = buildBaseline();
+
   try {
     const { htmlText, setCookie } = await probeHeaders(url, headers, result);
     runSastScan(htmlText, result);
     runScaScan(htmlText, setCookie, result);
     runDastAnalysis(htmlText, result);
-    await runEasmRecon(host, hostname, result);
+    baseline = await calibrateSoftNotFound(host, headers, htmlText);
+    await runEasmRecon(host, hostname, result, baseline);
   } catch (err: any) {
     console.warn(
       `Scan connection to ${url} connections failed. Triggering default defensive audit layers.`,
@@ -750,7 +844,7 @@ export async function runDiagnostics(
   result.redTeamFindings = await runRedTeamProbes(url, headers);
 
   // --- API SECURITY TESTING ACTIVE PROBES ---
-  result.apiSecFindings = await runApiSecurityProbes(url, hostname, headers);
+  result.apiSecFindings = await runApiSecurityProbes(url, hostname, headers, baseline);
 
   return result;
 }
