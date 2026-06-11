@@ -23,11 +23,12 @@ export interface PentagiEvidence {
   liveSubdomains: string[];
   leakedTech: string[];
   exposedPaths: string[];
-  exploitFindings: Array<{ name: string; severity: Severity; detail: string; payload?: string }>;
+  exploitFindings: Array<{ name: string; severity: Severity; detail: string; payload?: string; validated: boolean }>;
   dastIssues: Array<{ endpoint: string; issue: string }>;
   worstSeverity: Severity;
   score: number;
   totalFindings: number;
+  validatedCount: number;
 }
 
 /** Distill a diagnostics run + compiled findings into the PentAGI evidence model. */
@@ -44,17 +45,26 @@ export function derivePentagiEvidence(
 
   const exposedPaths = diag.probedPaths.filter((p) => p.exposed).map((p) => p.path);
 
+  // A finding is "validated" when an exploit probe re-confirmed it (bounded PoC).
+  const validatedVectors = new Set(
+    (diag.validatedExploits ?? [])
+      .filter((e) => e.validationStatus === 'validated')
+      .map((e) => e.vector),
+  );
+
   const exploitFindings = [
     ...(diag.redTeamFindings ?? []).map((rt) => ({
       name: rt.testName,
       severity: rt.severity,
       detail: rt.description,
       payload: rt.payload,
+      validated: validatedVectors.has(rt.testName),
     })),
     ...(diag.apiSecFindings ?? []).map((api) => ({
       name: api.testName,
       severity: api.severity,
       detail: api.description,
+      validated: validatedVectors.has(api.testName),
     })),
   ];
 
@@ -77,6 +87,7 @@ export function derivePentagiEvidence(
     worstSeverity: compiled.severity,
     score: compiled.score,
     totalFindings: compiled.findings.length,
+    validatedCount: validatedVectors.size,
   };
 }
 
@@ -147,10 +158,13 @@ export function buildPentagiLogs(evidence: PentagiEvidence): PentagiLog[] {
     });
     evidence.exploitFindings.forEach((f) => {
       const payload = f.payload ? ` Payload: ${f.payload}.` : '';
+      const status = f.validated
+        ? 'VALIDATED (re-confirmed, reproducible PoC captured)'
+        : 'observed';
       logs.push({
         time: at(),
         agent: 'Exploiter Agent',
-        msg: `[${f.severity.toUpperCase()}] ${f.name} confirmed against ${evidence.target}.${payload} ${f.detail}`,
+        msg: `[${f.severity.toUpperCase()}] ${f.name} — ${status} against ${evidence.target}.${payload} ${f.detail}`,
       });
     });
     evidence.dastIssues.forEach((d) => {
@@ -170,7 +184,7 @@ export function buildPentagiLogs(evidence: PentagiEvidence): PentagiLog[] {
     time: at(),
     agent: 'Reporter Agent',
     msg: hasExploit
-      ? `Exploit chain validated. ${evidence.totalFindings} finding(s) correlated; highest severity ${evidence.worstSeverity.toUpperCase()}. Posture score: ${evidence.score}/100. Prioritize immediate remediation.`
+      ? `Exploit chain validated: ${evidence.validatedCount} re-confirmed PoC(s). ${evidence.totalFindings} finding(s) correlated; highest severity ${evidence.worstSeverity.toUpperCase()}. Posture score: ${evidence.score}/100. Prioritize immediate remediation.`
       : `Assessment complete. ${evidence.totalFindings} finding(s) correlated; highest severity ${evidence.worstSeverity.toUpperCase()}. Posture score: ${evidence.score}/100. No high-severity exploit chain was confirmed on this run.`,
   });
   logs.push({

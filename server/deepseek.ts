@@ -172,17 +172,24 @@ Ensure the returned output is strictly valid JSON compliant with the required st
       })()
     }));
 
+    // Validated exploits carry a reproducible PoC artifact in rawRequest/
+    // rawResponse. The AI rebuilds findings from the prompt and would drop that
+    // evidence, so re-attach it to the matching AI finding (or re-append the
+    // validated finding outright). A re-confirmed exploit must never be lost to
+    // summarization.
+    const mergedFindings = preserveValidatedEvidence(finalFindings, staticCompiled.findings);
+
     // Find highest severity from findings
     let finalSeverity: Severity = 'low';
-    if (finalFindings.some(f => f.severity === 'critical')) finalSeverity = 'critical';
-    else if (finalFindings.some(f => f.severity === 'high')) finalSeverity = 'high';
-    else if (finalFindings.some(f => f.severity === 'medium')) finalSeverity = 'medium';
-    else if (finalFindings.some(f => f.severity === 'low')) finalSeverity = 'low';
+    if (mergedFindings.some(f => f.severity === 'critical')) finalSeverity = 'critical';
+    else if (mergedFindings.some(f => f.severity === 'high')) finalSeverity = 'high';
+    else if (mergedFindings.some(f => f.severity === 'medium')) finalSeverity = 'medium';
+    else if (mergedFindings.some(f => f.severity === 'low')) finalSeverity = 'low';
 
     return {
       score: finalScore,
       severity: finalSeverity,
-      findings: finalFindings.length > 0 ? finalFindings : staticCompiled.findings,
+      findings: mergedFindings.length > 0 ? mergedFindings : staticCompiled.findings,
       aiSummary: data.aiSummary || compileLocalSummary(url, staticCompiled)
     };
 
@@ -193,6 +200,37 @@ Ensure the returned output is strictly valid JSON compliant with the required st
       aiSummary: compileLocalSummary(url, staticCompiled)
     };
   }
+}
+
+/**
+ * Ensure findings that carry validated PoC evidence (rawRequest/rawResponse)
+ * survive AI summarization: attach the evidence to a matching AI finding when
+ * one exists, otherwise re-append the validated finding so it is never dropped.
+ */
+function preserveValidatedEvidence(aiFindings: Finding[], staticFindings: Finding[]): Finding[] {
+  const validated = staticFindings.filter((f) => f.rawRequest || f.rawResponse);
+  if (validated.length === 0) return aiFindings;
+
+  const norm = (s: string) => (s || '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  const merged = [...aiFindings];
+
+  for (const v of validated) {
+    const match = merged.find(
+      (f) =>
+        !f.rawRequest &&
+        (norm(f.title) === norm(v.title) ||
+          norm(f.title).includes(norm(v.title)) ||
+          norm(v.title).includes(norm(f.title))),
+    );
+    if (match) {
+      match.rawRequest = v.rawRequest;
+      match.rawResponse = v.rawResponse;
+      if (!match.endpoint && v.endpoint) match.endpoint = v.endpoint;
+    } else {
+      merged.push(v);
+    }
+  }
+  return merged;
 }
 
 function compileLocalSummary(url: string, sc: { score: number; severity: Severity; findings: Finding[] }): string {
@@ -238,6 +276,7 @@ export async function generatePentagiLogs(evidence: PentagiEvidence): Promise<Pe
         worstSeverity: evidence.worstSeverity,
         score: evidence.score,
         totalFindings: evidence.totalFindings,
+        validatedCount: evidence.validatedCount,
       },
       null,
       2,
@@ -253,7 +292,7 @@ ${evidenceJson}
 STRICT GROUNDING RULES:
 - Describe ONLY findings present in the evidence. Do NOT invent vulnerabilities, endpoints, payloads, or exploit chains that are not in the evidence.
 - If "exploitFindings", "exposedPaths", and "dastIssues" are all empty, the Exploiter Agent MUST report that active probes confirmed no exploitable vector, and the Reporter Agent MUST NOT claim a successful exploit.
-- If exploit evidence is present, narrate those specific findings (use their severity and detail).
+- If exploit evidence is present, narrate those specific findings (use their severity and detail). When a finding has "validated": true, state that it was re-confirmed with a reproducible proof-of-concept; do not describe unvalidated findings as proven exploits.
 - The Reporter Agent MUST cite the real score (${evidence.score}/100), total findings (${evidence.totalFindings}), and highest severity (${evidence.worstSeverity}).
 - The first Scout Agent log MUST mention the target "${evidence.target}".
 

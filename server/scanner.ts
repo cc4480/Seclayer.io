@@ -11,6 +11,14 @@ import {
   isSsrfEvidence,
   type SoftNotFoundBaseline,
 } from "./scan-calibration.js";
+import {
+  buildPoc,
+  revalidate,
+  renderPocArtifact,
+  type PocAttempt,
+  type PocRequest,
+  type ValidatedExploit,
+} from "./exploit-validation.js";
 
 export interface DiagnosticResult {
   url: string;
@@ -67,6 +75,8 @@ export interface DiagnosticResult {
     severity: Severity;
     description: string;
     fix: string;
+    rawRequest?: string;
+    rawResponse?: string;
   }>;
   apiSecFindings?: Array<{
     testName: string;
@@ -77,6 +87,8 @@ export interface DiagnosticResult {
     rawRequest: string;
     rawResponse: string;
   }>;
+  /** Bounded, re-confirmed exploit proofs with reproducible PoC artifacts. */
+  validatedExploits?: ValidatedExploit[];
 }
 
 /**
@@ -522,19 +534,29 @@ async function runEasmRecon(
   }
 }
 
-/** Phase 6: active fuzzing probes for SQLi, reflected XSS, command injection, and SSRF. */
+interface RedTeamProbeResult {
+  findings: NonNullable<DiagnosticResult["redTeamFindings"]>;
+  exploits: ValidatedExploit[];
+}
+
+/**
+ * Phase 6: active fuzzing probes for SQLi, reflected XSS, command injection, and
+ * SSRF. Each confirmed signal is re-issued once to confirm reproducibility and
+ * captured as a bounded, reproducible PoC artifact.
+ */
 async function runRedTeamProbes(
   url: string,
   headers: Record<string, string>,
-): Promise<NonNullable<DiagnosticResult["redTeamFindings"]>> {
-  const redTeamFindings: NonNullable<DiagnosticResult["redTeamFindings"]> = [];
+): Promise<RedTeamProbeResult> {
+  const findings: NonNullable<DiagnosticResult["redTeamFindings"]> = [];
+  const exploits: ValidatedExploit[] = [];
   try {
     const fuzzHeaders = { ...headers, "Cache-Control": "no-cache" };
 
     // Benign control response for the same parameter shape. Injection findings
-    // are only reported when an error/output signature appears here that the
-    // control did NOT contain — eliminating pages that statically include the
-    // signature strings (docs, tutorials, generic error templates).
+    // are only reported when an error/output signature appears under the payload
+    // that the control did NOT contain — eliminating pages that statically
+    // include the signature strings (docs, tutorials, generic error templates).
     let controlText = "";
     try {
       const ctlCtl = new AbortController();
@@ -549,111 +571,128 @@ async function runRedTeamProbes(
       /* Control unavailable; injection checks below stay conservative. */
     }
 
-    // 1. SQL Injection Active Probe
-    try {
-      const sqlCtl = new AbortController();
-      const sqlId = setTimeout(() => sqlCtl.abort(), 4000);
-      const sqlRes = await fetch(`${url}/?id=%27%20OR%201%3D1--`, {
-        headers: fuzzHeaders,
-        signal: sqlCtl.signal,
-      });
-      clearTimeout(sqlId);
-      const sqlText = await sqlRes.text();
-      if (isSqlInjectionEvidence(sqlText, controlText)) {
-        redTeamFindings.push({
-          testName: "Active SQL Injection Probe",
-          payload: "' OR 1=1--",
-          severity: "critical",
-          description:
-            "Active Red Team scanning detected database syntax errors reflected in the HTTP response when injecting escaped SQL boundary characters. This indicates an exploitable database injection vulnerability.",
-          fix: "Implement parameterized database queries and prepared statements exclusively. Eliminate dynamic string concatenation for SQL logic.",
-        });
-      }
-    } catch (e) {
-      /* Ignore fetch errors for probe */
-    }
+    const xssTrigger = `xss_probe_${crypto.randomBytes(4).toString("hex")}`;
 
-    // 2. Reflected XSS Active Probe
-    try {
-      const xssCtl = new AbortController();
-      const xssId = setTimeout(() => xssCtl.abort(), 4000);
-      const uniqueTrigger = `xss_probe_${crypto.randomBytes(4).toString("hex")}`;
-      const xssRes = await fetch(
-        `${url}/?q=%3Cscript%3E${uniqueTrigger}%3C%2Fscript%3E`,
-        { headers: fuzzHeaders, signal: xssCtl.signal },
-      );
-      clearTimeout(xssId);
-      const xssText = await xssRes.text();
-      if (xssText.includes(`<script>${uniqueTrigger}</script>`)) {
-        redTeamFindings.push({
-          testName: "Active Reflected XSS Probe",
-          payload: `<script>${uniqueTrigger}</script>`,
-          severity: "high",
-          description:
-            "Active Red Team fuzzing successfully reflected unencoded HTML/JavaScript tags directly in the immediate HTTP response, confirming a Reflected Cross-Site Scripting (XSS) vulnerability.",
-          fix: "Implement deep context-aware output encoding. Deploy restrictive Content Security Policy (CSP) headers to prevent unauthorized inline script execution.",
-        });
-      }
-    } catch (e) {
-      /* Ignore fetch errors for probe */
-    }
+    // Each descriptor is a read-only probe. `matcher` returns true only when the
+    // response exhibits the payload-dependent evidence signal.
+    const descriptors: Array<{
+      vector: string;
+      endpoint: string;
+      payload: string;
+      path: string;
+      severity: Severity;
+      signal: string;
+      description: string;
+      fix: string;
+      matcher: (body: string) => boolean;
+    }> = [
+      {
+        vector: "Active SQL Injection Probe",
+        endpoint: "/?id=",
+        payload: "' OR 1=1--",
+        path: "/?id=%27%20OR%201%3D1--",
+        severity: "critical",
+        signal: "Database error string present under injection but absent in the benign control",
+        description:
+          "Active Red Team scanning detected database syntax errors reflected in the HTTP response when injecting escaped SQL boundary characters. This indicates an exploitable database injection vulnerability.",
+        fix: "Implement parameterized database queries and prepared statements exclusively. Eliminate dynamic string concatenation for SQL logic.",
+        matcher: (body) => isSqlInjectionEvidence(body, controlText),
+      },
+      {
+        vector: "Active Reflected XSS Probe",
+        endpoint: "/?q=",
+        payload: `<script>${xssTrigger}</script>`,
+        path: `/?q=%3Cscript%3E${xssTrigger}%3C%2Fscript%3E`,
+        severity: "high",
+        signal: "Unique, unguessable script payload reflected unencoded in the response",
+        description:
+          "Active Red Team fuzzing successfully reflected unencoded HTML/JavaScript tags directly in the immediate HTTP response, confirming a Reflected Cross-Site Scripting (XSS) vulnerability.",
+        fix: "Implement deep context-aware output encoding. Deploy restrictive Content Security Policy (CSP) headers to prevent unauthorized inline script execution.",
+        matcher: (body) => body.includes(`<script>${xssTrigger}</script>`),
+      },
+      {
+        vector: "Active OS Command Injection",
+        endpoint: "/?ping=",
+        payload: "127.0.0.1; id",
+        path: "/?ping=127.0.0.1%3B+id",
+        severity: "critical",
+        signal: "`id` command output (uid=/gid=) present under injection but absent in the control",
+        description:
+          "Active Red Team command injection fuzzing triggered a successful `id` evaluation on the backend, exposing sensitive host system access and execution permissions.",
+        fix: "Avoid invoking underlying operating system commands entirely. If required, use strictly sanitized arguments array APIs, never shell-interpolated execution.",
+        matcher: (body) => isCommandInjectionEvidence(body, controlText),
+      },
+      {
+        vector: "Active Server-Side Request Forgery (SSRF)",
+        endpoint: "/?url=",
+        payload: "http://127.0.0.1:22",
+        path: "/?url=http://127.0.0.1:22",
+        severity: "critical",
+        signal: "Internal service (SSH) banner returned under injection but absent in the control",
+        description:
+          "Active Red Team scanning identified an insecure proxy/fetch behavior that permitted requests returning local loopback (SSH) banner data, confirming an SSRF vulnerability.",
+        fix: "Enforce strict network path isolation for backend fetches. Implement allow-listing filters and block internal Class A/B/C IP architectures.",
+        matcher: (body) => isSsrfEvidence(body, controlText),
+      },
+    ];
 
-    // 3. OS Command Injection Active Probe
-    try {
-      const cmdCtl = new AbortController();
-      const cmdId = setTimeout(() => cmdCtl.abort(), 4000);
-      const cmdRes = await fetch(`${url}/?ping=127.0.0.1%3B+id`, {
-        headers: fuzzHeaders,
-        signal: cmdCtl.signal,
-      });
-      clearTimeout(cmdId);
-      const cmdText = await cmdRes.text();
-      if (isCommandInjectionEvidence(cmdText, controlText)) {
-        redTeamFindings.push({
-          testName: "Active OS Command Injection",
-          payload: "; id",
-          severity: "critical",
-          description:
-            "Active Red Team command injection fuzzing triggered a successful `id` evaluation on the backend, exposing sensitive host system access and execution permissions.",
-          fix: "Avoid invoking underlying operating system commands entirely. If required, use strictly sanitized arguments array APIs, never shell-interpolated execution.",
-        });
-      }
-    } catch (e) {
-      /* Ignore fetch errors for probe */
-    }
+    for (const d of descriptors) {
+      try {
+        const reqUrl = `${url}${d.path}`;
+        const req: PocRequest = {
+          method: "GET",
+          url: reqUrl,
+          headers: fuzzHeaders,
+          payload: d.payload,
+        };
 
-    // 4. SSRF Active Probe
-    try {
-      const ssrfCtl = new AbortController();
-      const ssrfId = setTimeout(() => ssrfCtl.abort(), 4000);
-      // Attempting to request localhost loopback or internal metadata
-      const ssrfRes = await fetch(`${url}/?url=http://127.0.0.1:22`, {
-        headers: fuzzHeaders,
-        signal: ssrfCtl.signal,
-      });
-      clearTimeout(ssrfId);
-      const ssrfText = await ssrfRes.text();
-      if (isSsrfEvidence(ssrfText, controlText)) {
-        redTeamFindings.push({
-          testName: "Active Server-Side Request Forgery (SSRF)",
-          payload: "http://127.0.0.1:22",
-          severity: "critical",
-          description:
-            "Active Red Team scanning identified an insecure proxy/fetch behavior that permitted requests returning local loopback (SSH) banner data, confirming an SSRF vulnerability.",
-          fix: "Enforce strict network path isolation for backend fetches. Implement allow-listing filters and block internal Class A/B/C IP architectures.",
+        const ctl = new AbortController();
+        const id = setTimeout(() => ctl.abort(), 4000);
+        const res = await fetch(reqUrl, { headers: fuzzHeaders, signal: ctl.signal });
+        clearTimeout(id);
+        const text = await res.text();
+        if (!d.matcher(text)) continue;
+
+        // Confirmed once during detection; re-issue once to confirm it reproduces.
+        const attempt1: PocAttempt = { ok: true, status: res.status, matched: true };
+        const attempt2 = await revalidate(req, d.matcher);
+
+        const exploit = buildPoc({
+          vector: d.vector,
+          severity: d.severity,
+          endpoint: d.endpoint,
+          request: req,
+          signal: d.signal,
+          controlAbsent: true,
+          responseBody: text,
+          attempts: [attempt1, attempt2],
         });
+        const art = renderPocArtifact(exploit);
+
+        findings.push({
+          testName: d.vector,
+          payload: d.payload,
+          severity: d.severity,
+          description: d.description,
+          fix: d.fix,
+          rawRequest: art.rawRequest,
+          rawResponse: art.rawResponse,
+        });
+        exploits.push(exploit);
+      } catch (e) {
+        /* Ignore fetch errors for an individual probe. */
       }
-    } catch (e) {
-      /* Ignore fetch errors for probe */
     }
   } catch (globalErr) {
-    console.warn(
-      "Red team active fuzzing encounted top-level error",
-      globalErr,
-    );
+    console.warn("Red team active fuzzing encounted top-level error", globalErr);
   }
 
-  return redTeamFindings;
+  return { findings, exploits };
+}
+
+interface ApiProbeResult {
+  findings: NonNullable<DiagnosticResult["apiSecFindings"]>;
+  exploits: ValidatedExploit[];
 }
 
 /** Phase 7: probe common API endpoints for GraphQL introspection and broken object-level authorization. */
@@ -662,8 +701,9 @@ async function runApiSecurityProbes(
   hostname: string,
   headers: Record<string, string>,
   baseline: SoftNotFoundBaseline,
-): Promise<NonNullable<DiagnosticResult["apiSecFindings"]>> {
+): Promise<ApiProbeResult> {
   const apiSecFindings: NonNullable<DiagnosticResult["apiSecFindings"]> = [];
+  const exploits: ValidatedExploit[] = [];
   try {
     const apiHeaders = { ...headers, "Cache-Control": "no-cache" };
 
@@ -687,6 +727,27 @@ async function runApiSecurityProbes(
       // false-positives because the request body itself contains "__schema",
       // which servers frequently echo back in error messages.)
       if (isGraphqlIntrospection(gqlText)) {
+        const gqlBody = JSON.stringify({ query: "{__schema{types{name}}}" });
+        const req: PocRequest = {
+          method: "POST",
+          url: `${url}/graphql`,
+          headers: { ...apiHeaders, "Content-Type": "application/json" },
+          bodyText: gqlBody,
+          payload: "{__schema{types{name}}}",
+        };
+        const attempt1: PocAttempt = { ok: true, status: gqlRes.status, matched: true };
+        const attempt2 = await revalidate(req, isGraphqlIntrospection);
+        const exploit = buildPoc({
+          vector: "GraphQL Schema Introspection Exposed",
+          severity: "high",
+          endpoint: "/graphql",
+          request: req,
+          signal: "Parsed introspection result returned a populated __schema.types array",
+          controlAbsent: true,
+          responseBody: gqlText,
+          attempts: [attempt1, attempt2],
+        });
+        const art = renderPocArtifact(exploit);
         apiSecFindings.push({
           testName: "GraphQL Schema Introspection Exposed",
           endpoint: "/graphql",
@@ -694,9 +755,10 @@ async function runApiSecurityProbes(
           description:
             "An active API endpoint probe discovered that GraphQL introspection is globally reachable. Attackers can effortlessly dump the entire undocumented internal schema definitions.",
           fix: "Disable introspection blocks in the production GraphQL backend. Shield API with explicit token authentication schemas.",
-          rawRequest: reqRaw,
-          rawResponse: resRaw,
+          rawRequest: art.rawRequest,
+          rawResponse: art.rawResponse,
         });
+        exploits.push(exploit);
       }
     } catch (e) {
       /* Ignore fetch errors */
@@ -720,6 +782,26 @@ async function runApiSecurityProbes(
       // Require an actual JSON user object distinct from the soft-404 baseline,
       // not merely the word "email" appearing in an HTML/SPA shell.
       if (isUserObjectLeak(idorContentType, idorRes.status, idorText, baseline)) {
+        const req: PocRequest = {
+          method: "GET",
+          url: `${url}/api/v1/users/admin`,
+          headers: apiHeaders,
+          payload: "GET /api/v1/users/admin (no authorization)",
+        };
+        const reMatcher = (body: string) => isUserObjectLeak("application/json", 200, body, baseline);
+        const attempt1: PocAttempt = { ok: true, status: idorRes.status, matched: true };
+        const attempt2 = await revalidate(req, reMatcher);
+        const exploit = buildPoc({
+          vector: "Broken Object Level Authorization (BOLA)",
+          severity: "critical",
+          endpoint: "/api/v1/users/admin",
+          request: req,
+          signal: "Protected user object returned as JSON to an unauthenticated request",
+          controlAbsent: true,
+          responseBody: idorText,
+          attempts: [attempt1, attempt2],
+        });
+        const art = renderPocArtifact(exploit);
         apiSecFindings.push({
           testName: "Broken Object Level Authorization (BOLA)",
           endpoint: "/api/v1/users/admin",
@@ -727,9 +809,10 @@ async function runApiSecurityProbes(
           description:
             "API testing successfully resolved protected user entities directly by probing enumerated resource IDs, overriding local tenant boundaries.",
           fix: "Enforce stringent object-level resource verification. Explicitly map authorization states against the retrieved user objects inside controller logic.",
-          rawRequest: reqRawIdor,
-          rawResponse: resRawIdor,
+          rawRequest: art.rawRequest,
+          rawResponse: art.rawResponse,
         });
+        exploits.push(exploit);
       }
     } catch (e) {
       /* Ignore fetch errors */
@@ -738,7 +821,7 @@ async function runApiSecurityProbes(
     console.warn("API Security fuzzing encounted top-level error", globalErr);
   }
 
-  return apiSecFindings;
+  return { findings: apiSecFindings, exploits };
 }
 
 /**
@@ -841,10 +924,15 @@ export async function runDiagnostics(
   }
 
   // --- RED TEAM ACTIVE FUZZING PROBES ---
-  result.redTeamFindings = await runRedTeamProbes(url, headers);
+  const redTeam = await runRedTeamProbes(url, headers);
+  result.redTeamFindings = redTeam.findings;
 
   // --- API SECURITY TESTING ACTIVE PROBES ---
-  result.apiSecFindings = await runApiSecurityProbes(url, hostname, headers, baseline);
+  const apiSec = await runApiSecurityProbes(url, hostname, headers, baseline);
+  result.apiSecFindings = apiSec.findings;
+
+  // Bounded, re-confirmed exploit proofs aggregated across the active probes.
+  result.validatedExploits = [...redTeam.exploits, ...apiSec.exploits];
 
   return result;
 }
@@ -1063,6 +1151,8 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         confidence: "high",
         fix: rt.fix,
         category: "RED_TEAM",
+        rawRequest: rt.rawRequest,
+        rawResponse: rt.rawResponse,
       });
       // Deduct score dynamically based on aggressive vulnerability findings
       score -= rt.severity === "critical" ? 25 : 15;
