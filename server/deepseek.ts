@@ -2,6 +2,7 @@ import OpenAI from 'openai';
 import { Finding, Severity } from '../src/types.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
+import { buildPentagiLogs, type PentagiEvidence, type PentagiLog } from './pentagi.js';
 
 /**
  * AI integration layer, backed by DeepSeek via its OpenAI-compatible API.
@@ -204,56 +205,90 @@ function compileLocalSummary(url: string, sc: { score: number; severity: Severit
   return `Seclayer verification scanner reports that ${url} displays strong basic defensive hygiene. No critical system exposures or active data leaks were detected. To reach industry-leading status, minor improvements should be introduced to satisfy full HSTS preload targets and deploy advanced content routing headers.`;
 }
 
-export async function generatePentagiLogs(url: string | undefined): Promise<{ time: string; agent: string; msg: string; }[]> {
-  const defaultUrl = url || 'staging.api.vulnerable.org';
+/**
+ * Narrate a PentAGI autonomous-agent activity feed from real scan evidence.
+ *
+ * The AI is used only to phrase what the scanner actually observed — it is
+ * explicitly instructed never to invent vulnerabilities beyond the supplied
+ * evidence. When no AI provider is configured (or the call fails), the
+ * deterministic `buildPentagiLogs` renderer produces an equivalent grounded
+ * feed, so the feature is fully functional and truthful either way.
+ */
+export async function generatePentagiLogs(evidence: PentagiEvidence): Promise<PentagiLog[]> {
+  const fallbackLogs = buildPentagiLogs(evidence);
   const ai = getAiClient();
-
-  const fallbackLogs = [
-    { time: '00:01', agent: 'Scout Agent', msg: `Core DNS Enumeration on domain base completed. Discovered open host ${defaultUrl}.` },
-    { time: '00:04', agent: 'Scout Agent', msg: 'Probing HTTP port 443. Technology fingerprint matches Node.js Express & Apache HTTP Server v2.4.' },
-    { time: '00:08', agent: 'Scout Agent', msg: 'Identified dynamic endpoint list: /api/v1/auth/login, /api/v1/support/ticket, /recovery/reset.' },
-    { time: '00:12', agent: 'Exploiter Agent', msg: 'Testing "/recovery/reset" endpoint. Found active open redirect.' },
-    { time: '00:15', agent: 'Exploiter Agent', msg: 'Constructing dynamic CSRF token bypass session.' },
-    { time: '00:19', agent: 'Exploiter Agent', msg: 'Chaining Open Redirect bypass with active session forgery. Admin user redirected -> Session token exfiltrated to PentAGI listener hook!' },
-    { time: '00:23', agent: 'Exploiter Agent', msg: 'Injected Administrative Bearer key. Successfully bypassed authentication constraints.' },
-    { time: '00:27', agent: 'Reporter Agent', msg: 'Vulnerability exploit chain validated. Severity calculation: CRITICAL (10.0 CVSS).' },
-    { time: '00:30', agent: 'Reporter Agent', msg: 'Standardized DefectDojo JSON findings schema generated.' }
-  ];
-
   if (!ai) {
     return fallbackLogs;
   }
 
   try {
-    const prompt = `You are PentAGI, an Autonomous Multi-Agent Multi-Step Pentest Coordinator.
-Your goal is to simulate a realistic sequence of actions taken by three AI agents: "Scout Agent" (performs recon/scanning), "Exploiter Agent" (finds and tests vulnerabilities), and "Reporter Agent" (summarizes impact and generates artifacts).
-The target is "${defaultUrl}".
+    const evidenceJson = JSON.stringify(
+      {
+        target: evidence.target,
+        hostname: evidence.hostname,
+        responseStatus: evidence.responseStatus,
+        sslSecure: evidence.sslSecure,
+        ip: evidence.ip,
+        nameserver: evidence.nameserver,
+        liveSubdomains: evidence.liveSubdomains,
+        leakedTech: evidence.leakedTech,
+        exposedPaths: evidence.exposedPaths,
+        exploitFindings: evidence.exploitFindings,
+        dastIssues: evidence.dastIssues,
+        worstSeverity: evidence.worstSeverity,
+        score: evidence.score,
+        totalFindings: evidence.totalFindings,
+      },
+      null,
+      2,
+    );
 
-Generate an array of 6 to 9 log messages that sequentially describe a successful multi-stage attack simulation ending with a report generation.
+    const prompt = `You are PentAGI, an Autonomous Multi-Agent Multi-Step Pentest Coordinator narrating the work of three agents: "Scout Agent" (recon), "Exploiter Agent" (active vulnerability testing), and "Reporter Agent" (impact summary + artifacts).
 
-Return ONLY a JSON object (no markdown, no code fences) containing a single "logs" array. Each log object MUST have:
-1. "time": a string formatted as "MM:SS" (e.g. "00:01", "00:15", "01:30") showing elapsed time in the operation. Ensure the time progresses chronologically.
+You are given the REAL evidence collected by a live black-box scan of "${evidence.target}". Narrate a chronological activity feed describing ONLY what this evidence supports.
+
+REAL SCAN EVIDENCE (JSON):
+${evidenceJson}
+
+STRICT GROUNDING RULES:
+- Describe ONLY findings present in the evidence. Do NOT invent vulnerabilities, endpoints, payloads, or exploit chains that are not in the evidence.
+- If "exploitFindings", "exposedPaths", and "dastIssues" are all empty, the Exploiter Agent MUST report that active probes confirmed no exploitable vector, and the Reporter Agent MUST NOT claim a successful exploit.
+- If exploit evidence is present, narrate those specific findings (use their severity and detail).
+- The Reporter Agent MUST cite the real score (${evidence.score}/100), total findings (${evidence.totalFindings}), and highest severity (${evidence.worstSeverity}).
+- The first Scout Agent log MUST mention the target "${evidence.target}".
+
+Return ONLY a JSON object (no markdown, no code fences) containing a single "logs" array of 6 to 10 objects. Each log object MUST have:
+1. "time": a string "MM:SS" of elapsed time, strictly increasing chronologically.
 2. "agent": strictly one of "Scout Agent", "Exploiter Agent", or "Reporter Agent".
-3. "msg": the log message describing what the agent is doing or has found. Make it sound highly technical, professional, and cyber-security focused. Mention the target url "${defaultUrl}" in the first Scout log.
+3. "msg": a technical, professional log line grounded in the evidence.
 
-Do NOT use fake placeholders like "example.com" other than the provided target.
 Return ONLY valid JSON compliant with the requested schema.`;
 
     const data = await runJsonCompletion(
       ai,
       config.deepseek.logModel,
-      'You are a security simulation engine that always responds with strictly valid JSON.',
+      'You are a security analysis engine that narrates only real evidence and always responds with strictly valid JSON.',
       prompt,
-      0.7,
-      defaultUrl,
+      0.6,
+      evidence.target,
     );
 
     if (data.logs && Array.isArray(data.logs) && data.logs.length > 0) {
-      return data.logs;
+      // Keep only entries matching the agent contract; fall back if the model drifts.
+      const cleaned: PentagiLog[] = data.logs
+        .filter(
+          (l: any) =>
+            l &&
+            typeof l.time === 'string' &&
+            typeof l.msg === 'string' &&
+            ['Scout Agent', 'Exploiter Agent', 'Reporter Agent'].includes(l.agent),
+        )
+        .map((l: any) => ({ time: l.time, agent: l.agent, msg: l.msg }));
+      if (cleaned.length > 0) return cleaned;
     }
     return fallbackLogs;
   } catch (err: any) {
-    logger.warn('DeepSeek PentAGI log generation failed; using fallback logs.', { err });
+    logger.warn('DeepSeek PentAGI log generation failed; using grounded fallback logs.', { err });
     return fallbackLogs;
   }
 }

@@ -17,5 +17,5 @@ export function registerEnterpriseRoutes(app: Express, scanLimiter: RequestHandl
   registerEasmRoutes(app, scanLimiter);
   registerHadrianRoutes(app, scanLimiter);
   registerIastRoutes(app, scanLimiter);
-  registerPentagiRoutes(app);
+  registerPentagiRoutes(app, scanLimiter);
 }
