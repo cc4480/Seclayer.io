@@ -32,6 +32,18 @@ function query(rawUrl: string): URLSearchParams {
   return new URLSearchParams(i >= 0 ? rawUrl.slice(i + 1) : '');
 }
 
+function readBody(req: http.IncomingMessage): Promise<string> {
+  return new Promise((resolve) => {
+    let data = '';
+    req.on('data', (chunk) => {
+      data += chunk;
+      if (data.length > 1_000_000) req.destroy();
+    });
+    req.on('end', () => resolve(data));
+    req.on('error', () => resolve(data));
+  });
+}
+
 function listen(handler: http.RequestListener): Promise<BenchTarget> {
   return new Promise((resolve) => {
     const server = http.createServer(handler);
@@ -155,6 +167,136 @@ export function startCleanTarget(): Promise<BenchTarget> {
       'Referrer-Policy': 'no-referrer',
     });
     res.end(shell);
+  });
+}
+
+const ORDERS_PATH = /^\/api\/orders\/(\d+)$/;
+
+/**
+ * Authenticated, multi-page target with two chain vulnerabilities discoverable
+ * only after the crawler follows links behind the Bearer token:
+ *   - Stored XSS: the guestbook persists a comment and renders it UNENCODED.
+ *   - IDOR: /api/orders/{id} returns any order to any authenticated caller.
+ */
+export function startChainTarget(token: string): Promise<BenchTarget> {
+  const comments: string[] = [];
+  return listen(async (req, res) => {
+    const path = normalizePath(req.url || '/');
+    const authed = (req.headers['authorization'] || '') === `Bearer ${token}`;
+    if (!authed) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    const orderMatch = path.match(ORDERS_PATH);
+    if (orderMatch) {
+      const id = Number(orderMatch[1]);
+      if (id > 10000) {
+        res.writeHead(404, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ error: 'not found' }));
+        return;
+      }
+      // No ownership check — any id is returned (IDOR).
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ id, item: `Order #${id}`, owner: `user${id}`, total: id * 10 }));
+      return;
+    }
+
+    if (path === '/guestbook') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const comment = new URLSearchParams(body).get('comment') || '';
+        comments.push(comment); // stored raw
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body>Saved. <a href="/guestbook">Back</a></body></html>');
+        return;
+      }
+      const rendered = comments.map((c) => `<p>${c}</p>`).join(''); // rendered UNENCODED
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Guestbook</h1>' +
+          '<form method="post" action="/guestbook"><textarea name="comment"></textarea><button>Post</button></form>' +
+          `<div class="comments">${rendered}</div></body></html>`,
+      );
+      return;
+    }
+
+    if (path === '/' || path === '') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Members Area</h1><ul>' +
+          '<li><a href="/guestbook">Guestbook</a></li>' +
+          '<li><a href="/api/orders/1">Your order #1</a></li>' +
+          '</ul></body></html>',
+      );
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  });
+}
+
+/**
+ * The hardened counterpart: same authenticated multi-page surface, but the
+ * guestbook output-encodes comments and /api/orders enforces ownership. A
+ * correct scanner finds neither chain vulnerability here.
+ */
+export function startCleanChainTarget(token: string): Promise<BenchTarget> {
+  const comments: string[] = [];
+  const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return listen(async (req, res) => {
+    const path = normalizePath(req.url || '/');
+    const authed = (req.headers['authorization'] || '') === `Bearer ${token}`;
+    if (!authed) {
+      res.writeHead(401, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'unauthorized' }));
+      return;
+    }
+
+    const orderMatch = path.match(ORDERS_PATH);
+    if (orderMatch) {
+      const id = Number(orderMatch[1]);
+      if (id === 1) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ id, item: 'Order #1', owner: 'user1', total: 10 }));
+      } else {
+        res.writeHead(403, { 'Content-Type': 'application/json' }); // ownership enforced
+        res.end(JSON.stringify({ error: 'forbidden' }));
+      }
+      return;
+    }
+
+    if (path === '/guestbook') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        comments.push(new URLSearchParams(body).get('comment') || '');
+        res.writeHead(200, { 'Content-Type': 'text/html' });
+        res.end('<html><body>Saved. <a href="/guestbook">Back</a></body></html>');
+        return;
+      }
+      const rendered = comments.map((c) => `<p>${escape(c)}</p>`).join(''); // encoded
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Guestbook</h1>' +
+          '<form method="post" action="/guestbook"><textarea name="comment"></textarea><button>Post</button></form>' +
+          `<div class="comments">${rendered}</div></body></html>`,
+      );
+      return;
+    }
+
+    if (path === '/' || path === '') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Members Area</h1><ul>' +
+          '<li><a href="/guestbook">Guestbook</a></li>' +
+          '<li><a href="/api/orders/1">Your order #1</a></li>' +
+          '</ul></body></html>',
+      );
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
   });
 }
 

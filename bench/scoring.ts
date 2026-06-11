@@ -39,6 +39,9 @@ export const ACTIVE_CHECKS: ActiveCheck[] = [
   { id: 'outdated_lib', label: 'Outdated Library (SCA)', detect: (f) => has(f, (x) => /outdated library/i.test(x.title)) },
   // Dynamic analysis
   { id: 'csrf', label: 'Missing CSRF Token', detect: (f) => has(f, (x) => /csrf/i.test(x.title)) },
+  // Multi-page / authenticated chains
+  { id: 'stored_xss', label: 'Stored XSS (multi-page)', detect: (f) => has(f, (x) => /stored cross-site scripting|stored xss/i.test(x.title)) },
+  { id: 'idor', label: 'IDOR chain (authenticated)', detect: (f) => has(f, (x) => /insecure direct object reference|idor/i.test(x.title)) },
 ];
 
 export interface TargetScore {

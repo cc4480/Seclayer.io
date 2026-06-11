@@ -2,7 +2,13 @@ import fs from 'fs';
 import path from 'path';
 import type { Finding } from '../src/types.js';
 import { runDiagnostics, compileStaticFindings } from '../server/scanner.js';
-import { startVulnerableTarget, startCleanTarget, startAuthenticatedTarget } from './fixtures.js';
+import {
+  startVulnerableTarget,
+  startCleanTarget,
+  startAuthenticatedTarget,
+  startChainTarget,
+  startCleanChainTarget,
+} from './fixtures.js';
 import { scoreTarget, aggregate, ACTIVE_CHECKS, ALL_CHECK_IDS } from './scoring.js';
 
 /**
@@ -26,12 +32,17 @@ function pct(n: number): string {
 }
 
 async function main() {
+  const TOKEN = 'bench-secret-token';
   const vuln = await startVulnerableTarget();
   const clean = await startCleanTarget();
+  const chain = await startChainTarget(TOKEN);
+  const cleanChain = await startCleanChainTarget(TOKEN);
 
   try {
-    const vulnFindings = await scan(vuln.url);
-    const cleanFindings = await scan(clean.url);
+    // The single-page classes come from the vuln/clean targets; the multi-page
+    // chain classes (stored XSS, IDOR) require an authenticated crawl.
+    const vulnFindings = [...(await scan(vuln.url)), ...(await scan(chain.url, `Bearer ${TOKEN}`))];
+    const cleanFindings = [...(await scan(clean.url)), ...(await scan(cleanChain.url, `Bearer ${TOKEN}`))];
 
     const vulnScore = scoreTarget(vulnFindings, ALL_CHECK_IDS);
     const cleanScore = scoreTarget(cleanFindings, []); // nothing should fire here
@@ -55,7 +66,6 @@ async function main() {
     }
 
     // Authenticated scanning: a token unlocks a finding an anonymous scan misses.
-    const TOKEN = 'bench-secret-token';
     const authTarget = await startAuthenticatedTarget(TOKEN);
     let authProven = false;
     try {
@@ -119,6 +129,8 @@ async function main() {
   } finally {
     await vuln.close();
     await clean.close();
+    await chain.close();
+    await cleanChain.close();
   }
 }
 

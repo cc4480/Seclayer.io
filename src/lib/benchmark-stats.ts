@@ -9,14 +9,14 @@
  */
 export const BENCHMARK_STATS = {
   /** Distinct vulnerability classes covered by the benchmark corpus. */
-  totalChecks: 12,
-  /** Recall on the vulnerable fixture: detected / planted. */
+  totalChecks: 14,
+  /** Recall on the vulnerable fixtures: detected / planted. */
   detectionRate: 1,
-  /** Active-probe false positives on the decoy-laden clean fixture. */
+  /** False positives on the decoy-laden clean fixtures. */
   falsePositiveRate: 0,
   /** Exploit vectors re-confirmed with a reproducible PoC. */
-  validatedVectors: 6,
-  /** Authenticated scanning surfaces findings an anonymous scan cannot reach. */
+  validatedVectors: 8,
+  /** Authenticated, multi-page scanning surfaces findings an anonymous scan cannot. */
   authenticatedScanning: true,
 } as const;
 

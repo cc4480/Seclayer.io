@@ -19,6 +19,8 @@ import {
   type PocRequest,
   type ValidatedExploit,
 } from "./exploit-validation.js";
+import { crawl as crawlSite } from "./crawler.js";
+import { detectStoredXss, detectIdor } from "./chain-detectors.js";
 
 export interface DiagnosticResult {
   url: string;
@@ -91,6 +93,8 @@ export interface DiagnosticResult {
   }>;
   /** Bounded, re-confirmed exploit proofs with reproducible PoC artifacts. */
   validatedExploits?: ValidatedExploit[];
+  /** Multi-page crawl coverage summary. */
+  crawl?: { pagesVisited: number; formsFound: number; idRefsFound: number };
 }
 
 /**
@@ -936,8 +940,33 @@ export async function runDiagnostics(
   const apiSec = await runApiSecurityProbes(url, hostname, headers, baseline);
   result.apiSecFindings = apiSec.findings;
 
-  // Bounded, re-confirmed exploit proofs aggregated across the active probes.
-  result.validatedExploits = [...redTeam.exploits, ...apiSec.exploits];
+  // --- MULTI-PAGE CRAWL + CHAIN DETECTORS (stored XSS, IDOR) ---
+  const chainExploits: ValidatedExploit[] = [];
+  try {
+    const crawlResult = await crawlSite(url, { headers });
+    result.crawl = {
+      pagesVisited: crawlResult.pages.length,
+      formsFound: crawlResult.forms.length,
+      idRefsFound: crawlResult.idRefs.length,
+    };
+
+    const stored = await detectStoredXss(crawlResult, headers);
+    if (stored.findings.length > 0) {
+      result.redTeamFindings = [...(result.redTeamFindings ?? []), ...stored.findings];
+      chainExploits.push(...stored.exploits);
+    }
+
+    const idor = await detectIdor(crawlResult, headers);
+    if (idor.findings.length > 0) {
+      result.apiSecFindings = [...(result.apiSecFindings ?? []), ...idor.findings];
+      chainExploits.push(...idor.exploits);
+    }
+  } catch (err) {
+    console.warn("Crawl / chain detection encountered a top-level error", err);
+  }
+
+  // Bounded, re-confirmed exploit proofs aggregated across all probes.
+  result.validatedExploits = [...redTeam.exploits, ...apiSec.exploits, ...chainExploits];
 
   return result;
 }

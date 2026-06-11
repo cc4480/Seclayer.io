@@ -16,26 +16,33 @@ npm test               # the same checks run as a CI-gated test (tests/benchmark
 
 Local fixture targets with a known ground truth (`bench/fixtures.ts`):
 
-- **Vulnerable target** — exposes exactly one genuine instance of each of the
-  **12 detectable vulnerability classes**, shaped to match what the scanner
-  actually sends: Reflected XSS, SQL Injection, OS Command Injection, SSRF,
-  GraphQL introspection, BOLA, exposed `.env`, exposed `.git/config`, exposed
-  `phpinfo()`, a hardcoded secret (SAST), an outdated library (SCA), and a
-  CSRF-unprotected form. Unknown paths return a real 404 so the soft-404
-  baseline is clean.
+- **Vulnerable target** — exposes one genuine instance of each single-page
+  class, shaped to match what the scanner actually sends: Reflected XSS, SQL
+  Injection, OS Command Injection, SSRF, GraphQL introspection, BOLA, exposed
+  `.env`, exposed `.git/config`, exposed `phpinfo()`, a hardcoded secret (SAST),
+  an outdated library (SCA), and a CSRF-unprotected form.
 
-- **Clean target** — a hardened app and a deliberate **false-positive trap**. It
-  answers `200` for *every* path with the same shell (soft-404) and embeds every
-  decoy a naive scanner keys on: `SQL syntax`, `uid=0(root) gid=…`, `__schema`,
-  `email`, `Protocol mismatch`, a near-miss `AKIA…` secret, a **patched** jQuery
-  3.x, a CSRF-protected form, and a reflected — but HTML-encoded — query
-  parameter. Its `/graphql` echoes the query in an error (so the response
-  contains `__schema` without being a real introspection result). A correct
-  scanner reports **zero** findings here.
+- **Chain target (authenticated, multi-page)** — two vulnerabilities reachable
+  only after the crawler follows links behind a Bearer token: **stored XSS** (a
+  guestbook persists a comment and renders it unencoded on a later GET) and an
+  **IDOR chain** (`/api/orders/{id}` returns any order to any authenticated
+  caller). This exercises the crawler, authenticated flow, and the multi-request
+  chain detectors — **14 vulnerability classes** in total.
+
+- **Clean targets** — a hardened single-page app and a hardened chain app,
+  together a deliberate **false-positive trap**. The single-page one answers
+  `200` for *every* path with the same shell (soft-404) and embeds every decoy a
+  naive scanner keys on: `SQL syntax`, `uid=0(root) gid=…`, `__schema`, `email`,
+  `Protocol mismatch`, a near-miss `AKIA…` secret, a **patched** jQuery 3.x, a
+  CSRF-protected form, and a reflected — but HTML-encoded — query parameter. The
+  chain one output-encodes guestbook comments and enforces ownership on
+  `/api/orders` (403 for other ids). A correct scanner reports **zero** findings
+  across both.
 
 - **Authenticated target** — gates a BOLA endpoint behind a Bearer token. The
   benchmark scans it with and without credentials and proves the authenticated
-  scan reaches a finding the anonymous scan cannot.
+  scan reaches a finding the anonymous scan cannot (the stored-XSS and IDOR
+  chains are likewise invisible to an anonymous scan).
 
 The real scanner (`runDiagnostics` + `compileStaticFindings`) runs against each
 target; findings are scored against the labels (`bench/scoring.ts`). Set
@@ -51,11 +58,11 @@ active probes, which is what the calibration and validation logic governs.
 
 | Metric | Result |
 | --- | --- |
-| Detection rate (recall) | **100%** (12 / 12) |
-| False-positive rate | **0%** (0 / 12) |
+| Detection rate (recall) | **100%** (14 / 14) |
+| False-positive rate | **0%** (0 / 14) |
 | Precision | **100%** |
-| Re-confirmed PoCs | **6** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA) |
-| Authenticated scanning | **proven** (reaches a gated finding) |
+| Re-confirmed PoCs | **8** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA, stored XSS, IDOR) |
+| Authenticated, multi-page scanning | **proven** (reaches gated stored-XSS / IDOR chains) |
 
 The clean target's decoys — which would each trip a substring-based scanner —
 are all suppressed by the soft-404 baseline calibration and the
