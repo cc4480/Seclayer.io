@@ -28,9 +28,14 @@ Local fixture targets with a known ground truth (`bench/fixtures.ts`):
   **IDOR chain** (`/api/orders/{id}` returns any order to any authenticated
   caller), and **reflected injection on a crawl-discovered parameter**
   (`/search?term=` — an endpoint the fixed homepage probes never touch, found
-  and fuzzed only because the crawler reached it). This exercises the crawler,
-  authenticated flow, the multi-request chain detectors, and crawl-driven
-  parameter fuzzing — **15 vulnerability classes** in total.
+  and fuzzed only because the crawler reached it).
+
+- **Form-login target** — a login form issues a session cookie that gates an
+  `/account?note=` reflected-XSS page. With supplied credentials the scanner
+  logs in, captures the cookie, and re-crawls authenticated — reaching a vuln no
+  anonymous scan can. This exercises the crawler, bearer + form-cookie auth, the
+  multi-request chain detectors, and crawl-driven parameter fuzzing —
+  **16 vulnerability classes** in total.
 
 - **Clean targets** — a hardened single-page app and a hardened chain app,
   together a deliberate **false-positive trap**. The single-page one answers
@@ -61,11 +66,11 @@ active probes, which is what the calibration and validation logic governs.
 
 | Metric | Result |
 | --- | --- |
-| Detection rate (recall) | **100%** (15 / 15) |
-| False-positive rate | **0%** (0 / 15) |
+| Detection rate (recall) | **100%** (16 / 16) |
+| False-positive rate | **0%** (0 / 16) |
 | Precision | **100%** |
-| Re-confirmed PoCs | **9** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA, stored XSS, IDOR, crawl-discovered injection) |
-| Authenticated, multi-page scanning | **proven** (reaches gated chains + crawl-discovered endpoints) |
+| Re-confirmed PoCs | **10** (XSS, SQLi, cmd injection, SSRF, GraphQL, BOLA, stored XSS, IDOR, crawl-discovered injection, form-login XSS) |
+| Authenticated scanning | **proven** (bearer token + form-login session cookie) |
 
 The clean target's decoys — which would each trip a substring-based scanner —
 are all suppressed by the soft-404 baseline calibration and the
