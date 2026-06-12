@@ -85,6 +85,7 @@ export interface MonitoredTarget {
   frequencyDays: number;
   scheduleString?: string;
   lastScannedAt?: string;
+  lastScanId?: string;
   nextScanAt?: string;
   createdAt: string;
 }

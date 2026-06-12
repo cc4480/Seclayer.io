@@ -105,6 +105,20 @@ export const config = {
      */
     allowPrivateTargets: parseBoolEnv(process.env.SCANNER_ALLOW_PRIVATE_TARGETS, !isProduction),
   },
+
+  scan: {
+    /** Max scan jobs running at once; the rest queue. Protects CPU/memory/sockets. */
+    maxConcurrent: parseIntEnv(process.env.SCAN_MAX_CONCURRENT, 3),
+    /** Hard ceiling on a single scan job before it is failed as timed out. */
+    timeoutMs: parseIntEnv(process.env.SCAN_TIMEOUT_MS, 180_000),
+  },
+
+  monitoring: {
+    /** Run the scheduler that executes due monitored targets. Off in test. */
+    enabled: parseBoolEnv(process.env.MONITORING_ENABLED, nodeEnv !== 'test'),
+    /** How often the scheduler checks for due targets. */
+    pollIntervalMs: parseIntEnv(process.env.MONITORING_POLL_MS, 60_000),
+  },
 } as const;
 
 /**

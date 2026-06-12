@@ -2,7 +2,7 @@ import type { Express, RequestHandler } from 'express';
 import { db } from '../db.js';
 import { HttpError, asyncHandler } from '../middleware.js';
 import { assertSafeScanTarget, optionalString } from '../validation.js';
-import { processScanJob } from '../scan-worker.js';
+import { scanQueue } from '../scan-queue.js';
 
 /** Scan lifecycle: submit, list, and fetch results/reports. */
 export function registerScanRoutes(app: Express, scanLimiter: RequestHandler): void {
@@ -30,8 +30,8 @@ export function registerScanRoutes(app: Express, scanLimiter: RequestHandler): v
       db.deductCredits(userId, 1);
       const scan = db.createScan(userId, url, authHeader);
 
-      // Trigger the asynchronous background worker pipeline.
-      processScanJob(scan.id);
+      // Hand off to the bounded job queue (concurrency-capped, timeout-guarded).
+      scanQueue.enqueue(scan.id);
 
       res.json({ status: 'ok', scan });
     }),

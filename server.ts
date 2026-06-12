@@ -4,6 +4,8 @@ import type { Server } from 'http';
 import { createServer as createViteServer } from 'vite';
 import { config, validateConfig } from './server/config.js';
 import { logger } from './server/logger.js';
+import { db } from './server/db.js';
+import { startMonitorScheduler, stopMonitorScheduler } from './server/monitor-scheduler.js';
 import { requestContext, securityHeaders, cors, rateLimit, notFound, errorHandler } from './server/middleware.js';
 import { registerSystemRoutes } from './server/routes/system.js';
 import { registerAuthRoutes } from './server/routes/auth.js';
@@ -77,6 +79,10 @@ async function startServer() {
   const warnings = validateConfig();
   warnings.forEach((w) => logger.warn(w));
 
+  // Recover scans left mid-flight by a previous crash/restart so none are stuck.
+  const recovered = db.failStuckScans();
+  if (recovered > 0) logger.warn('recovered interrupted scans on startup', { recovered });
+
   const app = await createApp();
 
   const server: Server = app.listen(config.port, config.host, () => {
@@ -85,6 +91,9 @@ async function startServer() {
       env: config.nodeEnv,
     });
   });
+
+  // Begin executing due monitored targets on a schedule.
+  startMonitorScheduler();
 
   setupGracefulShutdown(server);
   setupProcessGuards();
@@ -99,6 +108,7 @@ function setupGracefulShutdown(server: Server) {
     if (shuttingDown) return;
     shuttingDown = true;
     logger.info('shutdown signal received, draining connections', { signal });
+    stopMonitorScheduler();
 
     const timer = setTimeout(() => {
       logger.error('graceful shutdown timed out, forcing exit');

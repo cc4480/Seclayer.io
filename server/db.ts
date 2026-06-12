@@ -1,7 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
-import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
+import { User, Scan, ScanStatus, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget } from '../src/types.js';
 import { config } from './config.js';
 import { logger } from './logger.js';
 import { INITIAL_DEMO_SCANS } from './seed-data.js';
@@ -207,6 +207,25 @@ class LocalFileDb {
 
   getScan(id: string): Scan | undefined {
     return this.data.scans[id];
+  }
+
+  /**
+   * Mark scans left in a non-terminal state by a previous crash/restart as
+   * failed, so the UI never shows a scan stuck "scanning" forever. Returns the
+   * number recovered.
+   */
+  failStuckScans(): number {
+    const stuck: ScanStatus[] = ['queued', 'scanning', 'analyzing'];
+    let recovered = 0;
+    Object.values(this.data.scans).forEach((scan) => {
+      if (stuck.includes(scan.status)) {
+        scan.status = 'failed';
+        scan.error = 'Scan was interrupted by a server restart and did not complete.';
+        recovered++;
+      }
+    });
+    if (recovered > 0) this.save();
+    return recovered;
   }
 
   createScan(userId: string, url: string, authHeader?: string): Scan {
@@ -448,6 +467,24 @@ class LocalFileDb {
     const removed = this.data.monitoredTargets.length !== initialLen;
     if (removed) this.save();
     return removed;
+  }
+
+  /** Monitored targets whose next scheduled scan is due at or before `nowIso`. */
+  listDueMonitoredTargets(nowIso: string): MonitoredTarget[] {
+    const now = new Date(nowIso).getTime();
+    return (this.data.monitoredTargets || []).filter(
+      (t) => t.nextScanAt !== undefined && new Date(t.nextScanAt).getTime() <= now,
+    );
+  }
+
+  /** Record a completed monitored run and schedule the next one. */
+  recordMonitoredScan(id: string, scanId: string, frequencyDays: number): void {
+    const target = (this.data.monitoredTargets || []).find((t) => t.id === id);
+    if (!target) return;
+    target.lastScanId = scanId;
+    target.lastScannedAt = new Date().toISOString();
+    target.nextScanAt = new Date(Date.now() + frequencyDays * 24 * 60 * 60 * 1000).toISOString();
+    this.save();
   }
 }
 

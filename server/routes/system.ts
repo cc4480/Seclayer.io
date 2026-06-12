@@ -1,6 +1,7 @@
 import type { Express } from 'express';
 import { db } from '../db.js';
 import { config } from '../config.js';
+import { scanQueue } from '../scan-queue.js';
 
 /** Liveness/readiness probes for orchestrators and uptime monitors. */
 export function registerSystemRoutes(app: Express): void {
@@ -21,6 +22,7 @@ export function registerSystemRoutes(app: Express): void {
       status: ready ? 'ready' : 'degraded',
       datastore: ready ? 'ok' : 'unavailable',
       aiProvider: config.deepseek.configured ? 'deepseek' : 'local-fallback',
+      scanQueue: scanQueue.stats,
       timestamp: new Date().toISOString(),
     });
   });
