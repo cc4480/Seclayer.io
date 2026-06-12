@@ -22,6 +22,7 @@ import {
 import { crawl as crawlSite } from "./crawler.js";
 import { detectStoredXss, detectIdor } from "./chain-detectors.js";
 import { runParamFuzzing } from "./param-fuzzer.js";
+import { findLoginForm, establishSession, withCookie, type Credentials } from "./auth-flow.js";
 
 export interface DiagnosticResult {
   url: string;
@@ -78,6 +79,7 @@ export interface DiagnosticResult {
     severity: Severity;
     description: string;
     fix: string;
+    endpoint?: string;
     rawRequest?: string;
     rawResponse?: string;
     validated?: boolean;
@@ -96,6 +98,8 @@ export interface DiagnosticResult {
   validatedExploits?: ValidatedExploit[];
   /** Multi-page crawl coverage summary. */
   crawl?: { pagesVisited: number; formsFound: number; idRefsFound: number };
+  /** How the authenticated surface was reached, when applicable. */
+  authenticatedVia?: 'form-login';
 }
 
 /**
@@ -868,6 +872,7 @@ async function calibrateSoftNotFound(
 export async function runDiagnostics(
   targetUrl: string,
   authHeader?: string,
+  credentials?: Credentials,
 ): Promise<DiagnosticResult> {
   let url = targetUrl.trim();
   if (!/^https?:\/\//i.test(url)) {
@@ -944,27 +949,44 @@ export async function runDiagnostics(
   // --- MULTI-PAGE CRAWL + CHAIN DETECTORS (stored XSS, IDOR) ---
   const chainExploits: ValidatedExploit[] = [];
   try {
-    const crawlResult = await crawlSite(url, { headers });
+    let crawlResult = await crawlSite(url, { headers });
+    let crawlHeaders = headers;
+
+    // Form-based login: if credentials were supplied and a login form was
+    // discovered, authenticate, then re-crawl with the session cookie so the
+    // chain/fuzz detectors run against the authenticated surface.
+    if (credentials) {
+      const login = findLoginForm(crawlResult);
+      if (login) {
+        const cookie = await establishSession(login, credentials, headers);
+        if (cookie) {
+          crawlHeaders = withCookie(headers, cookie);
+          crawlResult = await crawlSite(url, { headers: crawlHeaders });
+          result.authenticatedVia = 'form-login';
+        }
+      }
+    }
+
     result.crawl = {
       pagesVisited: crawlResult.pages.length,
       formsFound: crawlResult.forms.length,
       idRefsFound: crawlResult.idRefs.length,
     };
 
-    const stored = await detectStoredXss(crawlResult, headers);
+    const stored = await detectStoredXss(crawlResult, crawlHeaders);
     if (stored.findings.length > 0) {
       result.redTeamFindings = [...(result.redTeamFindings ?? []), ...stored.findings];
       chainExploits.push(...stored.exploits);
     }
 
-    const idor = await detectIdor(crawlResult, headers);
+    const idor = await detectIdor(crawlResult, crawlHeaders);
     if (idor.findings.length > 0) {
       result.apiSecFindings = [...(result.apiSecFindings ?? []), ...idor.findings];
       chainExploits.push(...idor.exploits);
     }
 
     // Fuzz crawl-discovered GET parameters for reflected XSS / SQLi.
-    const fuzz = await runParamFuzzing(crawlResult, headers);
+    const fuzz = await runParamFuzzing(crawlResult, crawlHeaders);
     if (fuzz.findings.length > 0) {
       result.redTeamFindings = [...(result.redTeamFindings ?? []), ...fuzz.findings];
       chainExploits.push(...fuzz.exploits);
@@ -1193,6 +1215,7 @@ export function compileStaticFindings(diag: DiagnosticResult): {
         confidence: "high",
         fix: rt.fix,
         category: "RED_TEAM",
+        endpoint: rt.endpoint,
         rawRequest: rt.rawRequest,
         rawResponse: rt.rawResponse,
         validated: rt.validated,

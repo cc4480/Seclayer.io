@@ -8,8 +8,12 @@ import {
   startAuthenticatedTarget,
   startChainTarget,
   startCleanChainTarget,
+  startFormLoginTarget,
+  startCleanFormLoginTarget,
 } from './fixtures.js';
 import { scoreTarget, aggregate, ACTIVE_CHECKS, ALL_CHECK_IDS } from './scoring.js';
+
+const CREDS = { username: 'admin', password: 'benchpass' };
 
 /**
  * Reproducible accuracy benchmark. Spins up the labeled fixture targets, runs
@@ -19,8 +23,8 @@ import { scoreTarget, aggregate, ACTIVE_CHECKS, ALL_CHECK_IDS } from './scoring.
  * Run with: npm run benchmark
  */
 
-async function scan(url: string, authHeader?: string): Promise<Finding[]> {
-  const diag = await runDiagnostics(url, authHeader);
+async function scan(url: string, authHeader?: string, creds?: { username: string; password: string }): Promise<Finding[]> {
+  const diag = await runDiagnostics(url, authHeader, creds);
   return compileStaticFindings(diag).findings;
 }
 
@@ -37,12 +41,22 @@ async function main() {
   const clean = await startCleanTarget();
   const chain = await startChainTarget(TOKEN);
   const cleanChain = await startCleanChainTarget(TOKEN);
+  const formLogin = await startFormLoginTarget(CREDS);
+  const cleanFormLogin = await startCleanFormLoginTarget(CREDS);
 
   try {
-    // The single-page classes come from the vuln/clean targets; the multi-page
-    // chain classes (stored XSS, IDOR) require an authenticated crawl.
-    const vulnFindings = [...(await scan(vuln.url)), ...(await scan(chain.url, `Bearer ${TOKEN}`))];
-    const cleanFindings = [...(await scan(clean.url)), ...(await scan(cleanChain.url, `Bearer ${TOKEN}`))];
+    // Single-page classes from vuln/clean; chain classes via an authenticated
+    // crawl; the form-login class via credentials -> session-cookie -> crawl.
+    const vulnFindings = [
+      ...(await scan(vuln.url)),
+      ...(await scan(chain.url, `Bearer ${TOKEN}`)),
+      ...(await scan(formLogin.url, undefined, CREDS)),
+    ];
+    const cleanFindings = [
+      ...(await scan(clean.url)),
+      ...(await scan(cleanChain.url, `Bearer ${TOKEN}`)),
+      ...(await scan(cleanFormLogin.url, undefined, CREDS)),
+    ];
 
     const vulnScore = scoreTarget(vulnFindings, ALL_CHECK_IDS);
     const cleanScore = scoreTarget(cleanFindings, []); // nothing should fire here
@@ -80,6 +94,15 @@ async function main() {
       await authTarget.close();
     }
 
+    // Form-based login: credentials -> session cookie -> authenticated content.
+    const flAnon = scoreTarget(await scan(formLogin.url), []);
+    const flAuth = scoreTarget(await scan(formLogin.url, undefined, CREDS), []);
+    const formLoginProven = !flAnon.detected.includes('form_login') && flAuth.detected.includes('form_login');
+    console.log('\nForm-based login:');
+    console.log(`  Anonymous scan reaches the post-login vuln: ${flAnon.detected.includes('form_login') ? 'yes' : 'no'}`);
+    console.log(`  Credentialed scan reaches the post-login vuln: ${flAuth.detected.includes('form_login') ? 'yes' : 'no'}`);
+    console.log(`  ${formLoginProven ? '✓' : '✗'} Form login establishes a session and reaches authenticated content`);
+
     console.log('\n--- Metrics ---');
     console.log(`  Vulnerability classes:   ${ACTIVE_CHECKS.length}`);
     console.log(`  Detection rate (recall): ${pct(metrics.detectionRate)}  (${metrics.truePositives}/${metrics.truePositives + metrics.falseNegatives})`);
@@ -111,6 +134,7 @@ async function main() {
       vulnerableTarget: vulnScore,
       cleanTarget: cleanScore,
       authenticatedScanningProven: authProven,
+      formLoginProven,
       realTarget,
       metrics,
     };
@@ -118,19 +142,21 @@ async function main() {
     fs.writeFileSync(outPath, JSON.stringify(report, null, 2));
     console.log(`Wrote ${outPath}\n`);
 
-    // Gate: full detection, zero false positives, and proven auth scanning.
-    const ok = metrics.detectionRate === 1 && metrics.falsePositives === 0 && authProven;
+    // Gate: full detection, zero false positives, proven auth + form-login.
+    const ok = metrics.detectionRate === 1 && metrics.falsePositives === 0 && authProven && formLoginProven;
     if (!ok) {
-      console.error('Benchmark FAILED its thresholds (100% detection, 0 FP, auth scanning proven).');
+      console.error('Benchmark FAILED its thresholds (100% detection, 0 FP, auth + form-login proven).');
       process.exitCode = 1;
     } else {
-      console.log(`Benchmark PASSED (${ACTIVE_CHECKS.length} classes, 100% detection, 0 false positives, auth scanning proven).`);
+      console.log(`Benchmark PASSED (${ACTIVE_CHECKS.length} classes, 100% detection, 0 false positives, auth + form-login proven).`);
     }
   } finally {
     await vuln.close();
     await clean.close();
     await chain.close();
     await cleanChain.close();
+    await formLogin.close();
+    await cleanFormLogin.close();
   }
 }
 

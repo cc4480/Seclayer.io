@@ -321,6 +321,81 @@ export function startCleanChainTarget(token: string): Promise<BenchTarget> {
   });
 }
 
+interface LoginCreds {
+  username: string;
+  password: string;
+}
+
+function makeFormLoginTarget(creds: LoginCreds, vulnerable: boolean): Promise<BenchTarget> {
+  const escape = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return listen(async (req, res) => {
+    const path = normalizePath(req.url || '/');
+    const q = query(req.url || '');
+    const cookie = req.headers['cookie'] || '';
+    const authed = cookie.includes('session=valid');
+
+    if (path === '/login') {
+      if (req.method === 'POST') {
+        const body = await readBody(req);
+        const p = new URLSearchParams(body);
+        if (p.get('username') === creds.username && p.get('password') === creds.password) {
+          res.writeHead(200, { 'Set-Cookie': 'session=valid; HttpOnly; Path=/', 'Content-Type': 'text/html' });
+          res.end('<html><body>Welcome. <a href="/account?note=hi">Account</a></body></html>');
+        } else {
+          res.writeHead(401, { 'Content-Type': 'text/html' });
+          res.end('<html><body>Invalid credentials</body></html>');
+        }
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Login</h1>' +
+          '<form method="post" action="/login">' +
+          '<input name="username"><input name="password" type="password"><button>Sign in</button>' +
+          '</form></body></html>',
+      );
+      return;
+    }
+
+    // Authenticated page that reflects `note`; reachable only with a session cookie.
+    if (path === '/account') {
+      if (!authed) {
+        res.writeHead(401, { 'Content-Type': 'text/html' });
+        res.end('<html><body>Please log in</body></html>');
+        return;
+      }
+      const note = q.get('note') || '';
+      const rendered = vulnerable ? note : escape(note); // vulnerable: unencoded reflection
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(`<html><body><h1>Account</h1><div>Note: ${rendered}</div></body></html>`);
+      return;
+    }
+
+    if (path === '/' || path === '') {
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end(
+        '<html><body><h1>Portal</h1><ul>' +
+          '<li><a href="/login">Login</a></li>' +
+          '<li><a href="/account?note=demo">Account</a></li>' +
+          '</ul></body></html>',
+      );
+      return;
+    }
+    res.writeHead(404, { 'Content-Type': 'text/plain' });
+    res.end('Not Found');
+  });
+}
+
+/** Form-login target with a reflected-XSS page reachable only after logging in. */
+export function startFormLoginTarget(creds: LoginCreds): Promise<BenchTarget> {
+  return makeFormLoginTarget(creds, true);
+}
+
+/** Hardened counterpart: same login flow, but the account page output-encodes. */
+export function startCleanFormLoginTarget(creds: LoginCreds): Promise<BenchTarget> {
+  return makeFormLoginTarget(creds, false);
+}
+
 /**
  * A target whose BOLA endpoint is reachable only with a valid Bearer token, so
  * an authenticated scan surfaces a finding an unauthenticated scan cannot.

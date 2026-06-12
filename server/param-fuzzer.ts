@@ -34,6 +34,7 @@ export interface ParamFinding {
   severity: Severity;
   description: string;
   fix: string;
+  endpoint?: string;
   rawRequest?: string;
   rawResponse?: string;
   validated?: boolean;
@@ -135,6 +136,7 @@ export async function runParamFuzzing(
         severity: 'high',
         description: `The crawl-discovered parameter "${point.param}" on "${new URL(point.url).pathname}" reflects input unencoded, enabling reflected Cross-Site Scripting. This endpoint is not covered by the homepage probes; it was reached by crawling the application.`,
         fix: 'Context-aware output-encode reflected parameters and deploy a strict Content-Security-Policy.',
+        endpoint: `${new URL(point.url).pathname}?${point.param}`,
         rawRequest: art.rawRequest,
         rawResponse: art.rawResponse,
         validated: exploit.validationStatus === 'validated',
@@ -171,6 +173,7 @@ export async function runParamFuzzing(
         severity: 'critical',
         description: `The crawl-discovered parameter "${point.param}" on "${new URL(point.url).pathname}" is vulnerable to SQL injection (database error surfaced under the payload but not a benign control). This endpoint was reached by crawling, not by the homepage probes.`,
         fix: 'Use parameterized queries / prepared statements for every database access. Never concatenate request input into SQL.',
+        endpoint: `${new URL(point.url).pathname}?${point.param}`,
         rawRequest: art.rawRequest,
         rawResponse: art.rawResponse,
         validated: exploit.validationStatus === 'validated',

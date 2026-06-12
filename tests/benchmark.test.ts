@@ -8,24 +8,37 @@ import {
   startAuthenticatedTarget,
   startChainTarget,
   startCleanChainTarget,
+  startFormLoginTarget,
+  startCleanFormLoginTarget,
 } from '../bench/fixtures.ts';
 import { scoreTarget, aggregate, ACTIVE_CHECKS, ALL_CHECK_IDS } from '../bench/scoring.ts';
 import { BENCHMARK_STATS } from '../src/lib/benchmark-stats.ts';
 
 const TOKEN = 'bench-secret-token';
+const CREDS = { username: 'admin', password: 'benchpass' };
 const bola = (findings: Finding[]) => findings.some((f) => /object level authorization|bola/i.test(f.title));
-const findingsFor = async (url: string, auth?: string) =>
-  compileStaticFindings(await runDiagnostics(url, auth)).findings;
+const findingsFor = async (url: string, auth?: string, creds?: { username: string; password: string }) =>
+  compileStaticFindings(await runDiagnostics(url, auth, creds)).findings;
 
-/** Combined corpus: single-page classes + the authenticated multi-page chains. */
-async function scanCorpus(single: () => Promise<{ url: string; close: () => Promise<void> }>, chain: (t: string) => Promise<{ url: string; close: () => Promise<void> }>) {
+/** Combined corpus: single-page + authenticated chains + form-login discovery. */
+async function scanCorpus(
+  single: () => Promise<{ url: string; close: () => Promise<void> }>,
+  chain: (t: string) => Promise<{ url: string; close: () => Promise<void> }>,
+  formLogin: (c: typeof CREDS) => Promise<{ url: string; close: () => Promise<void> }>,
+) {
   const a = await single();
   const b = await chain(TOKEN);
+  const c = await formLogin(CREDS);
   try {
-    return [...(await findingsFor(a.url)), ...(await findingsFor(b.url, `Bearer ${TOKEN}`))];
+    return [
+      ...(await findingsFor(a.url)),
+      ...(await findingsFor(b.url, `Bearer ${TOKEN}`)),
+      ...(await findingsFor(c.url, undefined, CREDS)),
+    ];
   } finally {
     await a.close();
     await b.close();
+    await c.close();
   }
 }
 
@@ -53,8 +66,8 @@ test('scoring: detection, false positives, and aggregate metrics', () => {
 });
 
 test('benchmark: full detection (incl. stored XSS + IDOR chains) and zero false positives', async () => {
-  const vulnFindings = await scanCorpus(startVulnerableTarget, startChainTarget);
-  const cleanFindings = await scanCorpus(startCleanTarget, startCleanChainTarget);
+  const vulnFindings = await scanCorpus(startVulnerableTarget, startChainTarget, startFormLoginTarget);
+  const cleanFindings = await scanCorpus(startCleanTarget, startCleanChainTarget, startCleanFormLoginTarget);
 
   const vulnScore = scoreTarget(vulnFindings, ALL_CHECK_IDS);
   const cleanScore = scoreTarget(cleanFindings, []);
@@ -109,8 +122,8 @@ test('published landing-page stats match the live benchmark (no drift)', async (
   // The numbers shown on the site are CI-enforced against the real scanner.
   assert.equal(BENCHMARK_STATS.totalChecks, ACTIVE_CHECKS.length);
 
-  const vulnScore = scoreTarget(await scanCorpus(startVulnerableTarget, startChainTarget), ALL_CHECK_IDS);
-  const cleanScore = scoreTarget(await scanCorpus(startCleanTarget, startCleanChainTarget), []);
+  const vulnScore = scoreTarget(await scanCorpus(startVulnerableTarget, startChainTarget, startFormLoginTarget), ALL_CHECK_IDS);
+  const cleanScore = scoreTarget(await scanCorpus(startCleanTarget, startCleanChainTarget, startCleanFormLoginTarget), []);
   const metrics = aggregate(vulnScore, cleanScore);
 
   assert.equal(metrics.detectionRate, BENCHMARK_STATS.detectionRate, 'detection rate drifted from published stat');

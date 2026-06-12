@@ -44,6 +44,8 @@ export const ACTIVE_CHECKS: ActiveCheck[] = [
   { id: 'idor', label: 'IDOR chain (authenticated)', detect: (f) => has(f, (x) => /insecure direct object reference|idor/i.test(x.title)) },
   // Crawl-driven parameter fuzzing
   { id: 'crawl_injection', label: 'Injection on a crawl-discovered parameter', detect: (f) => has(f, (x) => /discovered parameter/i.test(x.title)) },
+  // Form-login authenticated discovery (vuln behind a session cookie)
+  { id: 'form_login', label: 'Vuln behind form-based login', detect: (f) => has(f, (x) => /discovered parameter/i.test(x.title) && /account/i.test(x.endpoint || '')) },
 ];
 
 export interface TargetScore {
