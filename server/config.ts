@@ -119,6 +119,19 @@ export const config = {
     /** How often the scheduler checks for due targets. */
     pollIntervalMs: parseIntEnv(process.env.MONITORING_POLL_MS, 60_000),
   },
+
+  session: {
+    /**
+     * HMAC secret for signing stateless session tokens. MUST be set in
+     * production; a fixed development fallback keeps local sessions stable
+     * across restarts without leaking a real secret into the repo.
+     */
+    secret: (process.env.SESSION_SECRET || '').trim() || (isProduction ? '' : 'seclayer-dev-session-secret-not-for-production'),
+    /** Session lifetime in seconds (default 7 days). */
+    ttlSeconds: parseIntEnv(process.env.SESSION_TTL_SECONDS, 7 * 24 * 60 * 60),
+    /** Cookie name carrying the signed session. */
+    cookieName: 'seclayer_session',
+  },
 } as const;
 
 /**
@@ -142,6 +155,9 @@ export function validateConfig(): string[] {
       warnings.push(
         'SCANNER_ALLOW_PRIVATE_TARGETS is enabled in production — this exposes an SSRF risk.',
       );
+    }
+    if (!config.session.secret) {
+      throw new Error('SESSION_SECRET must be set in production to sign session tokens.');
     }
   }
 

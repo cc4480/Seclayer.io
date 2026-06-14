@@ -1,12 +1,11 @@
 import type { Express } from 'express';
 import { db } from '../db.js';
-import { HttpError } from '../middleware.js';
-import { optionalString } from '../validation.js';
+import { HttpError, currentUserId } from '../middleware.js';
 
 /** Credit balances, mock checkout, and the mock Stripe webhook. */
 export function registerCreditRoutes(app: Express): void {
   app.get('/api/credits', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const user = db.getUser(userId);
     if (!user) throw new HttpError(404, 'User not found');
     res.json({
@@ -17,7 +16,7 @@ export function registerCreditRoutes(app: Express): void {
 
   // Mock Stripe Checkout test integration
   app.post('/api/credits/checkout', (req, res) => {
-    const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+    const userId = currentUserId(req);
     const pack = req.body?.pack;
 
     const PRICES = {

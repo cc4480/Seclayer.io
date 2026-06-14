@@ -1,12 +1,12 @@
 import type { Express } from 'express';
 import { db } from '../db.js';
-import { HttpError, asyncHandler } from '../middleware.js';
+import { HttpError, asyncHandler, currentUserId } from '../middleware.js';
 import { optionalString, assertSafeScanTarget } from '../validation.js';
 
 /** Continuous monitoring: scheduled re-scans of saved targets. */
 export function registerMonitoringRoutes(app: Express): void {
   app.get('/api/monitoring', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const monitoredTargets = db.listMonitoredTargets(userId);
     res.json({ monitoredTargets });
   });
@@ -14,7 +14,7 @@ export function registerMonitoringRoutes(app: Express): void {
   app.post(
     '/api/monitoring',
     asyncHandler(async (req, res) => {
-      const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+      const userId = currentUserId(req);
       // The scheduler will scan this URL unattended, so apply the same SSRF guard
       // used for interactive scans before persisting it.
       const url = await assertSafeScanTarget(req.body?.url);
@@ -29,7 +29,7 @@ export function registerMonitoringRoutes(app: Express): void {
   );
 
   app.delete('/api/monitoring/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const success = db.removeMonitoredTarget(userId, req.params.id);
     if (!success) {
       throw new HttpError(404, 'Monitored target not found');

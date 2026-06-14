@@ -1,6 +1,6 @@
 import type { Express, RequestHandler } from 'express';
 import { db } from '../db.js';
-import { HttpError, asyncHandler } from '../middleware.js';
+import { HttpError, asyncHandler, currentUserId } from '../middleware.js';
 import { runDiagnostics, compileStaticFindings, summarizeDiagnostics } from '../scanner.js';
 import { generateAiReport } from '../deepseek.js';
 import { assertSafeScanTarget, requireString, optionalString } from '../validation.js';
@@ -8,13 +8,13 @@ import { assertSafeScanTarget, requireString, optionalString } from '../validati
 /** Developer API key management plus the synchronous MCP scan tool-call endpoint. */
 export function registerMcpRoutes(app: Express, scanLimiter: RequestHandler): void {
   app.get('/api/keys', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const keys = db.listApiKeys(userId);
     res.json({ keys });
   });
 
   app.post('/api/keys', (req, res) => {
-    const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+    const userId = currentUserId(req);
     const user = db.getUser(userId);
     if (!user) throw new HttpError(404, 'User not found');
     const keyObj = db.generateApiKey(userId);
@@ -22,7 +22,7 @@ export function registerMcpRoutes(app: Express, scanLimiter: RequestHandler): vo
   });
 
   app.delete('/api/keys/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const success = db.revokeApiKey(userId, req.params.id);
     if (!success) {
       throw new HttpError(404, 'Key not found or could not be revoked');

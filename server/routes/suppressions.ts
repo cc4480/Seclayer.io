@@ -1,18 +1,18 @@
 import type { Express } from 'express';
 import { db } from '../db.js';
-import { HttpError } from '../middleware.js';
+import { HttpError, currentUserId } from '../middleware.js';
 import { requireString, optionalString } from '../validation.js';
 
 /** False-positive suppression rules and per-finding "mark as false positive" actions. */
 export function registerSuppressionRoutes(app: Express): void {
   app.get('/api/suppressions', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const rules = db.listSuppressions(userId);
     res.json({ suppressions: rules });
   });
 
   app.post('/api/suppressions', (req, res) => {
-    const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+    const userId = currentUserId(req);
     const targetUrl = requireString(req.body?.targetUrl, 'targetUrl');
     const findingTitle = requireString(req.body?.findingTitle, 'findingTitle');
     const reason = optionalString(req.body?.reason, 'reason') || 'False positive confirmation';
@@ -21,7 +21,7 @@ export function registerSuppressionRoutes(app: Express): void {
   });
 
   app.delete('/api/suppressions/:id', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const success = db.removeSuppression(userId, req.params.id);
     if (!success) {
       throw new HttpError(404, 'Suppression exclusion rule not found');
@@ -31,7 +31,7 @@ export function registerSuppressionRoutes(app: Express): void {
 
   app.post('/api/scans/:scanId/findings/:findingId/suppress', (req, res) => {
     const { scanId, findingId } = req.params;
-    const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+    const userId = currentUserId(req);
     const reason = optionalString(req.body?.reason, 'reason') || 'Manual enterprise validation';
 
     const scan = db.getScan(scanId);

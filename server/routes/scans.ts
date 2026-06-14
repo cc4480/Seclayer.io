@@ -1,6 +1,6 @@
 import type { Express, RequestHandler } from 'express';
 import { db } from '../db.js';
-import { HttpError, asyncHandler } from '../middleware.js';
+import { HttpError, asyncHandler, currentUserId } from '../middleware.js';
 import { assertSafeScanTarget, optionalString } from '../validation.js';
 import { scanQueue } from '../scan-queue.js';
 
@@ -11,7 +11,7 @@ export function registerScanRoutes(app: Express, scanLimiter: RequestHandler): v
     scanLimiter,
     asyncHandler(async (req, res) => {
       const url = await assertSafeScanTarget(req.body?.url);
-      const userId = optionalString(req.body?.userId, 'userId') || 'user_default';
+      const userId = currentUserId(req);
       const authHeader = optionalString(req.body?.authHeader, 'authHeader');
 
       const user = db.getUser(userId);
@@ -38,7 +38,7 @@ export function registerScanRoutes(app: Express, scanLimiter: RequestHandler): v
   );
 
   app.get('/api/scans', (req, res) => {
-    const userId = (req.query.userId as string) || 'user_default';
+    const userId = currentUserId(req);
     const scansList = db.listScans(userId).map((s) => db.getScanWithSuppressedFindings(s));
     res.json({ scans: scansList });
   });

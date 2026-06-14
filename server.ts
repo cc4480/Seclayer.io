@@ -6,7 +6,7 @@ import { config, validateConfig } from './server/config.js';
 import { logger } from './server/logger.js';
 import { db } from './server/db.js';
 import { startMonitorScheduler, stopMonitorScheduler } from './server/monitor-scheduler.js';
-import { requestContext, securityHeaders, cors, rateLimit, notFound, errorHandler } from './server/middleware.js';
+import { requestContext, authContext, securityHeaders, cors, rateLimit, notFound, errorHandler } from './server/middleware.js';
 import { registerSystemRoutes } from './server/routes/system.js';
 import { registerAuthRoutes } from './server/routes/auth.js';
 import { registerScanRoutes } from './server/routes/scans.js';
@@ -32,6 +32,9 @@ export async function createApp() {
   // Body parsers with an explicit size limit to blunt large-payload DoS.
   app.use(express.json({ limit: config.bodyLimit }));
   app.use(express.urlencoded({ extended: true, limit: config.bodyLimit }));
+
+  // Establish request identity from the signed session cookie (not client input).
+  app.use(authContext());
 
   // Rate limiters: a general cap for the API, plus a stricter one for the
   // expensive scan endpoints.

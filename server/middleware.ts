@@ -8,6 +8,7 @@
  * imports keep working unchanged.
  */
 export { requestContext } from './middleware/request-context.js';
+export { authContext, currentUserId } from './middleware/auth-context.js';
 export { securityHeaders } from './middleware/security-headers.js';
 export { cors } from './middleware/cors.js';
 export { rateLimit } from './middleware/rate-limit.js';

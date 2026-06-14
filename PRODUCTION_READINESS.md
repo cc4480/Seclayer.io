@@ -6,12 +6,12 @@ and are out of scope here.
 
 ## TL;DR
 
-The **scanning engine and the scan lifecycle are production-ready** — real
-detection across 16 vulnerability classes, validated PoCs, a CI-enforced
-0% false-positive benchmark, bounded concurrency, crash recovery, and a working
-monitoring scheduler. The main gaps before a **multi-tenant public launch** are
-**authentication/authorization** and **datastore scale** (plus real payments,
-parked separately).
+The **scanning engine, scan lifecycle, and authentication are production-ready**
+— real detection across 16 vulnerability classes, validated PoCs, a CI-enforced
+0% false-positive benchmark, bounded concurrency, crash recovery, a working
+monitoring scheduler, and signed session-cookie auth so requests can no longer
+impersonate another user. The main gap before a **multi-tenant public launch**
+is **datastore scale** (plus real payments, parked separately).
 
 ---
 
@@ -46,8 +46,18 @@ parked separately).
 - **Continuous-monitoring scheduler**: due targets are scanned on schedule
   (credit-charged, rescheduled), disabled under test, stopped on shutdown.
 
+### Authentication & sessions
+- **Signed, HttpOnly session cookies** (HMAC-SHA256, `base64url(payload).base64url(sig)`,
+  constant-time signature check, expiry enforced server-side). Login issues a
+  cookie; logout clears it. No server-side session store needed.
+- Every `/api/*` route derives identity from `currentUserId(req)` — the
+  verified session, or the shared `user_default` account for anonymous callers
+  — never from a client-supplied `userId` in the query or body. A caller can no
+  longer act as, or read the data of, another user by passing their id.
+
 ### Platform
-- Fail-fast **config validation** (throws in production on invalid config).
+- Fail-fast **config validation** (throws in production on invalid config,
+  including a missing `SESSION_SECRET`).
 - **SSRF protection** on every scan path, including monitored URLs validated at
   add-time and DNS-rebinding-aware private-range checks.
 - Strong **security headers** (CSP, HSTS preload, X-Frame-Options, nosniff,
@@ -58,23 +68,13 @@ parked separately).
 - **Atomic datastore writes** (temp-file + rename).
 - **Liveness/readiness probes** (`/api/system/health`, `/api/system/ready`),
   the latter reporting datastore health, AI provider, and scan-queue depth.
-- **69 tests** + CI (typecheck + tests + build).
+- **76 tests** + CI (typecheck + tests + build).
 
 ---
 
 ## ⚠️ Not production-ready (known gaps)
 
-### 1. Authentication & authorization — **highest priority**
-Identity is currently **stateless**: the client passes `userId` in the query or
-body, and there is no session token binding a request to a verified user. Any
-caller can act as any `userId`. Login is passwordless (email → user record).
-
-**Before multi-tenant launch:** issue a signed session (JWT or server-side
-session cookie) on login, authenticate every `/api/*` route from it, and derive
-`userId` server-side rather than trusting the request. (Single-user / trusted
-internal deployments are fine as-is.)
-
-### 2. Datastore scale
+### 1. Datastore scale — **highest remaining priority**
 A JSON file (atomic, single-node) backs all state. Correct and safe for a single
 instance, but it does not scale horizontally, has no write-throughput headroom,
 and **grows unbounded** (no scan-retention/pruning policy).
@@ -83,18 +83,26 @@ and **grows unbounded** (no scan-retention/pruning policy).
 and a distributed lock for the monitoring scheduler if running >1 instance
 (today, multiple instances would double-run monitors).
 
-### 3. API keys at rest
+### 2. API keys at rest
 Developer API keys are stored in plaintext (so they can be re-displayed in the
 dashboard). **For production:** store a hash and show the key only once at
 creation.
 
-### 4. Payments
+### 3. Payments
 Stripe checkout/webhook are mocks (instant credit top-up). Parked intentionally;
 wire real Stripe (Checkout session + signature-verified webhook) before charging.
 
-### 5. Observability depth
+### 4. Observability depth
 Structured logs + readiness probe are in place, but there is no metrics/tracing
 export (Prometheus/OpenTelemetry). Add if you need dashboards/alerting.
+
+### 5. Login is passwordless
+Login is email → user record with no password/OTP/magic-link verification, so
+anyone who knows (or guesses) an email can obtain that account's session cookie.
+The session layer itself is now sound (signed, HttpOnly, expiring); what's
+missing is verifying the email belongs to the caller before issuing it.
+**Before multi-tenant launch:** add magic-link email verification or
+passwordless OTP before `setSessionCookie` is called.
 
 ---
 
@@ -102,6 +110,8 @@ export (Prometheus/OpenTelemetry). Add if you need dashboards/alerting.
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
+| `SESSION_SECRET` | dev fallback | HMAC key for session cookies — **required in prod** |
+| `SESSION_TTL_SECONDS` | `604800` (7d) | Session cookie lifetime |
 | `SCAN_MAX_CONCURRENT` | `3` | Max concurrent scan jobs |
 | `SCAN_TIMEOUT_MS` | `180000` | Hard per-scan timeout |
 | `MONITORING_ENABLED` | on (off in test) | Run the monitoring scheduler |
