@@ -242,10 +242,10 @@ describe('getDueMonitoringTargets', () => {
 
     const t = db.addMonitoredTarget(user.id, 'https://example.com', 7);
     // Manually back-date nextScanAt
-    (db as any).data.monitoredTargets.find((m: any) => m.id === t.id).nextScanAt = past;
+    (db as any).db.prepare('UPDATE monitored_targets SET nextScanAt = ? WHERE id = ?').run(past, t.id);
 
     const t2 = db.addMonitoredTarget(user.id, 'https://other.com', 1);
-    (db as any).data.monitoredTargets.find((m: any) => m.id === t2.id).nextScanAt = future;
+    (db as any).db.prepare('UPDATE monitored_targets SET nextScanAt = ? WHERE id = ?').run(future, t2.id);
 
     const due = db.getDueMonitoringTargets();
     expect(due.map(d => d.id)).toContain(t.id);
@@ -266,7 +266,7 @@ describe('touchMonitoredTarget', () => {
 
     // Back-date to simulate overdue
     const pastTime = new Date(Date.now() - 1000).toISOString();
-    (db as any).data.monitoredTargets.find((m: any) => m.id === target.id).nextScanAt = pastTime;
+    (db as any).db.prepare('UPDATE monitored_targets SET nextScanAt = ? WHERE id = ?').run(pastTime, target.id);
 
     db.touchMonitoredTarget(target.id);
 

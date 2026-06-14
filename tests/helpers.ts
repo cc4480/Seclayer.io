@@ -1,19 +1,14 @@
-import fs from 'fs';
-import os from 'os';
-import path from 'path';
 import { LocalFileDb } from '../server/db.js';
 import { hashPassword, signToken } from '../server/auth.js';
 import { createApp } from '../server.js';
 import type { Express } from 'express';
 
 export function makeTempDb(): { db: LocalFileDb; cleanup: () => void } {
-  const tmpFile = path.join(os.tmpdir(), `sl-test-${Math.random().toString(36).slice(2)}.json`);
-  const db = new LocalFileDb(tmpFile);
+  // Each test gets an isolated in-memory SQLite database — no file to clean up.
+  const db = new LocalFileDb(':memory:');
   return {
     db,
-    cleanup: () => {
-      if (fs.existsSync(tmpFile)) fs.unlinkSync(tmpFile);
-    },
+    cleanup: () => { /* in-memory DB is discarded when GC'd */ },
   };
 }
 

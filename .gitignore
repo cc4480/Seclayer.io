@@ -2,6 +2,10 @@ node_modules/
 build/
 dist/
 coverage/
+*.db
+*.db-wal
+*.db-shm
+db.json
 .DS_Store
 *.log
 .env*

@@ -1,67 +1,118 @@
-import fs from 'fs';
 import path from 'path';
 import crypto from 'crypto';
+import Database from 'better-sqlite3';
 import { User, Scan, CreditTransaction, ApiKey, Finding, Severity, SuppressionRule, MonitoredTarget, AuthProfile } from '../src/types.js';
 
-const DEFAULT_DB_FILE = path.join(process.cwd(), 'db.json');
+const DEFAULT_DB_FILE = process.env.DB_PATH || path.join(process.cwd(), 'seclayer.db');
 
 // Server-only user record — passwordHash is never sent to the client
 interface DbUser extends Omit<User, never> {
   passwordHash?: string;
 }
 
-interface DbSchema {
-  users: Record<string, DbUser>;
-  scans: Record<string, Scan>;
-  transactions: CreditTransaction[];
-  apiKeys: Record<string, ApiKey>;
-  suppressions: SuppressionRule[];
-  monitoredTargets: MonitoredTarget[];
-  authProfiles: Record<string, AuthProfile>;
-}
-
+/**
+ * SQLite-backed persistent store (better-sqlite3 — synchronous).
+ * Class name kept as LocalFileDb for drop-in compatibility with existing
+ * imports across server.ts and the test suite. Data survives restarts and
+ * redeploys when DB_PATH points at a persistent volume.
+ */
 export class LocalFileDb {
-  private data: DbSchema;
-  private readonly dbFilePath: string;
+  private db: Database.Database;
   private readonly scanLogs = new Map<string, string[]>();
 
   constructor(dbFilePath: string = DEFAULT_DB_FILE) {
-    this.dbFilePath = dbFilePath;
-    this.data = {
-      users: {},
-      scans: {},
-      transactions: [],
-      apiKeys: {},
-      suppressions: [],
-      monitoredTargets: [],
-      authProfiles: {},
+    this.db = new Database(dbFilePath);
+    this.db.pragma('journal_mode = WAL');
+    this.db.pragma('foreign_keys = ON');
+    this.migrate();
+  }
+
+  private migrate() {
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS users (
+        id TEXT PRIMARY KEY,
+        email TEXT UNIQUE NOT NULL,
+        credits INTEGER NOT NULL DEFAULT 0,
+        apiKey TEXT,
+        passwordHash TEXT,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS transactions (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        amount INTEGER NOT NULL,
+        type TEXT NOT NULL,
+        stripeSessionId TEXT,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS api_keys (
+        key TEXT PRIMARY KEY,
+        id TEXT NOT NULL,
+        userId TEXT NOT NULL,
+        credits INTEGER NOT NULL DEFAULT 0,
+        active INTEGER NOT NULL DEFAULT 1,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS scans (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        url TEXT NOT NULL,
+        authHeader TEXT,
+        authProfileId TEXT,
+        webhookUrl TEXT,
+        status TEXT NOT NULL,
+        score INTEGER,
+        severity TEXT,
+        findings TEXT,
+        aiSummary TEXT,
+        diagnostics TEXT,
+        crawl TEXT,
+        error TEXT,
+        createdAt TEXT NOT NULL,
+        completedAt TEXT
+      );
+      CREATE TABLE IF NOT EXISTS suppressions (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        targetUrl TEXT NOT NULL,
+        findingTitle TEXT NOT NULL,
+        reason TEXT,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS monitored_targets (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        url TEXT NOT NULL,
+        frequencyDays INTEGER NOT NULL,
+        scheduleString TEXT,
+        lastScannedAt TEXT,
+        nextScanAt TEXT,
+        createdAt TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS auth_profiles (
+        id TEXT PRIMARY KEY,
+        userId TEXT NOT NULL,
+        data TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS idx_scans_userId ON scans(userId);
+      CREATE INDEX IF NOT EXISTS idx_tx_userId ON transactions(userId);
+      CREATE INDEX IF NOT EXISTS idx_keys_userId ON api_keys(userId);
+      CREATE INDEX IF NOT EXISTS idx_supp_userId ON suppressions(userId);
+      CREATE INDEX IF NOT EXISTS idx_mon_userId ON monitored_targets(userId);
+      CREATE INDEX IF NOT EXISTS idx_ap_userId ON auth_profiles(userId);
+    `);
+  }
+
+  // --- (de)serialization helpers ---
+  private rowToUser(row: any): DbUser {
+    return {
+      id: row.id,
+      email: row.email,
+      credits: row.credits,
+      apiKey: row.apiKey,
+      createdAt: row.createdAt,
+      passwordHash: row.passwordHash ?? undefined,
     };
-    this.load();
-  }
-
-  private load() {
-    try {
-      if (fs.existsSync(this.dbFilePath)) {
-        const raw = fs.readFileSync(this.dbFilePath, 'utf8');
-        const parsed = JSON.parse(raw) as DbSchema;
-        this.data = {
-          suppressions: [],
-          monitoredTargets: [],
-          authProfiles: {},
-          ...parsed,
-        };
-      }
-    } catch (err) {
-      console.error('Error loading DB file:', err);
-    }
-  }
-
-  private save() {
-    try {
-      fs.writeFileSync(this.dbFilePath, JSON.stringify(this.data, null, 2), 'utf8');
-    } catch (err) {
-      console.error('Error saving DB file:', err);
-    }
   }
 
   private toPublicUser(u: DbUser): User {
@@ -69,10 +120,63 @@ export class LocalFileDb {
     return pub as User;
   }
 
+  private rowToScan(row: any): Scan {
+    const scan: Scan = {
+      id: row.id,
+      userId: row.userId,
+      url: row.url,
+      status: row.status,
+      createdAt: row.createdAt,
+    };
+    if (row.authHeader != null) scan.authHeader = row.authHeader;
+    if (row.authProfileId != null) scan.authProfileId = row.authProfileId;
+    if (row.webhookUrl != null) scan.webhookUrl = row.webhookUrl;
+    if (row.score != null) scan.score = row.score;
+    if (row.severity != null) scan.severity = row.severity;
+    if (row.findings != null) scan.findings = JSON.parse(row.findings);
+    if (row.aiSummary != null) scan.aiSummary = row.aiSummary;
+    if (row.diagnostics != null) scan.diagnostics = JSON.parse(row.diagnostics);
+    if (row.crawl != null) (scan as any).crawl = JSON.parse(row.crawl);
+    if (row.error != null) scan.error = row.error;
+    if (row.completedAt != null) scan.completedAt = row.completedAt;
+    return scan;
+  }
+
+  private writeScan(scan: Scan) {
+    this.db.prepare(`
+      INSERT INTO scans (id, userId, url, authHeader, authProfileId, webhookUrl, status, score, severity, findings, aiSummary, diagnostics, crawl, error, createdAt, completedAt)
+      VALUES (@id, @userId, @url, @authHeader, @authProfileId, @webhookUrl, @status, @score, @severity, @findings, @aiSummary, @diagnostics, @crawl, @error, @createdAt, @completedAt)
+      ON CONFLICT(id) DO UPDATE SET
+        userId=excluded.userId, url=excluded.url, authHeader=excluded.authHeader,
+        authProfileId=excluded.authProfileId, webhookUrl=excluded.webhookUrl, status=excluded.status,
+        score=excluded.score, severity=excluded.severity, findings=excluded.findings,
+        aiSummary=excluded.aiSummary, diagnostics=excluded.diagnostics, crawl=excluded.crawl,
+        error=excluded.error, createdAt=excluded.createdAt, completedAt=excluded.completedAt
+    `).run({
+      id: scan.id,
+      userId: scan.userId,
+      url: scan.url,
+      authHeader: scan.authHeader ?? null,
+      authProfileId: scan.authProfileId ?? null,
+      webhookUrl: scan.webhookUrl ?? null,
+      status: scan.status,
+      score: scan.score ?? null,
+      severity: scan.severity ?? null,
+      findings: scan.findings != null ? JSON.stringify(scan.findings) : null,
+      aiSummary: scan.aiSummary ?? null,
+      diagnostics: scan.diagnostics != null ? JSON.stringify(scan.diagnostics) : null,
+      crawl: (scan as any).crawl != null ? JSON.stringify((scan as any).crawl) : null,
+      error: scan.error ?? null,
+      createdAt: scan.createdAt,
+      completedAt: scan.completedAt ?? null,
+    });
+  }
+
   // --- Auth ---
   findUserByEmail(email: string): DbUser | null {
     const norm = email.toLowerCase().trim();
-    return Object.values(this.data.users).find(u => u.email.toLowerCase() === norm) || null;
+    const row = this.db.prepare('SELECT * FROM users WHERE email = ?').get(norm);
+    return row ? this.rowToUser(row) : null;
   }
 
   registerUser(email: string, passwordHash: string): User {
@@ -83,95 +187,77 @@ export class LocalFileDb {
 
     const id = 'user_' + crypto.randomBytes(8).toString('hex');
     const apiKey = 'sl_live_' + crypto.randomBytes(20).toString('hex');
+    const now = new Date().toISOString();
 
-    const newUser: DbUser = {
-      id,
-      email: norm,
-      credits: 5,
-      apiKey,
-      createdAt: new Date().toISOString(),
-      passwordHash,
-    };
-
-    this.data.users[id] = newUser;
-
-    // Signup credit grant
-    this.data.transactions.push({
-      id: 'tx_signup_' + id,
-      userId: id,
-      amount: 5,
-      type: 'purchase',
-      createdAt: new Date().toISOString(),
+    const tx = this.db.transaction(() => {
+      this.db.prepare('INSERT INTO users (id, email, credits, apiKey, passwordHash, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, norm, 5, apiKey, passwordHash, now);
+      this.db.prepare('INSERT INTO transactions (id, userId, amount, type, stripeSessionId, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('tx_signup_' + id, id, 5, 'purchase', null, now);
+      this.db.prepare('INSERT INTO api_keys (key, id, userId, credits, active, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(apiKey, 'key_' + crypto.randomBytes(8).toString('hex'), id, 5, 1, now);
     });
+    tx();
 
-    // Matching API key record
-    this.data.apiKeys[apiKey] = {
-      id: 'key_' + crypto.randomBytes(8).toString('hex'),
-      userId: id,
-      key: apiKey,
-      credits: 5,
-      active: true,
-      createdAt: new Date().toISOString(),
-    };
-
-    this.save();
-    return this.toPublicUser(newUser);
+    return this.toPublicUser({ id, email: norm, credits: 5, apiKey, createdAt: now, passwordHash });
   }
 
   // --- Users ---
   getUser(id: string): User | undefined {
-    const u = this.data.users[id];
-    return u ? this.toPublicUser(u) : undefined;
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    return row ? this.toPublicUser(this.rowToUser(row)) : undefined;
   }
 
   getDbUser(id: string): DbUser | undefined {
-    return this.data.users[id];
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(id);
+    return row ? this.rowToUser(row) : undefined;
   }
 
   addCredits(userId: string, amount: number, type: 'purchase' | 'scan_debit', stripeSessionId?: string): User {
-    const user = this.data.users[userId];
-    if (!user) throw new Error('User not found');
-    user.credits = Math.max(0, user.credits + amount);
+    const row = this.db.prepare('SELECT * FROM users WHERE id = ?').get(userId);
+    if (!row) throw new Error('User not found');
+    const user = this.rowToUser(row);
+    const newCredits = Math.max(0, user.credits + amount);
 
-    // Mirror credits on active API keys
-    Object.values(this.data.apiKeys).forEach(k => {
-      if (k.userId === userId && k.active) {
-        k.credits = user.credits;
-      }
+    const tx = this.db.transaction(() => {
+      this.db.prepare('UPDATE users SET credits = ? WHERE id = ?').run(newCredits, userId);
+      // Mirror credits on active API keys
+      this.db.prepare('UPDATE api_keys SET credits = ? WHERE userId = ? AND active = 1').run(newCredits, userId);
+      this.db.prepare('INSERT INTO transactions (id, userId, amount, type, stripeSessionId, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+        .run('tx_' + crypto.randomBytes(8).toString('hex'), userId, amount, type, stripeSessionId ?? null, new Date().toISOString());
     });
+    tx();
 
-    this.data.transactions.push({
-      id: 'tx_' + crypto.randomBytes(8).toString('hex'),
-      userId,
-      amount,
-      type,
-      stripeSessionId,
-      createdAt: new Date().toISOString(),
-    });
-    this.save();
+    user.credits = newCredits;
     return this.toPublicUser(user);
   }
 
   deductCredits(userId: string, amount: number): boolean {
-    const user = this.data.users[userId];
-    if (!user || user.credits < amount) return false;
+    const row = this.db.prepare('SELECT credits FROM users WHERE id = ?').get(userId) as any;
+    if (!row || row.credits < amount) return false;
     this.addCredits(userId, -amount, 'scan_debit');
     return true;
   }
 
   getTransactions(userId: string): CreditTransaction[] {
-    return this.data.transactions.filter(t => t.userId === userId);
+    return this.db.prepare('SELECT id, userId, amount, type, stripeSessionId, createdAt FROM transactions WHERE userId = ?')
+      .all(userId)
+      .map((r: any) => ({
+        id: r.id, userId: r.userId, amount: r.amount, type: r.type,
+        stripeSessionId: r.stripeSessionId ?? undefined, createdAt: r.createdAt,
+      }));
   }
 
   // --- Scans ---
   listScans(userId: string): Scan[] {
-    return Object.values(this.data.scans)
-      .filter(s => s.userId === userId)
-      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+    return this.db.prepare('SELECT * FROM scans WHERE userId = ? ORDER BY createdAt DESC')
+      .all(userId)
+      .map(r => this.rowToScan(r));
   }
 
   getScan(id: string): Scan | undefined {
-    return this.data.scans[id];
+    const row = this.db.prepare('SELECT * FROM scans WHERE id = ?').get(id);
+    return row ? this.rowToScan(row) : undefined;
   }
 
   createScan(userId: string, url: string, authHeader?: string): Scan {
@@ -184,131 +270,143 @@ export class LocalFileDb {
       status: 'queued',
       createdAt: new Date().toISOString(),
     };
-    this.data.scans[id] = scan;
-    this.save();
+    this.writeScan(scan);
     return scan;
   }
 
   updateScan(id: string, updates: Partial<Scan>): Scan {
-    const scan = this.data.scans[id];
-    if (!scan) throw new Error('Scan not found');
-    this.data.scans[id] = { ...scan, ...updates };
-    this.save();
-    return this.data.scans[id];
+    const existing = this.getScan(id);
+    if (!existing) throw new Error('Scan not found');
+    const merged = { ...existing, ...updates };
+    this.writeScan(merged);
+    return merged;
   }
 
   // --- API Keys ---
+  private rowToApiKey(r: any): ApiKey {
+    return { id: r.id, userId: r.userId, key: r.key, credits: r.credits, active: !!r.active, createdAt: r.createdAt };
+  }
+
   listApiKeys(userId: string): ApiKey[] {
-    return Object.values(this.data.apiKeys).filter(k => k.userId === userId);
+    return this.db.prepare('SELECT * FROM api_keys WHERE userId = ?').all(userId).map(r => this.rowToApiKey(r));
   }
 
   findApiKey(keyStr: string): ApiKey | null {
-    return this.data.apiKeys[keyStr] || null;
+    const row = this.db.prepare('SELECT * FROM api_keys WHERE key = ?').get(keyStr);
+    return row ? this.rowToApiKey(row) : null;
   }
 
   generateApiKey(userId: string): ApiKey {
-    const user = this.data.users[userId];
-    if (!user) throw new Error('User not found');
+    const row = this.db.prepare('SELECT credits FROM users WHERE id = ?').get(userId) as any;
+    if (!row) throw new Error('User not found');
     const id = 'key_' + crypto.randomBytes(8).toString('hex');
     const keyStr = 'sl_live_' + crypto.randomBytes(20).toString('hex');
-    const keyObj: ApiKey = {
-      id,
-      userId,
-      key: keyStr,
-      credits: user.credits,
-      active: true,
-      createdAt: new Date().toISOString(),
-    };
-    this.data.apiKeys[keyStr] = keyObj;
-    this.save();
-    return keyObj;
+    const createdAt = new Date().toISOString();
+    this.db.prepare('INSERT INTO api_keys (key, id, userId, credits, active, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+      .run(keyStr, id, userId, row.credits, 1, createdAt);
+    return { id, userId, key: keyStr, credits: row.credits, active: true, createdAt };
   }
 
   revokeApiKey(userId: string, keyId: string): boolean {
-    const keyObj = Object.values(this.data.apiKeys).find(k => k.id === keyId && k.userId === userId);
-    if (!keyObj) return false;
-    keyObj.active = false;
-    this.save();
-    return true;
+    const info = this.db.prepare('UPDATE api_keys SET active = 0 WHERE id = ? AND userId = ?').run(keyId, userId);
+    return info.changes > 0;
   }
 
   validateApiKeyAndDeduct(apiKeyString: string, quantity: number = 1): User | null {
-    const keyObj = this.data.apiKeys[apiKeyString];
-    if (!keyObj || !keyObj.active) return null;
-    const user = this.data.users[keyObj.userId];
-    if (!user || user.credits < quantity) return null;
-    this.addCredits(user.id, -quantity, 'scan_debit');
-    return this.toPublicUser(user);
+    const keyRow = this.db.prepare('SELECT * FROM api_keys WHERE key = ?').get(apiKeyString) as any;
+    if (!keyRow || !keyRow.active) return null;
+    const userRow = this.db.prepare('SELECT * FROM users WHERE id = ?').get(keyRow.userId);
+    if (!userRow) return null;
+    const user = this.rowToUser(userRow);
+    if (user.credits < quantity) return null;
+    return this.addCredits(user.id, -quantity, 'scan_debit');
   }
 
   // --- Suppression Rules ---
   listSuppressions(userId: string): SuppressionRule[] {
-    return this.data.suppressions.filter(s => s.userId === userId);
+    return this.db.prepare('SELECT id, userId, targetUrl, findingTitle, reason, createdAt FROM suppressions WHERE userId = ?')
+      .all(userId)
+      .map((r: any) => ({ id: r.id, userId: r.userId, targetUrl: r.targetUrl, findingTitle: r.findingTitle, reason: r.reason ?? '', createdAt: r.createdAt }));
   }
 
   addSuppression(userId: string, targetUrl: string, findingTitle: string, reason: string): SuppressionRule {
     const id = 'supp_' + crypto.randomBytes(8).toString('hex');
     const rule: SuppressionRule = { id, userId, targetUrl, findingTitle, reason, createdAt: new Date().toISOString() };
-    this.data.suppressions.push(rule);
 
-    Object.values(this.data.scans).forEach(scan => {
-      if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(targetUrl)) {
+    const tx = this.db.transaction(() => {
+      this.db.prepare('INSERT INTO suppressions (id, userId, targetUrl, findingTitle, reason, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
+        .run(id, userId, targetUrl, findingTitle, reason, rule.createdAt);
+
+      // Retroactively flag matching findings across the user's scans on this URL
+      const scans = this.db.prepare('SELECT * FROM scans WHERE userId = ?').all(userId).map(r => this.rowToScan(r));
+      const targetClean = cleanUrl(targetUrl);
+      for (const scan of scans) {
+        if (cleanUrl(scan.url) !== targetClean || !scan.findings) continue;
         let dirty = false;
-        if (scan.findings) {
-          scan.findings = scan.findings.map(f => {
-            if (f.title === findingTitle) {
-              dirty = true;
-              return { ...f, isFalsePositive: true, suppressionReason: reason, suppressedAt: rule.createdAt };
-            }
-            return f;
-          });
-          if (dirty) {
-            const r = recalculateScore(scan.findings);
-            scan.score = r.score;
-            scan.severity = r.severity;
+        scan.findings = scan.findings.map(f => {
+          if (f.title === findingTitle) {
+            dirty = true;
+            return { ...f, isFalsePositive: true, suppressionReason: reason, suppressedAt: rule.createdAt };
           }
+          return f;
+        });
+        if (dirty) {
+          const r = recalculateScore(scan.findings);
+          scan.score = r.score;
+          scan.severity = r.severity;
+          this.writeScan(scan);
         }
       }
     });
+    tx();
 
-    this.save();
     return rule;
   }
 
   removeSuppression(userId: string, ruleId: string): boolean {
-    const ruleToRemove = this.data.suppressions.find(r => r.id === ruleId && r.userId === userId);
+    const ruleToRemove = this.db.prepare('SELECT * FROM suppressions WHERE id = ? AND userId = ?').get(ruleId, userId) as any;
     if (!ruleToRemove) return false;
 
-    this.data.suppressions = this.data.suppressions.filter(r => !(r.id === ruleId && r.userId === userId));
+    const tx = this.db.transaction(() => {
+      this.db.prepare('DELETE FROM suppressions WHERE id = ? AND userId = ?').run(ruleId, userId);
 
-    Object.values(this.data.scans).forEach(scan => {
-      if (scan.userId === userId && cleanUrl(scan.url) === cleanUrl(ruleToRemove.targetUrl)) {
+      const scans = this.db.prepare('SELECT * FROM scans WHERE userId = ?').all(userId).map(r => this.rowToScan(r));
+      const targetClean = cleanUrl(ruleToRemove.targetUrl);
+      for (const scan of scans) {
+        if (cleanUrl(scan.url) !== targetClean || !scan.findings) continue;
         let dirty = false;
-        if (scan.findings) {
-          scan.findings = scan.findings.map(f => {
-            if (f.title === ruleToRemove.findingTitle) {
-              dirty = true;
-              const { isFalsePositive: _, suppressionReason: __, suppressedAt: ___, ...rest } = f as any;
-              return rest;
-            }
-            return f;
-          });
-          if (dirty) {
-            const r = recalculateScore(scan.findings);
-            scan.score = r.score;
-            scan.severity = r.severity;
+        scan.findings = scan.findings.map(f => {
+          if (f.title === ruleToRemove.findingTitle) {
+            dirty = true;
+            const { isFalsePositive: _, suppressionReason: __, suppressedAt: ___, ...rest } = f as any;
+            return rest;
           }
+          return f;
+        });
+        if (dirty) {
+          const r = recalculateScore(scan.findings);
+          scan.score = r.score;
+          scan.severity = r.severity;
+          this.writeScan(scan);
         }
       }
     });
+    tx();
 
-    this.save();
     return true;
   }
 
   // --- Monitored Targets ---
+  private rowToMonitored(r: any): MonitoredTarget {
+    return {
+      id: r.id, userId: r.userId, url: r.url, frequencyDays: r.frequencyDays,
+      scheduleString: r.scheduleString ?? undefined, lastScannedAt: r.lastScannedAt ?? undefined,
+      nextScanAt: r.nextScanAt ?? undefined, createdAt: r.createdAt,
+    };
+  }
+
   listMonitoredTargets(userId: string): MonitoredTarget[] {
-    return this.data.monitoredTargets.filter(t => t.userId === userId);
+    return this.db.prepare('SELECT * FROM monitored_targets WHERE userId = ?').all(userId).map(r => this.rowToMonitored(r));
   }
 
   addMonitoredTarget(userId: string, url: string, frequencyDays: number, scheduleString?: string): MonitoredTarget {
@@ -322,33 +420,32 @@ export class LocalFileDb {
       createdAt: new Date().toISOString(),
       nextScanAt: new Date(Date.now() + frequencyDays * 86400000).toISOString(),
     };
-    this.data.monitoredTargets.push(target);
-    this.save();
+    this.db.prepare('INSERT INTO monitored_targets (id, userId, url, frequencyDays, scheduleString, lastScannedAt, nextScanAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(id, userId, url, frequencyDays, scheduleString ?? null, null, target.nextScanAt, target.createdAt);
     return target;
   }
 
   removeMonitoredTarget(userId: string, id: string): boolean {
-    const before = this.data.monitoredTargets.length;
-    this.data.monitoredTargets = this.data.monitoredTargets.filter(t => !(t.id === id && t.userId === userId));
-    const removed = this.data.monitoredTargets.length !== before;
-    if (removed) this.save();
-    return removed;
+    const info = this.db.prepare('DELETE FROM monitored_targets WHERE id = ? AND userId = ?').run(id, userId);
+    return info.changes > 0;
   }
 
   getDueMonitoringTargets(): MonitoredTarget[] {
     const now = new Date().toISOString();
-    return this.data.monitoredTargets.filter(t => t.nextScanAt && t.nextScanAt <= now);
+    return this.db.prepare('SELECT * FROM monitored_targets WHERE nextScanAt IS NOT NULL AND nextScanAt <= ?')
+      .all(now).map(r => this.rowToMonitored(r));
   }
 
   touchMonitoredTarget(id: string): void {
-    const target = this.data.monitoredTargets.find(t => t.id === id);
-    if (target) {
-      target.lastScannedAt = new Date().toISOString();
-      target.nextScanAt = new Date(Date.now() + target.frequencyDays * 86400000).toISOString();
-      this.save();
-    }
+    const row = this.db.prepare('SELECT frequencyDays FROM monitored_targets WHERE id = ?').get(id) as any;
+    if (!row) return;
+    const lastScannedAt = new Date().toISOString();
+    const nextScanAt = new Date(Date.now() + row.frequencyDays * 86400000).toISOString();
+    this.db.prepare('UPDATE monitored_targets SET lastScannedAt = ?, nextScanAt = ? WHERE id = ?')
+      .run(lastScannedAt, nextScanAt, id);
   }
 
+  // --- Scan logs (transient, in-memory — only relevant during an active scan) ---
   appendScanLog(scanId: string, message: string): void {
     if (!this.scanLogs.has(scanId)) this.scanLogs.set(scanId, []);
     const ts = new Date().toISOString();
@@ -386,8 +483,7 @@ export class LocalFileDb {
       scan.findings = updatedFindings;
       scan.score = recalc.score;
       scan.severity = recalc.severity;
-      this.data.scans[scan.id] = scan;
-      this.save();
+      this.writeScan(scan);
     }
 
     return scan;
@@ -397,34 +493,33 @@ export class LocalFileDb {
   createAuthProfile(userId: string, data: Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>): AuthProfile {
     const id = 'ap_' + crypto.randomBytes(8).toString('hex');
     const profile: AuthProfile = { ...data, id, userId, createdAt: new Date().toISOString() };
-    this.data.authProfiles[id] = profile;
-    this.save();
+    this.db.prepare('INSERT INTO auth_profiles (id, userId, data) VALUES (?, ?, ?)')
+      .run(id, userId, JSON.stringify(profile));
     return profile;
   }
 
   getAuthProfile(userId: string, id: string): AuthProfile | null {
-    const p = this.data.authProfiles[id];
-    return p && p.userId === userId ? p : null;
+    const row = this.db.prepare('SELECT data FROM auth_profiles WHERE id = ? AND userId = ?').get(id, userId) as any;
+    return row ? (JSON.parse(row.data) as AuthProfile) : null;
   }
 
   listAuthProfiles(userId: string): AuthProfile[] {
-    return Object.values(this.data.authProfiles).filter(p => p.userId === userId);
+    return this.db.prepare('SELECT data FROM auth_profiles WHERE userId = ?')
+      .all(userId).map((r: any) => JSON.parse(r.data) as AuthProfile);
   }
 
   deleteAuthProfile(userId: string, id: string): boolean {
-    const p = this.data.authProfiles[id];
-    if (!p || p.userId !== userId) return false;
-    delete this.data.authProfiles[id];
-    this.save();
-    return true;
+    const info = this.db.prepare('DELETE FROM auth_profiles WHERE id = ? AND userId = ?').run(id, userId);
+    return info.changes > 0;
   }
 
   updateAuthProfile(userId: string, id: string, updates: Partial<Omit<AuthProfile, 'id' | 'userId' | 'createdAt'>>): AuthProfile | null {
-    const p = this.data.authProfiles[id];
-    if (!p || p.userId !== userId) return null;
-    Object.assign(p, updates);
-    this.save();
-    return p;
+    const existing = this.getAuthProfile(userId, id);
+    if (!existing) return null;
+    const merged = { ...existing, ...updates };
+    this.db.prepare('UPDATE auth_profiles SET data = ? WHERE id = ? AND userId = ?')
+      .run(JSON.stringify(merged), id, userId);
+    return merged;
   }
 }
 
