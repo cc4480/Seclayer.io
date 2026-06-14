@@ -56,10 +56,14 @@ export function useOrchestrator(notify: Notify, scanUrl: string) {
             setPentagiRunning(false);
           }
         }, 750);
+      } else {
+        setPentagiRunning(false);
+        notify('PentAGI exploitation simulation failed.', 'error');
       }
     } catch (err) {
       console.error(err);
       setPentagiRunning(false);
+      notify('PentAGI exploitation simulation failed.', 'error');
     }
   };
 

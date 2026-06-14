@@ -56,8 +56,8 @@ export default function LoginModal({ onClose, onLoginSuccess }: LoginModalProps)
         {isMagicLinkSent ? (
           <div className="bg-[#22c55e]/5 border border-[#22c55e]/25 p-5 rounded text-center space-y-2 text-[#22c55e]">
             <Check className="w-6 h-6 mx-auto bg-[#22c55e] text-black rounded-full p-1" />
-            <span className="text-xs font-mono font-bold block uppercase tracking-wider">Magic access granted</span>
-            <p className="text-[11px] text-[#a1a1aa] font-mono">Dispatched access token to {email}. Loading terminal settings...</p>
+            <span className="text-xs font-mono font-bold block uppercase tracking-wider">Access granted</span>
+            <p className="text-[11px] text-[#a1a1aa] font-mono">Signed in as {email}. Loading terminal settings...</p>
           </div>
         ) : (
           <form onSubmit={handleSubmit} className="space-y-4">

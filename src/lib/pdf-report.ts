@@ -34,7 +34,10 @@ export function generateAuditPdf(scan: Scan, findings: Finding[]) {
   doc.text(`Target Assessed: ${scan.url}`, 15, 65);
   doc.text(`Security Posture Score: ${scan.score}/100`, 15, 72);
   const riskSev = scan.severity ? scan.severity.toUpperCase() : 'UNKNOWN';
-  doc.text(`Risk Severity: ${scan.score < 60 ? 'HIGH RISK' : scan.score < 85 ? 'MODERATE' : 'LOW RISK'} (${riskSev})`, 15, 79);
+  const riskBucket = scan.severity
+    ? (scan.severity === 'critical' || scan.severity === 'high' ? 'HIGH RISK' : scan.severity === 'medium' ? 'MODERATE' : 'LOW RISK')
+    : (scan.score < 60 ? 'HIGH RISK' : scan.score < 85 ? 'MODERATE' : 'LOW RISK');
+  doc.text(`Risk Severity: ${riskBucket} (${riskSev})`, 15, 79);
   doc.text(`Total Vulnerabilities: ${findings.length}`, 15, 86);
 
   // AI Summary
