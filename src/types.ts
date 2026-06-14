@@ -36,6 +36,19 @@ export interface SuppressionRule {
   createdAt: string;
 }
 
+export interface ScanDiagnostics {
+  responseStatus: number;
+  requestHeaders: Record<string, string>;
+  responseHeaders: Record<string, string>;
+  ip: string;
+  nameserver: string;
+  protocol: string;
+  probedPaths: Array<{ path: string; status: number; exposed: boolean }>;
+  techLeaked: string[];
+  missingHeaders: string[];
+  liveSubdomains: number;
+}
+
 export interface Scan {
   id: string;
   userId: string;
@@ -48,6 +61,7 @@ export interface Scan {
   severity?: Severity;
   findings?: Finding[];
   aiSummary?: string;
+  diagnostics?: ScanDiagnostics;
   error?: string;
   createdAt: string;
   completedAt?: string;

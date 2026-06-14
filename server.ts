@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import express, { Request, Response, NextFunction } from 'express';
 import path from 'path';
 import cors from 'cors';
@@ -186,6 +187,25 @@ function generateSarif(scan: import('./src/types.js').Scan) {
   };
 }
 
+/** Distil the full DiagnosticResult into the compact real data surfaced in the report's raw drawer. */
+function buildScanDiagnostics(diag: import('./server/scanner.js').DiagnosticResult): import('./src/types.js').ScanDiagnostics {
+  return {
+    responseStatus: diag.responseStatus,
+    requestHeaders: {
+      'User-Agent': 'Seclayer-Security-Scanner/2.0 (seclayer.io; scanner@seclayer.io)',
+      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    },
+    responseHeaders: diag.headers,
+    ip: diag.easmPerimeter.ip,
+    nameserver: diag.easmPerimeter.nameserver,
+    protocol: diag.easmPerimeter.protocol,
+    probedPaths: diag.probedPaths,
+    techLeaked: diag.techLeaked,
+    missingHeaders: diag.missingHeaders,
+    liveSubdomains: diag.easmPerimeter.subdomains.filter(s => s.status === 'live').length,
+  };
+}
+
 export function createApp(dbInstance: LocalFileDb) {
   const app = express();
 
@@ -271,6 +291,7 @@ export function createApp(dbInstance: LocalFileDb) {
         severity: outputReport.severity,
         findings: outputReport.findings,
         aiSummary: outputReport.aiSummary,
+        diagnostics: buildScanDiagnostics(diagnostics),
         completedAt: new Date().toISOString(),
       });
       dbInstance.appendScanLog(scanId, `[COMPLETE] Score: ${outputReport.score}/100 — ${outputReport.findings.length} findings`);
@@ -360,6 +381,7 @@ export function createApp(dbInstance: LocalFileDb) {
       const pendingScan = dbInstance.createScan(user.id, url, authHeader);
       const finishedScan = dbInstance.updateScan(pendingScan.id, {
         status: 'complete',
+        diagnostics: buildScanDiagnostics(diagnostics),
         score: aiReport.score,
         severity: aiReport.severity,
         findings: aiReport.findings,

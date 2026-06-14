@@ -15,57 +15,6 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
   const [progressPercent, setProgressPercent] = useState(10);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
-  // Micro-event activity feed
-  const microEventsConfig: Record<string, string[]> = {
-    initial: [
-      'Establishing system control loop metrics...',
-      'Validating credential token authorization...',
-      'Provisioning safe worker environments...',
-    ],
-    queued: [
-      'Querying target perimeter socket state...',
-      'Resolving public Domain & DNS records structure...',
-      'Pre-fetching certificate transparency logs ledger...',
-    ],
-    scanning: [
-      'Checking SSL protocol schemas on host connection...',
-      'Evaluating Strict-Transport-Security policy headers...',
-      'Probing common sensitive paths for exposures...',
-    ],
-    analyzing: [
-      'Forwarding diagnostics to DeepSeek AI...',
-      'Calculating posture weights and severity metrics...',
-      'Compiling developer-readable remediation guidance...',
-    ],
-    complete: [
-      'All diagnostic endpoints cleared...',
-      'Vulnerability signatures archived.',
-      'Report compiled successfully.',
-    ],
-  };
-
-  const [activeEvents, setActiveEvents] = useState<{ time: string; msg: string }[]>([]);
-
-  useEffect(() => {
-    const t = new Date().toLocaleTimeString();
-    const currentStatus = scan?.status || 'initial';
-    const firstEvent = microEventsConfig[currentStatus]?.[0] || 'Provisioning security pipeline...';
-    setActiveEvents([{ time: t, msg: firstEvent }]);
-
-    let idx = 1;
-    const interval = setInterval(() => {
-      const statusGroup = scan?.status || 'initial';
-      const list = microEventsConfig[statusGroup] || [];
-      if (list.length > 0) {
-        const tNow = new Date().toLocaleTimeString();
-        setActiveEvents(prev => [{ time: tNow, msg: list[idx % list.length] }, ...prev.slice(0, 4)]);
-        idx++;
-      }
-    }, 1800);
-
-    return () => clearInterval(interval);
-  }, [scan?.status]);
-
   // Poll scan status
   useEffect(() => {
     let active = true;
@@ -275,32 +224,8 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
           </div>
         </div>
 
-        {/* Actions panel with micro-event activity feed */}
-        <div className="border-t border-[#27272a] pt-5 space-y-4 font-mono text-xs text-[#52525b]">
-          <div className="space-y-2">
-            <div className="flex items-center justify-between border-b border-[#27272a]/20 pb-1.5">
-              <span className="text-[10px] font-mono text-[#22c55e] uppercase tracking-widest flex items-center gap-1.5 font-bold">
-                <span className="w-1.5 h-1.5 rounded-full bg-[#22c55e] inline-block animate-ping" />
-                <span>Live Pipeline Activity</span>
-              </span>
-              <span className="text-[9px] text-[#52525b] font-bold">REAL-TIME FEED</span>
-            </div>
-
-            <div className="bg-black/80 border border-[#27272a]/60 rounded p-3 h-28 overflow-y-auto space-y-1.5 scrollbar-thin select-all">
-              {activeEvents.length === 0 ? (
-                <div className="text-[#52525b] text-[10px] animate-pulse">Establishing pipeline trace stream...</div>
-              ) : (
-                activeEvents.map((ev, idx) => (
-                  <div key={idx} className="flex gap-2 text-[10px] items-start transition-opacity duration-300">
-                    <span className="text-zinc-500 shrink-0 font-bold">[{ev.time}]</span>
-                    <span className="text-[#22c55e] shrink-0 font-bold select-none">●</span>
-                    <span className="text-zinc-300 leading-tight">{ev.msg}</span>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-
+        {/* Actions panel */}
+        <div className="border-t border-[#27272a] pt-5 font-mono text-xs text-[#52525b]">
           <div className="flex items-center justify-between">
             <div className="flex items-center space-x-1.5">
               <Cpu className="w-4 h-4 text-[#22c55e] shrink-0" />
