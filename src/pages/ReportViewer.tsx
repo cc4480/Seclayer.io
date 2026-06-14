@@ -32,7 +32,56 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const [suppressError, setSuppressError] = useState<string | null>(null);
   const [expandedApiRows, setExpandedApiRows] = useState<Record<string, boolean>>({});
 
+  // Remediation lifecycle states
+  const [recheckingId, setRecheckingId] = useState<string | null>(null);
+  const [recheckMsg, setRecheckMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
+  const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'in_progress' | 'fixed' | 'verified'>('all');
+
   const findings = scan.findings || [];
+
+  const handleSetRemediation = async (finding: Finding, status: string) => {
+    try {
+      const res = await apiFetch(`/api/scans/${scan.id}/findings/${finding.id}/remediation`, {
+        method: 'PATCH',
+        body: JSON.stringify({ status }),
+      });
+      if (res.ok && onRefreshScans) onRefreshScans();
+    } catch (err) {
+      console.error('Failed to update remediation status:', err);
+    }
+  };
+
+  const handleRecheck = async (finding: Finding) => {
+    setRecheckingId(finding.id);
+    setRecheckMsg(prev => ({ ...prev, [finding.id]: { ok: true, text: 'Re-testing against live target…' } }));
+    try {
+      const res = await apiFetch(`/api/scans/${scan.id}/findings/${finding.id}/recheck`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok) {
+        setRecheckMsg(prev => ({ ...prev, [finding.id]: { ok: !data.stillPresent, text: data.detail } }));
+        if (onRefreshScans) onRefreshScans();
+      } else {
+        setRecheckMsg(prev => ({ ...prev, [finding.id]: { ok: false, text: data.error || 'Re-check failed.' } }));
+      }
+    } catch (err: any) {
+      setRecheckMsg(prev => ({ ...prev, [finding.id]: { ok: false, text: err.message || 'Network error during re-check.' } }));
+    } finally {
+      setRecheckingId(null);
+    }
+  };
+
+  const remediationStatusOf = (f: Finding): 'open' | 'in_progress' | 'fixed' | 'verified' => f.remediationStatus || 'open';
+
+  const REMEDIATION_META: Record<string, { label: string; cls: string }> = {
+    open: { label: 'Open', cls: 'bg-zinc-800/60 text-zinc-400 border-zinc-700/60' },
+    in_progress: { label: 'In Progress', cls: 'bg-amber-500/10 text-amber-400 border-amber-500/30' },
+    fixed: { label: 'Fixed', cls: 'bg-sky-500/10 text-sky-400 border-sky-500/30' },
+    verified: { label: 'Verified', cls: 'bg-[#22c55e]/10 text-[#22c55e] border-[#22c55e]/30' },
+  };
+
+  const moduleFindings = findings.filter(
+    f => f.category === activeTab && (statusFilter === 'all' || remediationStatusOf(f) === statusFilter),
+  );
 
   const handleSaveSuppression = async (finding: Finding) => {
     setIsSuppressing(true);
@@ -293,12 +342,12 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
 
     autoTable(doc, {
       startY: 20,
-      head: [['#', 'Vulnerability', 'Severity', 'Category', 'Impact', 'Remediation']],
+      head: [['#', 'Vulnerability', 'Severity', 'Status', 'Impact', 'Remediation']],
       body: findings.map((f, i) => [
         String(i + 1),
         f.isFalsePositive ? `${f.title} (SUPPRESSED)` : f.title,
         f.severity.toUpperCase(),
-        f.category,
+        f.isFalsePositive ? 'SUPPRESSED' : ({ open: 'Open', in_progress: 'In Progress', fixed: 'Fixed', verified: 'Verified' }[f.remediationStatus || 'open']),
         truncate(f.plainEnglish || f.description, 100),
         truncate(f.fix, 100),
       ]),
@@ -308,11 +357,11 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
       alternateRowStyles: { fillColor: [248, 248, 248] },
       columnStyles: {
         0: { cellWidth: 8 },
-        1: { cellWidth: 38 },
-        2: { cellWidth: 18 },
-        3: { cellWidth: 18 },
-        4: { cellWidth: 52 },
-        5: { cellWidth: 47 },
+        1: { cellWidth: 40 },
+        2: { cellWidth: 17 },
+        3: { cellWidth: 20 },
+        4: { cellWidth: 50 },
+        5: { cellWidth: 46 },
       },
       didParseCell: (data) => {
         if (data.section === 'body' && data.column.index === 2) {
@@ -759,8 +808,31 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                   </span>
                 </div>
 
+                {/* Remediation status filter */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-[9px] font-mono uppercase tracking-wider text-[#52525b]">Status:</span>
+                  {(['all', 'open', 'in_progress', 'fixed', 'verified'] as const).map(s => {
+                    const count = s === 'all'
+                      ? findings.filter(f => f.category === activeTab).length
+                      : findings.filter(f => f.category === activeTab && remediationStatusOf(f) === s).length;
+                    return (
+                      <button
+                        key={s}
+                        onClick={() => setStatusFilter(s)}
+                        className={`text-[9px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border transition-colors cursor-pointer ${
+                          statusFilter === s
+                            ? 'bg-[#22c55e]/10 text-[#22c55e] border-[#22c55e]/30'
+                            : 'bg-black text-[#52525b] border-[#27272a] hover:text-zinc-300'
+                        }`}
+                      >
+                        {s === 'all' ? 'All' : REMEDIATION_META[s].label} ({count})
+                      </button>
+                    );
+                  })}
+                </div>
+
                 {/* Filtered list of findings */}
-                {findings.filter(f => f.category === activeTab).length === 0 ? (
+                {moduleFindings.length === 0 ? (
                   <div className="text-center py-16 bg-black/40 rounded border border-dashed border-[#27272a] flex flex-col items-center">
                     <CheckCircle2 className="w-10 h-10 text-[#22c55e] mb-3" />
                     <span className="text-xs text-white font-bold font-mono uppercase block">Zero Vulnerabilities Outstanding</span>
@@ -780,7 +852,7 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                   </div>
                 ) : (
                   <div className="space-y-4">
-                    {findings.filter(f => f.category === activeTab).map(finding => {
+                    {moduleFindings.map(finding => {
                       let severityColor = 'bg-black text-[#52525b] border border-[#27272a]';
                       if (finding.isFalsePositive) severityColor = 'bg-zinc-800 text-zinc-400 border border-zinc-700/60 font-medium';
                       else if (finding.severity === 'critical') severityColor = 'bg-red-500/10 border border-red-500/25 text-red-400 font-bold';
@@ -814,6 +886,11 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                                 </span>
                               )}
                               <h5 className={`text-xs font-bold font-mono tracking-tight leading-snug ${finding.isFalsePositive ? 'text-zinc-500 line-through' : 'text-white'}`}>{finding.title}</h5>
+                              {!finding.isFalsePositive && (
+                                <span className={`text-[9px] font-mono uppercase px-2 py-0.5 rounded border ${REMEDIATION_META[remediationStatusOf(finding)].cls}`}>
+                                  {REMEDIATION_META[remediationStatusOf(finding)].label}
+                                </span>
+                              )}
                             </div>
                             <span className="text-[10px] text-[#52525b] font-mono tracking-wide">ID: {finding.id}</span>
                           </div>
@@ -934,6 +1011,47 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                                     )}
                                   </div>
                                 </div>
+                              )}
+                            </div>
+                          )}
+
+                          {/* Remediation lifecycle controls */}
+                          {!finding.isFalsePositive && (
+                            <div className="mt-4 border-t border-[#27272a]/30 pt-3 space-y-2.5">
+                              <div className="flex flex-wrap items-center gap-2">
+                                <span className="text-[9px] font-mono uppercase tracking-wider text-[#52525b] mr-1">Remediation:</span>
+                                {(['open', 'in_progress', 'fixed'] as const).map(s => (
+                                  <button
+                                    key={s}
+                                    onClick={() => handleSetRemediation(finding, s)}
+                                    className={`text-[9px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border transition-colors cursor-pointer ${
+                                      remediationStatusOf(finding) === s
+                                        ? REMEDIATION_META[s].cls
+                                        : 'bg-black text-[#52525b] border-[#27272a] hover:text-zinc-300'
+                                    }`}
+                                  >
+                                    {REMEDIATION_META[s].label}
+                                  </button>
+                                ))}
+                                <button
+                                  onClick={() => handleRecheck(finding)}
+                                  disabled={recheckingId === finding.id}
+                                  className="ml-auto text-[9px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border border-[#22c55e]/30 bg-[#22c55e]/5 text-[#22c55e] hover:bg-[#22c55e]/15 transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                  <Zap className="w-3 h-3" />
+                                  {recheckingId === finding.id ? 'Re-testing…' : 'Re-check fix'}
+                                </button>
+                              </div>
+                              {recheckMsg[finding.id] && (
+                                <p className={`text-[10px] font-mono leading-relaxed flex items-start gap-1.5 ${recheckMsg[finding.id].ok ? 'text-[#22c55e]' : 'text-amber-400'}`}>
+                                  {recheckMsg[finding.id].ok ? <CheckCircle2 className="w-3 h-3 shrink-0 mt-0.5" /> : <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />}
+                                  <span>{recheckMsg[finding.id].text}</span>
+                                </p>
+                              )}
+                              {finding.lastVerifiedAt && !recheckMsg[finding.id] && (
+                                <p className="text-[9px] font-mono text-[#52525b]">
+                                  Last re-checked {new Date(finding.lastVerifiedAt).toLocaleString()} — {finding.verificationResult === 'resolved' ? 'resolved' : 'still present'}
+                                </p>
                               )}
                             </div>
                           )}

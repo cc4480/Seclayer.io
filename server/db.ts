@@ -282,6 +282,20 @@ export class LocalFileDb {
     return merged;
   }
 
+  /** Patch a single finding inside a scan (remediation lifecycle updates). */
+  updateFinding(scanId: string, findingId: string, updates: Partial<Finding>): Scan | null {
+    const scan = this.getScan(scanId);
+    if (!scan || !scan.findings) return null;
+    let found = false;
+    scan.findings = scan.findings.map(f => {
+      if (f.id === findingId) { found = true; return { ...f, ...updates }; }
+      return f;
+    });
+    if (!found) return null;
+    this.writeScan(scan);
+    return scan;
+  }
+
   // --- API Keys ---
   private rowToApiKey(r: any): ApiKey {
     return { id: r.id, userId: r.userId, key: r.key, credits: r.credits, active: !!r.active, createdAt: r.createdAt };

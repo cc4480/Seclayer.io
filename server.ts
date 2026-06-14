@@ -8,6 +8,7 @@ import { db, LocalFileDb, recalculateScore } from './server/db.js';
 import type { AuthProfile } from './src/types.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
 import { runCrawl } from './server/crawler.js';
+import { recheckFinding } from './server/recheck.js';
 import { generateAiReport } from './server/ai.js';
 import { runPentagiExploit } from './server/pentagi.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
@@ -555,6 +556,58 @@ export function createApp(dbInstance: LocalFileDb) {
     if (!finding) return res.status(404).json({ error: 'Finding not found.' });
     const rule = dbInstance.addSuppression(req.userId!, scan.url, finding.title, reason);
     res.json({ status: 'ok', rule });
+  });
+
+  // Remediation lifecycle — set a finding's status (open/in_progress/fixed/verified)
+  app.patch('/api/scans/:scanId/findings/:findingId/remediation', requireAuth, (req, res) => {
+    const { scanId, findingId } = req.params;
+    const { status, note } = req.body as { status?: string; note?: string };
+    const valid = ['open', 'in_progress', 'fixed', 'verified'];
+    if (!status || !valid.includes(status)) {
+      return res.status(400).json({ error: `status must be one of: ${valid.join(', ')}` });
+    }
+    const scan = dbInstance.getScan(scanId);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    const updated = dbInstance.updateFinding(scanId, findingId, {
+      remediationStatus: status as import('./src/types.js').RemediationStatus,
+      remediationNote: typeof note === 'string' ? note : undefined,
+      remediationUpdatedAt: new Date().toISOString(),
+    });
+    if (!updated) return res.status(404).json({ error: 'Finding not found.' });
+    res.json({ status: 'ok', finding: updated.findings?.find(f => f.id === findingId) });
+  });
+
+  // Re-check a single finding — re-run the real scan pipeline and confirm if the fix landed
+  app.post('/api/scans/:scanId/findings/:findingId/recheck', requireAuth, async (req, res) => {
+    const { scanId, findingId } = req.params;
+    const scan = dbInstance.getScan(scanId);
+    if (!scan || scan.userId !== req.userId) {
+      return res.status(404).json({ error: 'Scan not found.' });
+    }
+    const finding = scan.findings?.find(f => f.id === findingId);
+    if (!finding) return res.status(404).json({ error: 'Finding not found.' });
+    try {
+      const result = await recheckFinding(scan.url, finding, scan.authHeader);
+      const patch: Partial<import('./src/types.js').Finding> = {
+        lastVerifiedAt: result.checkedAt,
+        verificationResult: result.stillPresent ? 'still_present' : 'resolved',
+      };
+      // A clean re-test promotes the finding to "verified"; a positive re-test
+      // drops a premature "fixed" back to "in_progress".
+      if (!result.stillPresent) patch.remediationStatus = 'verified';
+      else if (finding.remediationStatus === 'fixed') patch.remediationStatus = 'in_progress';
+      const updated = dbInstance.updateFinding(scanId, findingId, patch);
+      res.json({
+        status: 'ok',
+        stillPresent: result.stillPresent,
+        detail: result.detail,
+        finding: updated?.findings?.find(f => f.id === findingId),
+      });
+    } catch (err: any) {
+      res.status(502).json({ error: err.message || 'Re-check failed.' });
+    }
   });
 
   // Monitoring

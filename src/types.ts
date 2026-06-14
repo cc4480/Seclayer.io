@@ -9,6 +9,8 @@ export interface User {
   createdAt: string;
 }
 
+export type RemediationStatus = 'open' | 'in_progress' | 'fixed' | 'verified';
+
 export interface Finding {
   id: string;
   title: string;
@@ -25,6 +27,12 @@ export interface Finding {
   rawResponse?: string;
   plainEnglish?: string;
   codeFixExample?: string;
+  // Remediation lifecycle
+  remediationStatus?: RemediationStatus; // undefined === 'open'
+  remediationNote?: string;
+  remediationUpdatedAt?: string;
+  lastVerifiedAt?: string;
+  verificationResult?: 'still_present' | 'resolved';
 }
 
 export interface SuppressionRule {
