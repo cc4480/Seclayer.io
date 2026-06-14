@@ -673,6 +673,56 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                   </div>
                 </div>
 
+                {/* Application Surface Map — deep crawl coverage */}
+                {scan.crawl && scan.crawl.pagesCrawled > 0 && (
+                  <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5 space-y-4">
+                    <div className="flex items-center justify-between">
+                      <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold flex items-center space-x-2">
+                        <Grid className="w-3.5 h-3.5 text-[#22c55e]" />
+                        <span>Application Surface Map (Deep Crawl)</span>
+                      </h5>
+                      {scan.crawl.authenticated && (
+                        <span className="text-[9px] font-mono uppercase bg-[#22c55e]/10 border border-[#22c55e]/20 text-[#22c55e] px-2 py-0.5 rounded">Authenticated</span>
+                      )}
+                    </div>
+                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                      {[
+                        { label: 'Pages Crawled', value: scan.crawl.pagesCrawled },
+                        { label: 'Forms Found', value: scan.crawl.forms.length },
+                        { label: 'Parameters', value: scan.crawl.discoveredParams.length },
+                        { label: 'Crawl Depth', value: scan.crawl.maxDepthReached },
+                      ].map((stat) => (
+                        <div key={stat.label} className="bg-black border border-[#27272a]/60 rounded p-3 text-center">
+                          <div className="text-xl font-mono font-bold text-[#22c55e]">{stat.value}</div>
+                          <div className="text-[9px] font-mono uppercase tracking-wider text-[#52525b] mt-1">{stat.label}</div>
+                        </div>
+                      ))}
+                    </div>
+                    {scan.crawl.forms.length > 0 && (
+                      <div className="space-y-1.5">
+                        <span className="text-[9px] font-mono uppercase tracking-wider text-[#52525b]">Discovered Forms</span>
+                        <div className="max-h-32 overflow-y-auto scrollbar-thin space-y-1">
+                          {scan.crawl.forms.slice(0, 12).map((f, i) => (
+                            <div key={i} className="flex items-center justify-between font-mono text-[10px] bg-black border border-[#27272a]/40 rounded px-2.5 py-1.5">
+                              <span className="text-zinc-400 truncate max-w-[60%]"><span className="text-[#52525b]">{f.method}</span> {f.action}</span>
+                              <span className="flex items-center gap-1.5 shrink-0">
+                                {f.hasPassword && <span className="text-amber-400">password</span>}
+                                {f.insecure && <span className="text-[#f87171]">http</span>}
+                                {f.method === 'POST' && (f.hasCsrfToken
+                                  ? <span className="text-[#22c55e]">csrf✓</span>
+                                  : <span className="text-[#f87171]">no-csrf</span>)}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+                    <p className="text-[10px] font-mono text-[#52525b] leading-relaxed">
+                      Crawled {scan.crawl.pagesCrawled} same-origin page(s) in {(scan.crawl.durationMs / 1000).toFixed(1)}s. Business-logic checks (insecure credential forms, missing CSRF tokens, mixed content, object-reference / IDOR signals) run against this discovered surface and appear in the findings above.
+                    </p>
+                  </div>
+                )}
+
                 {/* Total vulnerabilities warning banner */}
                 {findings.length > 0 && (
                   <div className="bg-red-950/20 border border-red-500/20 rounded p-4 flex items-center space-x-3">

@@ -136,7 +136,7 @@ export class LocalFileDb {
     if (row.findings != null) scan.findings = JSON.parse(row.findings);
     if (row.aiSummary != null) scan.aiSummary = row.aiSummary;
     if (row.diagnostics != null) scan.diagnostics = JSON.parse(row.diagnostics);
-    if (row.crawl != null) (scan as any).crawl = JSON.parse(row.crawl);
+    if (row.crawl != null) scan.crawl = JSON.parse(row.crawl);
     if (row.error != null) scan.error = row.error;
     if (row.completedAt != null) scan.completedAt = row.completedAt;
     return scan;
@@ -165,7 +165,7 @@ export class LocalFileDb {
       findings: scan.findings != null ? JSON.stringify(scan.findings) : null,
       aiSummary: scan.aiSummary ?? null,
       diagnostics: scan.diagnostics != null ? JSON.stringify(scan.diagnostics) : null,
-      crawl: (scan as any).crawl != null ? JSON.stringify((scan as any).crawl) : null,
+      crawl: scan.crawl != null ? JSON.stringify(scan.crawl) : null,
       error: scan.error ?? null,
       createdAt: scan.createdAt,
       completedAt: scan.completedAt ?? null,

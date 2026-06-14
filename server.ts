@@ -4,9 +4,10 @@ import path from 'path';
 import cors from 'cors';
 import { rateLimit } from 'express-rate-limit';
 import { createServer as createViteServer } from 'vite';
-import { db, LocalFileDb } from './server/db.js';
+import { db, LocalFileDb, recalculateScore } from './server/db.js';
 import type { AuthProfile } from './src/types.js';
 import { runDiagnostics, compileStaticFindings } from './server/scanner.js';
+import { runCrawl } from './server/crawler.js';
 import { generateAiReport } from './server/ai.js';
 import { runPentagiExploit } from './server/pentagi.js';
 import { signToken, verifyToken, hashPassword, verifyPassword } from './server/auth.js';
@@ -206,6 +207,19 @@ function buildScanDiagnostics(diag: import('./server/scanner.js').DiagnosticResu
   };
 }
 
+// Merge crawl-derived findings into the static set and re-score so the AI
+// stage and the final report account for the deep-crawl evidence.
+function mergeCrawl(
+  staticCompiled: { score: number; severity: import('./src/types.js').Severity; findings: import('./src/types.js').Finding[] },
+  crawlFindings: import('./src/types.js').Finding[],
+): void {
+  if (!crawlFindings.length) return;
+  staticCompiled.findings = staticCompiled.findings.concat(crawlFindings);
+  const rescored = recalculateScore(staticCompiled.findings);
+  staticCompiled.score = rescored.score;
+  staticCompiled.severity = rescored.severity;
+}
+
 export function createApp(dbInstance: LocalFileDb) {
   const app = express();
 
@@ -280,6 +294,16 @@ export function createApp(dbInstance: LocalFileDb) {
       dbInstance.appendScanLog(scanId, '[AI] Compiling static findings and scoring...');
       const staticCompiled = compileStaticFindings(diagnostics);
 
+      // Deep authenticated crawl — maps the application surface and derives
+      // business-logic findings (insecure credential forms, missing CSRF,
+      // mixed content, IDOR-style object references) the root-page probe misses.
+      dbInstance.appendScanLog(scanId, '[CRAWL] Mapping application surface (authenticated deep crawl)...');
+      const crawl = await runCrawl(scan.url, {
+        authHeader: scan.authHeader,
+        onLog: (msg) => dbInstance.appendScanLog(scanId, msg),
+      });
+      mergeCrawl(staticCompiled, crawl.findings);
+
       dbInstance.appendScanLog(scanId, '[AI] Forwarding diagnostics to DeepSeek for analysis...');
       dbInstance.updateScan(scanId, { status: 'analyzing' });
 
@@ -292,6 +316,7 @@ export function createApp(dbInstance: LocalFileDb) {
         findings: outputReport.findings,
         aiSummary: outputReport.aiSummary,
         diagnostics: buildScanDiagnostics(diagnostics),
+        crawl: crawl.result,
         completedAt: new Date().toISOString(),
       });
       dbInstance.appendScanLog(scanId, `[COMPLETE] Score: ${outputReport.score}/100 — ${outputReport.findings.length} findings`);
@@ -376,12 +401,15 @@ export function createApp(dbInstance: LocalFileDb) {
     try {
       const diagnostics = await runDiagnostics(url, authHeader);
       const staticCompiled = compileStaticFindings(diagnostics);
+      const crawl = await runCrawl(url, { authHeader });
+      mergeCrawl(staticCompiled, crawl.findings);
       const aiReport = await generateAiReport(url, diagnostics, staticCompiled);
 
       const pendingScan = dbInstance.createScan(user.id, url, authHeader);
       const finishedScan = dbInstance.updateScan(pendingScan.id, {
         status: 'complete',
         diagnostics: buildScanDiagnostics(diagnostics),
+        crawl: crawl.result,
         score: aiReport.score,
         severity: aiReport.severity,
         findings: aiReport.findings,

@@ -49,6 +49,35 @@ export interface ScanDiagnostics {
   liveSubdomains: number;
 }
 
+export interface CrawlPage {
+  url: string;
+  status: number;
+  depth: number;
+  title?: string;
+  contentType?: string;
+}
+
+export interface CrawlForm {
+  pageUrl: string;
+  action: string;
+  method: string;
+  inputs: string[];
+  hasPassword: boolean;
+  hasCsrfToken: boolean;
+  insecure: boolean; // submits over plain HTTP
+}
+
+export interface CrawlResult {
+  startUrl: string;
+  pagesCrawled: number;
+  maxDepthReached: number;
+  durationMs: number;
+  authenticated: boolean;
+  pages: CrawlPage[];
+  forms: CrawlForm[];
+  discoveredParams: string[];
+}
+
 export interface Scan {
   id: string;
   userId: string;
@@ -62,6 +91,7 @@ export interface Scan {
   findings?: Finding[];
   aiSummary?: string;
   diagnostics?: ScanDiagnostics;
+  crawl?: CrawlResult;
   error?: string;
   createdAt: string;
   completedAt?: string;
