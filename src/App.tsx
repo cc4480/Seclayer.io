@@ -4,6 +4,7 @@ import Landing from './pages/Landing.js';
 import Dashboard from './pages/Dashboard.js';
 import ReportViewer from './pages/ReportViewer.js';
 import ScanProgress from './pages/ScanProgress.js';
+import Trust from './pages/Trust.js';
 import LoginModal from './components/LoginModal.js';
 import { User, Scan, ApiKey, AuthProfile } from './types.js';
 import { apiFetch, setToken, clearToken, getToken } from './lib/api.js';
@@ -13,7 +14,7 @@ export default function App() {
   const [scans, setScans] = useState<Scan[]>([]);
   const [apiKeys, setApiKeys] = useState<ApiKey[]>([]);
   const [authProfiles, setAuthProfiles] = useState<AuthProfile[]>([]);
-  const [currentView, setCurrentView] = useState<'landing' | 'dashboard' | 'progress' | 'report'>('landing');
+  const [currentView, setCurrentView] = useState<'landing' | 'dashboard' | 'progress' | 'report' | 'trust'>('landing');
   const [selectedScanId, setSelectedScanId] = useState<string | null>(null);
   const [showLogin, setShowLogin] = useState(false);
   const [isPerformingAction, setIsPerformingAction] = useState(false);
@@ -165,6 +166,10 @@ export default function App() {
             onNavigate={handleNavigate}
             userEmail={user?.email || ''}
           />
+        )}
+
+        {currentView === 'trust' && (
+          <Trust onNavigate={handleNavigate} />
         )}
 
         {currentView === 'dashboard' && user && (
