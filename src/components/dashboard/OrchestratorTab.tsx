@@ -119,25 +119,38 @@ export default function OrchestratorTab() {
     setPentagiError(null);
     try {
       const res = await apiFetch(`/api/enterprise/pentagi/logs?url=${encodeURIComponent(pentagiUrl.trim())}`);
-      if (res.ok) {
-        const data = await res.json();
-        let idx = 0;
-        const interval = setInterval(() => {
-          if (idx < data.logs.length) {
-            setPentagiLogs(prev => [...prev, data.logs[idx]]);
-            idx++;
-          } else {
-            clearInterval(interval);
-            setPentagiRunning(false);
-          }
-        }, 750);
-      } else {
-        const data = await res.json();
+      if (!res.ok || !res.body) {
+        const data = await res.json().catch(() => ({}));
         setPentagiError(data.error || 'PentAGI run failed.');
-        setPentagiRunning(false);
+        return;
+      }
+
+      // Read the live newline-delimited JSON stream — each agent event is
+      // rendered the moment the backend produces it during the real run.
+      const reader = res.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf('\n')) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          let event: any;
+          try { event = JSON.parse(line); } catch { continue; }
+          if (event.type === 'log' && event.entry) {
+            setPentagiLogs(prev => [...prev, event.entry]);
+          } else if (event.type === 'error') {
+            setPentagiError(event.error || 'PentAGI run failed.');
+          }
+        }
       }
     } catch (err: any) {
       setPentagiError(err.message || 'Network error.');
+    } finally {
       setPentagiRunning(false);
     }
   };
@@ -567,11 +580,11 @@ export default function OrchestratorTab() {
         <div className="space-y-4 bg-black/40 border border-[#27272a] rounded p-6">
           <div>
             <h3 className="text-sm font-bold text-white mb-1 uppercase tracking-tight flex items-center gap-1.5">
-              <span>5. Multi-Agent Autonomous Pentesting (PentAGI)</span>
-              <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2">AutoPentest-AI Executor</span>
+              <span>5. Multi-Stage Automated Pentesting (PentAGI)</span>
+              <span className="bg-[#18181b] text-[#52525b] text-[9px] px-2 py-0.5 rounded ml-2">AI-Assisted Executor</span>
             </h3>
             <p className="text-[#a1a1aa] text-[11px] mb-4">
-              LLM-driven cooperative agents running inside sandboxed containers. Scout spiders the target, Exploiter crafts multi-stage bypass attacks, and Reporter maps vulnerability entities into a structured exploitation graph.
+              A real multi-stage black-box exploitation run against the target. The Scout stage maps the surface (DNS, ports, TLS, subdomains), the Exploiter stage fires live injection, auth-bypass and misconfiguration probes, and the Reporter stage uses AI to synthesize confirmed findings into a strategic remediation plan. Events stream live as each stage executes.
             </p>
           </div>
 
@@ -608,8 +621,8 @@ export default function OrchestratorTab() {
           {pentagiLogs.length > 0 && (
             <div className="space-y-2">
               <div className="border border-zinc-800 rounded bg-[#09090b] p-3 text-[10px] text-zinc-500 font-mono flex items-center justify-between">
-                <span>Executing: {pentagiRunning ? 'COOPERATION RUNNING' : 'PENTEST SESSION COMPLETE'}</span>
-                <span className="text-[#22c55e] font-bold">Neo4j Entities: 8 nodes mapped</span>
+                <span>Executing: {pentagiRunning ? 'EXPLOITATION RUN LIVE' : 'PENTEST SESSION COMPLETE'}</span>
+                <span className="text-[#22c55e] font-bold">{pentagiLogs.length} agent event{pentagiLogs.length !== 1 ? 's' : ''} streamed</span>
               </div>
               <div className="bg-black border border-zinc-800 rounded p-4 font-mono text-[11px] leading-relaxed overflow-y-auto max-h-[350px] space-y-2.5 text-zinc-300">
                 {pentagiLogs.map((log: any, i: number) => (

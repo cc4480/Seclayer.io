@@ -1,6 +1,7 @@
 import net from 'net';
 import tls from 'tls';
 import { createOastToken, waitForInteraction } from './oast.js';
+import { generatePentagiAnalysis } from './ai.js';
 
 type AgentName = 'Scout Agent' | 'Exploiter Agent' | 'Reporter Agent';
 export type PentagiLogEntry = { time: string; agent: AgentName; msg: string };
@@ -143,7 +144,11 @@ async function attemptAxfr(ns: string, zone: string): Promise<boolean> {
   });
 }
 
-export async function runPentagiExploit(url: string, authHeaders: Record<string, string> = {}): Promise<PentagiLogEntry[]> {
+export async function runPentagiExploit(
+  url: string,
+  authHeaders: Record<string, string> = {},
+  onLog?: (entry: PentagiLogEntry) => void,
+): Promise<PentagiLogEntry[]> {
   const logs: PentagiLogEntry[] = [];
   const findings: FindingEntry[] = [];
   const t0 = Date.now();
@@ -151,7 +156,11 @@ export async function runPentagiExploit(url: string, authHeaders: Record<string,
   const log = (agent: AgentName, msg: string) => {
     const ms = Date.now() - t0;
     const time = `${String(Math.floor(ms / 60000)).padStart(2, '0')}:${String(Math.floor((ms % 60000) / 1000)).padStart(2, '0')}`;
-    logs.push({ time, agent, msg });
+    const entry: PentagiLogEntry = { time, agent, msg };
+    logs.push(entry);
+    // Stream the entry to the caller as it is produced so the UI reflects real,
+    // in-flight progress rather than a replayed animation.
+    try { onLog?.(entry); } catch { /* never let a consumer error abort the run */ }
     console.log(`[PentAGI][${time}] ${agent}: ${msg}`);
   };
 
@@ -1527,6 +1536,14 @@ export async function runPentagiExploit(url: string, authHeaders: Record<string,
   const riskScore = Math.max(10, 100 - bySev.critical.length * 30 - bySev.high.length * 15 - bySev.medium.length * 5 - bySev.low.length * 2);
   const riskLevel = bySev.critical.length > 0 ? 'CRITICAL' : bySev.high.length > 0 ? 'HIGH' : bySev.medium.length > 0 ? 'MEDIUM' : 'LOW';
   log('Reporter Agent', `Risk rating: ${riskLevel} | Posture score: ${riskScore}/100 | Session artifacts archived`);
+
+  // AI-synthesized strategic analysis of the real findings (DeepSeek when
+  // configured, deterministic otherwise). This is the genuine AI step in the run.
+  log('Reporter Agent', 'Synthesizing strategic exploitation analysis from confirmed findings...');
+  const analysis = await generatePentagiAnalysis(url, findings);
+  for (const line of analysis) {
+    log('Reporter Agent', line);
+  }
 
   return logs;
 }

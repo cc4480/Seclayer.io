@@ -956,22 +956,33 @@ export function createApp(dbInstance: LocalFileDb) {
       return res.status(400).json({ error: 'Target url query parameter is required.' });
     }
     const urlErr = validateTargetUrl(url); if (urlErr) return res.status(400).json({ error: urlErr });
+
+    let authHeaders: Record<string, string> = {};
+    if (authProfileId) {
+      const profile = dbInstance.getAuthProfile(req.userId!, authProfileId);
+      if (profile) authHeaders = await resolveAuthProfile(profile);
+    }
+
+    // Stream the run as newline-delimited JSON so the client renders each agent
+    // event as it actually happens during the live exploitation run.
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    const write = (obj: unknown) => res.write(JSON.stringify(obj) + '\n');
+    write({
+      type: 'meta',
+      engine: 'PentAGI Automated Exploitation Engine',
+      agents: ['Scout Agent', 'Exploiter Agent', 'Reporter Agent'],
+      authenticated: Object.keys(authHeaders).length > 0,
+    });
+
     try {
-      let authHeaders: Record<string, string> = {};
-      if (authProfileId) {
-        const profile = dbInstance.getAuthProfile(req.userId!, authProfileId);
-        if (profile) authHeaders = await resolveAuthProfile(profile);
-      }
-      const logs = await runPentagiExploit(url, authHeaders);
-      res.json({
-        success: true,
-        engine: 'PentAGI Autonomous Multi-Agent Pentest Coordinator',
-        agents: ['Scout Agent', 'Exploiter Agent', 'Reporter Agent'],
-        authenticated: Object.keys(authHeaders).length > 0,
-        logs,
-      });
+      const logs = await runPentagiExploit(url, authHeaders, (entry) => write({ type: 'log', entry }));
+      write({ type: 'done', success: true, count: logs.length });
     } catch (err: any) {
-      res.status(500).json({ error: err.message });
+      write({ type: 'error', error: err?.message || 'PentAGI run failed.' });
+    } finally {
+      res.end();
     }
   });
 
