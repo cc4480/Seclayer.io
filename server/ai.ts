@@ -5,6 +5,19 @@ import { Finding, Severity } from '../src/types.js';
 const VALID_CATEGORIES = ['DAST', 'SAST', 'IAST', 'SCA', 'EASM', 'RED_TEAM'] as const;
 const VALID_SEVERITIES = ['info', 'low', 'medium', 'high', 'critical'] as const;
 
+// ── DeepSeek V4 model routing ────────────────────────────────────────────────
+// Pro (1.6T params) for the heavy lifting (full report generation); Flash (284B,
+// faster/cheaper) for lighter synthesis. Both are OpenAI-SDK compatible on the
+// same base URL and support JSON output mode. All overridable via env.
+type ReasoningEffort = 'none' | 'minimal' | 'low' | 'medium' | 'high' | 'xhigh';
+const MODEL_PRO = process.env.DEEPSEEK_MODEL_PRO?.trim() || 'deepseek-v4-pro';
+const MODEL_FLASH = process.env.DEEPSEEK_MODEL_FLASH?.trim() || 'deepseek-v4-flash';
+// DeepSeek V4 enables reasoning by default (high effort). For strict JSON
+// extraction we default it OFF — predictable output, lower latency and cost.
+// Dial up per surface (e.g. 'medium'/'high') via env when deeper reasoning helps.
+const REPORT_EFFORT = (process.env.DEEPSEEK_REPORT_EFFORT?.trim() as ReasoningEffort) || 'none';
+const PENTAGI_EFFORT = (process.env.DEEPSEEK_PENTAGI_EFFORT?.trim() as ReasoningEffort) || 'none';
+
 let aiClient: OpenAI | null = null;
 
 function getClient(): OpenAI | null {
@@ -80,7 +93,7 @@ export async function generatePentagiAnalysis(
   try {
     const findingsList = findings.map(f => `- [${f.severity.toUpperCase()}] ${f.title}`).join('\n') || 'No findings.';
     const completion = await client.chat.completions.create({
-      model: 'deepseek-v4-flash',
+      model: MODEL_FLASH,
       messages: [
         {
           role: 'system',
@@ -89,6 +102,7 @@ export async function generatePentagiAnalysis(
         { role: 'user', content: `Target: ${url}\n\nConfirmed findings:\n${findingsList}` },
       ],
       response_format: { type: 'json_object' },
+      reasoning_effort: PENTAGI_EFFORT,
       temperature: 0.3,
       max_tokens: 700,
     });
@@ -164,7 +178,7 @@ Return exactly this JSON structure (no markdown, no code fences):
 }`;
 
     const completion = await client.chat.completions.create({
-      model: 'deepseek-v4-flash',
+      model: MODEL_PRO,
       messages: [
         {
           role: 'system',
@@ -173,6 +187,7 @@ Return exactly this JSON structure (no markdown, no code fences):
         { role: 'user', content: userPrompt },
       ],
       response_format: { type: 'json_object' },
+      reasoning_effort: REPORT_EFFORT,
       temperature: 0.3,
       max_tokens: 6000,
     });
