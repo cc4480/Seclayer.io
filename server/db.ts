@@ -94,6 +94,12 @@ export class LocalFileDb {
         userId TEXT NOT NULL,
         data TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS github_connections (
+        userId TEXT PRIMARY KEY,
+        repoFullName TEXT NOT NULL,
+        token TEXT NOT NULL,
+        createdAt TEXT NOT NULL
+      );
       CREATE INDEX IF NOT EXISTS idx_scans_userId ON scans(userId);
       CREATE INDEX IF NOT EXISTS idx_tx_userId ON transactions(userId);
       CREATE INDEX IF NOT EXISTS idx_keys_userId ON api_keys(userId);
@@ -534,6 +540,26 @@ export class LocalFileDb {
     this.db.prepare('UPDATE auth_profiles SET data = ? WHERE id = ? AND userId = ?')
       .run(JSON.stringify(merged), id, userId);
     return merged;
+  }
+
+  // --- GitHub connection (one per user — used for Auto-Fix PRs) ---
+  setGithubConnection(userId: string, repoFullName: string, token: string): { repoFullName: string; createdAt: string } {
+    const createdAt = new Date().toISOString();
+    this.db.prepare(`
+      INSERT INTO github_connections (userId, repoFullName, token, createdAt) VALUES (?, ?, ?, ?)
+      ON CONFLICT(userId) DO UPDATE SET repoFullName = excluded.repoFullName, token = excluded.token, createdAt = excluded.createdAt
+    `).run(userId, repoFullName, token, createdAt);
+    return { repoFullName, createdAt };
+  }
+
+  getGithubConnection(userId: string): { repoFullName: string; token: string; createdAt: string } | null {
+    const row = this.db.prepare('SELECT * FROM github_connections WHERE userId = ?').get(userId) as any;
+    return row ? { repoFullName: row.repoFullName, token: row.token, createdAt: row.createdAt } : null;
+  }
+
+  removeGithubConnection(userId: string): boolean {
+    const info = this.db.prepare('DELETE FROM github_connections WHERE userId = ?').run(userId);
+    return info.changes > 0;
   }
 }
 

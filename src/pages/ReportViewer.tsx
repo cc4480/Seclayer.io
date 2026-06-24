@@ -36,6 +36,8 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const [recheckingId, setRecheckingId] = useState<string | null>(null);
   const [recheckMsg, setRecheckMsg] = useState<Record<string, { ok: boolean; text: string }>>({});
   const [statusFilter, setStatusFilter] = useState<'all' | 'open' | 'in_progress' | 'fixed' | 'verified'>('all');
+  const [autoFixingId, setAutoFixingId] = useState<string | null>(null);
+  const [autoFixMsg, setAutoFixMsg] = useState<Record<string, { ok: boolean; text: string; prUrl?: string }>>({});
 
   const findings = scan.findings || [];
 
@@ -67,6 +69,25 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
       setRecheckMsg(prev => ({ ...prev, [finding.id]: { ok: false, text: err.message || 'Network error during re-check.' } }));
     } finally {
       setRecheckingId(null);
+    }
+  };
+
+  const handleAutoFix = async (finding: Finding) => {
+    setAutoFixingId(finding.id);
+    setAutoFixMsg(prev => ({ ...prev, [finding.id]: { ok: true, text: 'Generating patch and opening pull request…' } }));
+    try {
+      const res = await apiFetch(`/api/scans/${scan.id}/findings/${finding.id}/auto-fix`, { method: 'POST' });
+      const data = await res.json();
+      if (res.ok && data.status === 'ok') {
+        setAutoFixMsg(prev => ({ ...prev, [finding.id]: { ok: true, text: `Pull request opened.`, prUrl: data.prUrl } }));
+        if (onRefreshScans) onRefreshScans();
+      } else {
+        setAutoFixMsg(prev => ({ ...prev, [finding.id]: { ok: false, text: data.detail || data.error || 'Auto-fix failed.' } }));
+      }
+    } catch (err: any) {
+      setAutoFixMsg(prev => ({ ...prev, [finding.id]: { ok: false, text: err.message || 'Network error during auto-fix.' } }));
+    } finally {
+      setAutoFixingId(null);
     }
   };
 
@@ -1034,6 +1055,14 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                                   </button>
                                 ))}
                                 <button
+                                  onClick={() => handleAutoFix(finding)}
+                                  disabled={autoFixingId === finding.id}
+                                  className="text-[9px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border border-sky-500/30 bg-sky-500/5 text-sky-400 hover:bg-sky-500/15 transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
+                                >
+                                  <Package className="w-3 h-3" />
+                                  {autoFixingId === finding.id ? 'Opening PR…' : 'Auto-Fix via PR'}
+                                </button>
+                                <button
                                   onClick={() => handleRecheck(finding)}
                                   disabled={recheckingId === finding.id}
                                   className="ml-auto text-[9px] font-mono uppercase tracking-wider px-2.5 py-1 rounded border border-[#22c55e]/30 bg-[#22c55e]/5 text-[#22c55e] hover:bg-[#22c55e]/15 transition-colors cursor-pointer flex items-center gap-1.5 disabled:opacity-50"
@@ -1051,6 +1080,27 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                               {finding.lastVerifiedAt && !recheckMsg[finding.id] && (
                                 <p className="text-[9px] font-mono text-[#52525b]">
                                   Last re-checked {new Date(finding.lastVerifiedAt).toLocaleString()} — {finding.verificationResult === 'resolved' ? 'resolved' : 'still present'}
+                                </p>
+                              )}
+                              {autoFixMsg[finding.id] && (
+                                <p className={`text-[10px] font-mono leading-relaxed flex items-start gap-1.5 ${autoFixMsg[finding.id].ok ? 'text-sky-400' : 'text-amber-400'}`}>
+                                  {autoFixMsg[finding.id].ok ? <CheckCircle2 className="w-3 h-3 shrink-0 mt-0.5" /> : <AlertTriangle className="w-3 h-3 shrink-0 mt-0.5" />}
+                                  <span>
+                                    {autoFixMsg[finding.id].text}{' '}
+                                    {autoFixMsg[finding.id].prUrl && (
+                                      <a href={autoFixMsg[finding.id].prUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-white">
+                                        View pull request
+                                      </a>
+                                    )}
+                                  </span>
+                                </p>
+                              )}
+                              {finding.autoFixStatus === 'opened' && finding.autoFixPrUrl && !autoFixMsg[finding.id] && (
+                                <p className="text-[9px] font-mono text-[#52525b]">
+                                  Auto-fix PR opened —{' '}
+                                  <a href={finding.autoFixPrUrl} target="_blank" rel="noopener noreferrer" className="underline hover:text-zinc-300">
+                                    view on GitHub
+                                  </a>
                                 </p>
                               )}
                             </div>

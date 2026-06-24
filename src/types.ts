@@ -33,6 +33,10 @@ export interface Finding {
   remediationUpdatedAt?: string;
   lastVerifiedAt?: string;
   verificationResult?: 'still_present' | 'resolved';
+  // GitHub Auto-Fix
+  autoFixStatus?: 'opened' | 'skipped' | 'failed';
+  autoFixPrUrl?: string;
+  autoFixDetail?: string;
 }
 
 export interface SuppressionRule {
@@ -154,5 +158,10 @@ export interface AuthProfile {
   loginUsername?: string;
   loginPassword?: string;
   verifiedAt?: string;
+  createdAt: string;
+}
+
+export interface GithubConnection {
+  repoFullName: string;
   createdAt: string;
 }

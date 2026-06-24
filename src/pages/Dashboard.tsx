@@ -9,6 +9,7 @@ import OrchestratorTab from '../components/dashboard/OrchestratorTab.js';
 import ExclusionsTab from '../components/dashboard/ExclusionsTab.js';
 import ApiDocsTab from '../components/dashboard/ApiDocsTab.js';
 import AuthProfilesTab from '../components/dashboard/AuthProfilesTab.js';
+import GithubTab from '../components/dashboard/GithubTab.js';
 
 interface DashboardProps {
   user: User;
@@ -22,7 +23,7 @@ interface DashboardProps {
   isPerformingAction: boolean;
 }
 
-type ActiveTab = 'scans' | 'orchestrator' | 'monitoring' | 'exclusions' | 'auth-profiles' | 'api-docs';
+type ActiveTab = 'scans' | 'orchestrator' | 'monitoring' | 'exclusions' | 'auth-profiles' | 'github' | 'api-docs';
 
 export default function Dashboard({
   user,
@@ -43,6 +44,7 @@ export default function Dashboard({
     { id: 'monitoring', label: '[+] Continuous Monitoring' },
     { id: 'exclusions', label: '[+] Risk Exclusions & FP Rules' },
     { id: 'auth-profiles', label: '[+] Auth Profiles' },
+    { id: 'github', label: '[+] GitHub Auto-Fix' },
     { id: 'api-docs', label: '[+] API Documentation' },
   ];
 
@@ -128,6 +130,9 @@ export default function Dashboard({
           )}
           {activeTab === 'auth-profiles' && (
             <AuthProfilesTab />
+          )}
+          {activeTab === 'github' && (
+            <GithubTab />
           )}
           {activeTab === 'api-docs' && (
             <ApiDocsTab apiKeys={apiKeys} />
