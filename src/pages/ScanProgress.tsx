@@ -1,7 +1,9 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { Terminal, RefreshCw, Cpu, AlertTriangle, ArrowLeft } from 'lucide-react';
-import { Scan } from '../types.js';
-import { apiFetch } from '../lib/api.js';
+import { RefreshCw } from 'lucide-react';
+import { useScanProgress } from './scan-progress/useScanProgress.js';
+import FailedScanView from './scan-progress/FailedScanView.js';
+import PipelineProgress from './scan-progress/PipelineProgress.js';
+import ScannerConsole from './scan-progress/ScannerConsole.js';
+import ActionsPanel from './scan-progress/ActionsPanel.js';
 
 interface ScanProgressProps {
   scanId: string;
@@ -10,114 +12,10 @@ interface ScanProgressProps {
 }
 
 export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanProgressProps) {
-  const [scan, setScan] = useState<Scan | null>(null);
-  const [logs, setLogs] = useState<string[]>([]);
-  const [progressPercent, setProgressPercent] = useState(10);
-  const logsEndRef = useRef<HTMLDivElement>(null);
-
-  // Poll scan status
-  useEffect(() => {
-    let active = true;
-    let pollTimer: NodeJS.Timeout;
-
-    const fetchStatus = async () => {
-      try {
-        const res = await apiFetch(`/api/scans/${scanId}`);
-        const data = await res.json();
-        if (!active) return;
-
-        if (data.scan) {
-          const currentScan = data.scan as Scan;
-          setScan(currentScan);
-
-          if (currentScan.status === 'complete') {
-            setProgressPercent(100);
-            setTimeout(() => { if (active) onScanFinished(scanId); }, 1000);
-            return;
-          }
-          if (currentScan.status === 'failed') {
-            setProgressPercent(100);
-            return;
-          }
-
-          setProgressPercent(
-            currentScan.status === 'queued' ? 20 :
-            currentScan.status === 'scanning' ? 50 :
-            currentScan.status === 'analyzing' ? 80 : 10
-          );
-        }
-      } catch (err) {
-        console.error('Error polling scan status:', err);
-      }
-    };
-
-    fetchStatus();
-    pollTimer = setInterval(fetchStatus, 3000);
-    return () => { active = false; clearInterval(pollTimer); };
-  }, [scanId]);
-
-  // Poll real logs from backend
-  useEffect(() => {
-    let active = true;
-    let logTimer: NodeJS.Timeout;
-
-    const fetchLogs = async () => {
-      try {
-        const res = await apiFetch(`/api/scans/${scanId}/logs`);
-        if (res.ok) {
-          const data = await res.json();
-          if (active && data.logs?.length > 0) {
-            setLogs(data.logs);
-          }
-        }
-      } catch (err) {
-        console.error('Error polling scan logs:', err);
-      }
-    };
-
-    fetchLogs();
-    logTimer = setInterval(fetchLogs, 2000);
-    return () => { active = false; clearInterval(logTimer); };
-  }, [scanId]);
-
-  useEffect(() => {
-    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [logs]);
+  const { scan, logs, progressPercent, logsEndRef } = useScanProgress(scanId, onScanFinished);
 
   if (scan?.status === 'failed') {
-    return (
-      <div className="min-h-screen bg-[#09090b] text-[#a1a1aa] py-20 px-6 flex items-center justify-center">
-        <div className="max-w-2xl w-full bg-[#0c0c0e] border border-[#f87171]/30 p-8 rounded shadow-2xl space-y-6">
-          <div className="flex items-center gap-3">
-            <div className="w-12 h-12 rounded-full bg-[#f87171]/10 border border-[#f87171]/20 flex items-center justify-center shrink-0">
-              <AlertTriangle className="w-6 h-6 text-[#f87171]" />
-            </div>
-            <div>
-              <p className="text-xs font-mono text-[#f87171] uppercase tracking-widest font-bold">Scan Failed</p>
-              <h2 className="text-white font-mono font-bold text-lg truncate">{scan.url}</h2>
-            </div>
-          </div>
-
-          <div className="bg-black border border-[#27272a] rounded p-4 font-mono text-sm text-[#f87171]">
-            {scan.error || 'An unexpected error occurred during the scan. The target may be unreachable or blocked our probes.'}
-          </div>
-
-          {logs.length > 0 && (
-            <div className="bg-black border border-[#27272a] rounded p-4 max-h-40 overflow-y-auto space-y-1 font-mono text-[11px] text-[#a1a1aa]">
-              {logs.map((log, i) => <div key={i} className={log.includes('[ERROR]') ? 'text-[#f87171]' : ''}>{log}</div>)}
-            </div>
-          )}
-
-          <button
-            onClick={onCancel}
-            className="flex items-center gap-2 text-xs font-mono text-[#52525b] hover:text-white transition-colors cursor-pointer"
-          >
-            <ArrowLeft className="w-4 h-4" />
-            Back to dashboard
-          </button>
-        </div>
-      </div>
-    );
+    return <FailedScanView scan={scan} logs={logs} onCancel={onCancel} />;
   }
 
   return (
@@ -142,106 +40,11 @@ export default function ScanProgress({ scanId, onScanFinished, onCancel }: ScanP
           </div>
         </div>
 
-        {/* Progression bar */}
-        <div className="space-y-3">
-          <div className="flex justify-between items-baseline font-mono text-xs">
-            <span className="text-[#52525b]">Scan Pipeline Progression</span>
-            <span className="text-[#22c55e] font-bold">{progressPercent}%</span>
-          </div>
-          <div className="w-full bg-black h-2.5 rounded overflow-hidden border border-[#27272a]">
-            <div
-              className="bg-gradient-to-r from-[#22c55e] to-emerald-400 h-full transition-all duration-700 rounded-full relative"
-              style={{ width: `${progressPercent}%` }}
-            >
-              <span className="absolute right-0 top-0 bottom-0 w-3 bg-white/45 blur-[1.5px] rounded-full animate-pulse" />
-            </div>
-          </div>
+        <PipelineProgress progressPercent={progressPercent} status={scan?.status} />
 
-          <div className="pt-1.5 pb-2.5 space-y-1 border-t border-[#27272a]/20 mt-1">
-            <div className="flex justify-between items-center text-[10px] font-mono text-[#52525b] uppercase tracking-wider">
-              <span className="flex items-center gap-1.5">
-                <span className="w-1 h-1 rounded-full bg-[#22c55e] inline-block animate-pulse" />
-                <span>Sub-Task: <span className="text-zinc-350 normal-case font-bold">{
-                  scan?.status === 'queued' ? 'Pre-execution checklist & infrastructure provisioning' :
-                  scan?.status === 'scanning' ? 'DAST probing / dynamic payload injection' :
-                  scan?.status === 'analyzing' ? 'AI analysis & severity scoring' :
-                  scan?.status === 'complete' ? 'Report compiled / database sync' :
-                  'Initializing target pipeline...'
-                }</span></span>
-              </span>
-              <span className="text-zinc-400 font-bold">{
-                scan?.status === 'queued' ? '40%' :
-                scan?.status === 'scanning' ? '70%' :
-                scan?.status === 'analyzing' ? '92%' :
-                scan?.status === 'complete' ? '100%' : '0%'
-              }</span>
-            </div>
-            <div className="w-full bg-black h-1 rounded overflow-hidden border border-[#27272a]/60">
-              <div
-                className="bg-[#22c55e]/60 h-full transition-all duration-500 rounded-full"
-                style={{
-                  width: scan?.status === 'queued' ? '40%' :
-                         scan?.status === 'scanning' ? '70%' :
-                         scan?.status === 'analyzing' ? '92%' :
-                         scan?.status === 'complete' ? '100%' : '0%',
-                }}
-              />
-            </div>
-          </div>
+        <ScannerConsole logs={logs} logsEndRef={logsEndRef} />
 
-          <div className="flex justify-between items-center text-[10px] font-mono text-[#52525b] uppercase mt-1">
-            <span className={scan?.status === 'queued' ? 'text-[#22c55e] font-bold' : ''}>QUEUED</span>
-            <span className="text-[#27272a]">→</span>
-            <span className={scan?.status === 'scanning' ? 'text-purple-400 font-bold' : ''}>SCANNING</span>
-            <span className="text-[#27272a]">→</span>
-            <span className={scan?.status === 'analyzing' ? 'text-amber-400 font-bold' : ''}>ANALYZING AI</span>
-            <span className="text-[#27272a]">→</span>
-            <span className={scan?.status === 'complete' ? 'text-[#22c55e] font-bold' : ''}>COMPLETE</span>
-          </div>
-        </div>
-
-        {/* Terminal logs — real events from backend */}
-        <div className="bg-black border border-[#27272a] rounded p-5 overflow-hidden">
-          <div className="flex items-center space-x-2 border-b border-[#27272a]/40 pb-3 mb-4">
-            <Terminal className="w-4 h-4 text-[#22c55e] shrink-0" />
-            <span className="text-[10px] font-mono text-[#52525b] uppercase tracking-widest">Scanner Console</span>
-          </div>
-
-          <div className="space-y-1.5 max-h-48 overflow-y-auto font-mono text-[11px] leading-relaxed text-[#a1a1aa] select-all scrollbar-thin">
-            {logs.length === 0 ? (
-              <div className="text-[#52525b] animate-pulse">Connecting to scanner daemon...</div>
-            ) : (
-              logs.map((log, index) => {
-                let textClass = 'text-[#a1a1aa]';
-                if (log.includes('[SYSTEM]') || log.includes('[COMPLETE]')) textClass = 'text-[#22c55e] font-semibold';
-                if (log.includes('[SCANNER]') || log.includes('[DAST]') || log.includes('[HEADERS]') || log.includes('[EASM]')) textClass = 'text-purple-400';
-                if (log.includes('[AI]')) textClass = 'text-amber-400';
-                if (log.includes('[ERROR]')) textClass = 'text-[#f87171] font-bold';
-                return <div key={index} className={textClass}>{log}</div>;
-              })
-            )}
-            <div ref={logsEndRef} />
-          </div>
-        </div>
-
-        {/* Actions panel */}
-        <div className="border-t border-[#27272a] pt-5 font-mono text-xs text-[#52525b]">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center space-x-1.5">
-              <Cpu className="w-4 h-4 text-[#22c55e] shrink-0" />
-              <span>Scanning using Seclayer Daemon v2</span>
-            </div>
-            {scan?.status !== 'complete' && (
-              <button
-                onClick={onCancel}
-                className="text-[#52525b] hover:text-[#f87171] transition-colors cursor-pointer"
-                id="cancel-scan-btn"
-              >
-                Cancel scan
-              </button>
-            )}
-          </div>
-        </div>
+        <ActionsPanel status={scan?.status} onCancel={onCancel} />
 
       </div>
     </div>
