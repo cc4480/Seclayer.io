@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import { DiagnosticResult } from "./diagnostic-types.js";
+import { probeSensitivePaths } from "./path-probe.js";
 
 const commonSubdomains = [
   "www",
@@ -37,26 +38,6 @@ const commonSubdomains = [
   "imap",
 ];
 
-const pathsToProbe = [
-  "/.env",
-  "/.env.local",
-  "/.env.production",
-  "/.git/config",
-  "/.git/HEAD",
-  "/admin",
-  "/wp-admin",
-  "/phpinfo.php",
-  "/server-status",
-  "/actuator",
-  "/actuator/env",
-  "/swagger.json",
-  "/openapi.json",
-  "/api-docs",
-  "/config.php",
-  "/backup.sql",
-  "/dump.sql",
-];
-
 export async function runEasmRecon(
   hostname: string,
   host: string,
@@ -72,8 +53,6 @@ export async function runEasmRecon(
     ip: "unknown",
     nameserver: "unknown",
   };
-  const probedPaths: DiagnosticResult["probedPaths"] = [];
-
   // --- 5. EASM PERIMETER (Subdomains, DNS and Real Host IP Lookup) ---
   // Perform active Domain audit map
   try {
@@ -142,36 +121,9 @@ export async function runEasmRecon(
     console.warn("DNS resolution failed:", e);
   }
 
-  // Sensitive Paths Probing
-  for (const p of pathsToProbe) {
-    try {
-      const probeController = new AbortController();
-      const probeId = setTimeout(() => probeController.abort(), 2500); // short timeout
-      const probeUrl = `${host}${p}`;
-
-      const probeRes = await fetch(probeUrl, {
-        method: "GET",
-        headers: {
-          "User-Agent": "Seclayer-Security-Scanner/2.0 (seclayer.io)",
-        },
-        signal: probeController.signal,
-      });
-      clearTimeout(probeId);
-
-      const isExposed = probeRes.status === 200;
-      probedPaths.push({
-        path: p,
-        status: probeRes.status,
-        exposed: isExposed,
-      });
-    } catch (err) {
-      probedPaths.push({
-        path: p,
-        status: 0,
-        exposed: false,
-      });
-    }
-  }
+  // Sensitive Paths Probing — exposure confirmed by soft-200 baseline +
+  // content signatures (see path-probe.ts) to avoid catch-all false positives.
+  const probedPaths = await probeSensitivePaths(host);
 
   return { easmPerimeter, probedPaths };
 }
