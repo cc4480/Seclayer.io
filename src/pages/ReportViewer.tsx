@@ -32,6 +32,10 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
   const [expandedApiRows, setExpandedApiRows] = useState<Record<string, boolean>>({});
 
   const findings = scan.findings || [];
+  const meta = scan.metadata;
+  const hostname = scan.url.replace(/https?:\/\//i, '').replace(/\/+$/, '');
+  const liveSubdomains = meta?.liveSubdomains || [];
+  const exposedPaths = (meta?.probedPaths || []).filter(p => p.exposed);
 
   const handleSaveSuppression = async (finding: Finding) => {
     setIsSuppressing(true);
@@ -417,26 +421,30 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                   </div>
                 </div>
 
-                {/* Additional Technical Metadata parameters bento box */}
+                {/* Additional Technical Metadata parameters bento box — driven by
+                    the scan's real reconnaissance (scan.metadata). Older scans
+                    predating metadata capture fall back to "Not captured". */}
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                   <div className="bg-[#0c0c0e] border border-[#27272a] rounded p-5 space-y-3">
                     <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Network & Active Attack Surface Perimeter (EASM)</h5>
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
                         <span className="text-[#52525b]">Resolved Target IP:</span>
-                        <span className="text-zinc-300">104.244.42.1 (Anycast Route)</span>
+                        <span className="text-zinc-300">{meta?.ip || 'Not resolved'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Nameservers Detected:</span>
-                        <span className="text-zinc-300">ns1.seclayer-dns.net</span>
+                        <span className="text-[#52525b]">Authoritative Nameserver:</span>
+                        <span className="text-zinc-300 truncate max-w-[60%] text-right">{meta?.nameserver || 'Not detected'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">TLS Connection standard:</span>
-                        <span className="text-zinc-300">{scan.score && scan.score >= 80 ? 'TLS 1.3 Secure ECC-Curve' : 'HTTP plaintext link standard'}</span>
+                        <span className="text-[#52525b]">Transport Security:</span>
+                        <span className={meta?.protocol === 'HTTP' ? 'text-amber-400' : 'text-zinc-300'}>{meta?.tls || (scan.url.startsWith('https') ? 'TLS negotiated over HTTPS' : 'Plaintext HTTP')}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-[#52525b]">Scanned Subdomains:</span>
-                        <span className="text-amber-400">api.${scan.url.replace(/https?:\/\//i, '')}</span>
+                        <span className="text-[#52525b]">Live Subdomains {typeof meta?.subdomainsChecked === 'number' ? `(${liveSubdomains.length}/${meta.subdomainsChecked} checked)` : ''}:</span>
+                        <span className={liveSubdomains.length ? 'text-amber-400 truncate max-w-[55%] text-right' : 'text-zinc-300'} title={liveSubdomains.map(s => s.domain).join(', ')}>
+                          {liveSubdomains.length ? liveSubdomains.slice(0, 3).map(s => s.domain).join(', ') + (liveSubdomains.length > 3 ? ` +${liveSubdomains.length - 3}` : '') : 'None discovered'}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -445,20 +453,24 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
                     <h5 className="text-[10px] font-mono text-white uppercase tracking-wider font-bold">Dynamic Test Parameters Checked (DAST)</h5>
                     <div className="font-mono text-xs space-y-2 text-zinc-400">
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Sensitive Probed Paths:</span>
-                        <span className="text-zinc-300">/.env, /.git/config, /admin</span>
+                        <span className="text-[#52525b]">Sensitive Paths Probed:</span>
+                        <span className="text-zinc-300 truncate max-w-[60%] text-right" title={(meta?.probedPaths || []).map(p => p.path).join(', ')}>
+                          {meta?.probedPaths?.length ? `${meta.probedPaths.length} paths${exposedPaths.length ? `, ${exposedPaths.length} exposed` : ''}` : '—'}
+                        </span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Unsecured Form Post actions:</span>
-                        <span className="text-zinc-300">No token form methods scrutinized</span>
+                        <span className="text-[#52525b]">Pages Crawled:</span>
+                        <span className="text-zinc-300">{typeof meta?.crawl?.pagesVisited === 'number' ? meta.crawl.pagesVisited : '—'}</span>
                       </div>
                       <div className="flex justify-between border-b border-[#27272a]/40 pb-1.5">
-                        <span className="text-[#52525b]">Static Javascript payloads scanned:</span>
-                        <span className="text-zinc-300">Inline HTML blocks, script assets</span>
+                        <span className="text-[#52525b]">Endpoints / Params Fuzzed:</span>
+                        <span className="text-zinc-300">{meta?.crawl ? `${meta.crawl.endpointsDiscovered} / ${meta.crawl.paramsTested}` : '—'}</span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-[#52525b]">Technology Composition:</span>
-                        <span className="text-zinc-300">Bootstrap, jQuery version reviews</span>
+                        <span className="text-[#52525b]">Framework Signatures Leaked:</span>
+                        <span className={meta?.techLeaked?.length ? 'text-amber-400 truncate max-w-[55%] text-right' : 'text-zinc-300'} title={(meta?.techLeaked || []).join(', ')}>
+                          {meta?.techLeaked?.length ? meta.techLeaked.join(', ') : 'None exposed'}
+                        </span>
                       </div>
                     </div>
                   </div>
@@ -755,25 +767,33 @@ export default function ReportViewer({ scan, previousScan, onBack, onRefreshScan
               <div className="bg-black p-4 rounded font-mono text-[10px] text-zinc-400 space-y-2 border border-[#27272a] max-h-96 overflow-y-auto">
                 <span className="text-[#52525b] text-[9px] uppercase font-bold block mb-1">Raw pen-testing log sequences</span>
                 <p className="text-zinc-200">{'GET / HTTP/1.1'}</p>
-                <p className="text-zinc-200">Host: {scan.url.replace(/https?:\/\//i, '')}</p>
+                <p className="text-zinc-200">Host: {hostname}</p>
                 <p className="text-[#52525b]">User-Agent: Seclayer-Security-Scanner/2.0</p>
                 <p className="text-[#52525b]">Accept: text/html,application/xhtml+xml,application/xml</p>
                 
                 <p className="text-[#22c55e] font-bold mt-3">{'[EASM EDGE SCAN CHECKS]'}</p>
                 <p className="text-zinc-400">Target host: {scan.url}</p>
-                <p className="text-zinc-400">DNS Resolution IP (Detected/Anycast Route): 104.244.42.1</p>
-                <p className="text-zinc-400">Nameservers resolved properly: DNS Sec verified</p>
-                
+                <p className="text-zinc-400">DNS Resolution IP: {meta?.ip || 'not resolved'}</p>
+                <p className="text-zinc-400">Authoritative nameserver: {meta?.nameserver || 'not detected'}</p>
+                {liveSubdomains.length > 0 && (
+                  <p className="text-zinc-400">Live subdomains: {liveSubdomains.map(s => s.domain).join(', ')}</p>
+                )}
+
                 <p className="text-[#22c55e] font-bold mt-3">{'[DAST DIRECTORY AUDIT CHECKS]'}</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/.env</span> - Status: 404 Not Found (Protected)</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/.git/config</span> - Status: 404 Not Found (Protected)</p>
-                <p className="text-zinc-200">Path: <span className="text-amber-400">/admin</span> - Status: 403 Forbidden (Blocked)</p>
-                
-                <p className="text-[#22c55e] font-bold mt-4">{'[HTTP RESPONSE HEADERS]'}</p>
-                <p className="text-zinc-300">Server: Nginx/1.18.0 (Ubuntu)</p>
+                {(meta?.probedPaths && meta.probedPaths.length > 0) ? (
+                  meta.probedPaths.map((p, i) => (
+                    <p key={i} className="text-zinc-200">
+                      Path: <span className="text-amber-400">{p.path}</span> - Status: {p.status || 'no response'} {p.exposed ? <span className="text-red-500 font-bold">(EXPOSED)</span> : '(Protected)'}
+                    </p>
+                  ))
+                ) : (
+                  <p className="text-zinc-400">No sensitive-path probe data captured for this scan.</p>
+                )}
+
+                <p className="text-[#22c55e] font-bold mt-4">{'[HTTP RESPONSE]'}</p>
+                <p className="text-zinc-300">Response status: {typeof meta?.responseStatus === 'number' && meta.responseStatus > 0 ? meta.responseStatus : 'n/a'}</p>
+                <p className="text-zinc-300">Server: {meta?.serverHeader || 'not disclosed'}</p>
                 <p className="text-zinc-350">Date: {new Date(scan.createdAt).toUTCString()}</p>
-                <p className="text-zinc-300">Content-Type: text/html; charset=UTF-8</p>
-                <p className="text-zinc-300">Connection: keep-alive</p>
                 
                 <p className="text-[#22c55e] font-bold mt-4">{'[IAST CONTROLS CHECK]'}</p>
                 <p className="text-zinc-450">Content-Security-Policy header verified: {findings.some(f => f.title.includes('CSP')) ? 'DEPRESSED / ABSENT' : 'ACTIVE'}</p>

@@ -4,7 +4,7 @@ import path from 'path';
 import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
 import { db } from './server/db.js';
-import { runDiagnostics, compileStaticFindings, assertScanTargetSafe } from './server/scanner.js';
+import { runDiagnostics, compileStaticFindings, compileScanMetadata, assertScanTargetSafe } from './server/scanner.js';
 import { generateAiReport } from './server/deepseek.js';
 import { sendEmail, buildMagicLinkEmail, isEmailConfigured } from './server/email.js';
 import { config, validateConfigOnBoot } from './server/config.js';
@@ -238,6 +238,7 @@ async function startServer() {
       severity: scan.severity,
       aiSummary: scan.aiSummary,
       findings: scan.findings,
+      metadata: scan.metadata,
       createdAt: scan.createdAt,
       completedAt: scan.completedAt
     });
@@ -404,6 +405,7 @@ async function startServer() {
         severity: aiReport.severity,
         findings: aiReport.findings,
         aiSummary: aiReport.aiSummary,
+        metadata: compileScanMetadata(diagnostics),
         completedAt: new Date().toISOString()
       });
 
@@ -414,6 +416,7 @@ async function startServer() {
         vulnerabilityLevel: aiReport.severity,
         analysisSummary: aiReport.aiSummary,
         securityFindings: aiReport.findings,
+        reconnaissance: compileScanMetadata(diagnostics),
         creditsRemaining: user.credits
       });
     } catch (err: any) {
@@ -447,6 +450,7 @@ async function startServer() {
         severity: outputReport.severity,
         findings: outputReport.findings,
         aiSummary: outputReport.aiSummary,
+        metadata: compileScanMetadata(diagnostics),
         completedAt: new Date().toISOString()
       });
       console.log(`[Job Worker] Completed scan ${scanId}`);

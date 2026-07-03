@@ -1,4 +1,4 @@
-import { Finding, Severity } from "../src/types.js";
+import { Finding, Severity, ScanMetadata } from "../src/types.js";
 import { scoreFindings } from "./scoring.js";
 import { crawlSite, targetsFromHtml, dedupeTargets, paramsOf, InjectableTarget } from "./crawler.js";
 import { runTemplates, selectTemplates } from "./templateEngine.js";
@@ -1210,4 +1210,44 @@ export function compileStaticFindings(diag: DiagnosticResult): {
   // recalculation (after suppression) always use identical weights.
   const { score, severity } = scoreFindings(deduped);
   return { score, severity, findings: deduped };
+}
+
+// Maximum number of live subdomains persisted with a scan. The report lists
+// these, so the cap keeps stored metadata (and the UI) bounded on wildcard-ish
+// hosts while still conveying the discovered perimeter.
+const MAX_STORED_SUBDOMAINS = 24;
+
+// Distils the real reconnaissance a scan performed (resolved IP, authoritative
+// nameserver, TLS posture, live subdomains, probed paths, crawl surface) into a
+// compact metadata object persisted with the scan. The report renders this
+// instead of placeholder values, so it must only ever contain observed data.
+export function compileScanMetadata(diag: DiagnosticResult): ScanMetadata {
+  const easm = diag.easmPerimeter;
+  const liveSubdomains = (easm?.subdomains || [])
+    .filter((s) => s.status === "live")
+    .slice(0, MAX_STORED_SUBDOMAINS)
+    .map((s) => ({ domain: s.domain, status: s.status, port: s.port }));
+
+  const isHttps = diag.sslSecure;
+  const meta: ScanMetadata = {
+    responseStatus: diag.responseStatus,
+    protocol: easm?.protocol || (isHttps ? "HTTPS" : "HTTP"),
+    tls: isHttps
+      ? "TLS negotiated over HTTPS"
+      : "Plaintext HTTP — no transport encryption",
+    techLeaked: diag.techLeaked,
+    missingHeaders: diag.missingHeaders,
+    liveSubdomains,
+    subdomainsChecked: easm?.subdomains?.length || 0,
+    probedPaths: diag.probedPaths,
+    crawl: diag.crawl,
+  };
+
+  if (easm?.ip) meta.ip = easm.ip;
+  if (easm?.nameserver) meta.nameserver = easm.nameserver;
+
+  const serverHeader = diag.headers?.["server"];
+  if (serverHeader) meta.serverHeader = serverHeader;
+
+  return meta;
 }

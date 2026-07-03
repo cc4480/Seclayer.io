@@ -36,6 +36,42 @@ export interface SuppressionRule {
   createdAt: string;
 }
 
+// Reconnaissance + surface metadata captured during a scan. This is the real
+// data behind the report's EASM/DAST panels (resolved IP, authoritative
+// nameserver, live subdomains, probed paths, crawl surface) — persisted so the
+// report renders actual findings context instead of placeholder values.
+export interface ScanSubdomain {
+  domain: string;
+  status: 'live' | 'inactive';
+  port: string;
+}
+
+export interface ScanProbedPath {
+  path: string;
+  status: number;
+  exposed: boolean;
+}
+
+export interface ScanMetadata {
+  responseStatus?: number;
+  ip?: string;
+  nameserver?: string;
+  protocol?: string; // "HTTPS" | "HTTP"
+  tls?: string; // human-readable TLS posture line
+  serverHeader?: string;
+  techLeaked?: string[];
+  missingHeaders?: string[];
+  liveSubdomains?: ScanSubdomain[];
+  subdomainsChecked?: number;
+  probedPaths?: ScanProbedPath[];
+  crawl?: {
+    pagesVisited: number;
+    endpointsDiscovered: number;
+    paramsTested: number;
+    sampleEndpoints: string[];
+  };
+}
+
 export interface Scan {
   id: string;
   userId: string;
@@ -46,6 +82,7 @@ export interface Scan {
   severity?: Severity;
   findings?: Finding[];
   aiSummary?: string;
+  metadata?: ScanMetadata; // reconnaissance + surface context (see above)
   error?: string;
   createdAt: string;
   completedAt?: string;

@@ -107,6 +107,7 @@ class SqliteDb {
     `);
     // Additive column migrations (safe across existing databases).
     this.addColumnIfMissing("users", "notifyWebhook", "TEXT");
+    this.addColumnIfMissing("scans", "metadata", "TEXT");
   }
 
   private addColumnIfMissing(table: string, column: string, decl: string) {
@@ -194,6 +195,7 @@ class SqliteDb {
       severity: row.severity ?? undefined,
       findings: row.findings ? JSON.parse(row.findings) : undefined,
       aiSummary: row.aiSummary ?? undefined,
+      metadata: row.metadata ? JSON.parse(row.metadata) : undefined,
       error: row.error ?? undefined,
       createdAt: row.createdAt,
       completedAt: row.completedAt ?? undefined,
@@ -294,7 +296,7 @@ class SqliteDb {
     if (!existing) throw new Error('Scan not found');
     const merged = { ...existing, ...updates };
     this.db.prepare(`
-      UPDATE scans SET status = ?, score = ?, severity = ?, findings = ?, aiSummary = ?, error = ?, completedAt = ?
+      UPDATE scans SET status = ?, score = ?, severity = ?, findings = ?, aiSummary = ?, metadata = ?, error = ?, completedAt = ?
       WHERE id = ?
     `).run(
       merged.status,
@@ -302,6 +304,7 @@ class SqliteDb {
       merged.severity ?? null,
       merged.findings ? JSON.stringify(merged.findings) : null,
       merged.aiSummary ?? null,
+      merged.metadata ? JSON.stringify(merged.metadata) : null,
       merged.error ?? null,
       merged.completedAt ?? null,
       id
