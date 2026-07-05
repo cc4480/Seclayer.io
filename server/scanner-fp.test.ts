@@ -2,6 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { analyzeCookies } from './scanner/cookies.js';
 import { analyzeResponse } from './scanner/analysis.js';
+import { detectVulnerableLibraries } from './scanner/sca.js';
+import { compileStaticFindings } from './scanner.js';
 
 function baseResult(headers: Record<string, string> = {}): any {
   return {
@@ -51,4 +53,29 @@ test('unversioned Server banner is not a tech-leak; versioned one is', () => {
   const versioned = baseResult({ server: 'nginx/1.18.0' });
   analyzeResponse(versioned, '', 'https://x.test');
   assert.ok(versioned.techLeaked.some((t: string) => /nginx\/1\.18\.0/.test(t)));
+});
+
+test('SCA only fires on a real asset reference, not incidental body text', () => {
+  // A version string in visible copy must not trigger a finding.
+  assert.deepEqual(detectVulnerableLibraries('<p>We migrated from jquery-1.12.4 last year.</p>'), []);
+  // A real <script src> reference is detected.
+  const hit = detectVulnerableLibraries('<script src="/assets/jquery-1.12.4.min.js"></script>');
+  assert.equal(hit.length, 1);
+  assert.equal(hit[0].name, 'jQuery');
+  assert.equal(hit[0].version, '1.12.4');
+});
+
+test('cookie issues collapse into a single consolidated finding', () => {
+  const diag: any = {
+    url: 'https://x.test', scannedAt: '', responseStatus: 200, sslSecure: true,
+    headers: {}, missingHeaders: [], techLeaked: [], probedPaths: [],
+    cookieIssues: ['Session cookie lacks HttpOnly flag', 'Session cookie lacks Secure directive', 'Session cookie lacks SameSite policy'],
+    sastFindings: [], scaLibraries: [], easmPerimeter: { subdomains: [], ip: '', nameserver: '', protocol: '' },
+    dastInputs: [], redTeamFindings: [], apiSecFindings: [],
+  };
+  const r = compileStaticFindings(diag);
+  const cookieFindings = r.findings.filter((f) => /cookie/i.test(f.title));
+  assert.equal(cookieFindings.length, 1);
+  assert.match(cookieFindings[0].description, /HttpOnly/);
+  assert.match(cookieFindings[0].description, /SameSite/);
 });

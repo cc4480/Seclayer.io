@@ -1,6 +1,7 @@
 import { DiagnosticResult } from "./types.js";
 import { Severity } from "../../src/types.js";
 import { analyzeCookies } from "./cookies.js";
+import { detectVulnerableLibraries } from "./sca.js";
 
 // Analyzes the fetched root document: missing security headers, leaked
 // framework signatures, insecure cookie directives, and high-precision
@@ -135,58 +136,7 @@ export function analyzeResponse(result: DiagnosticResult, htmlText: string, url:
     }
 
     // --- 3. SCA ANALYSIS ENGINE (vulnerable library footprints in markup) ---
-    // A library is only flagged when its version regex actually matches a known
-    // vulnerable range in the served markup. The reported version is the one
-    // captured from the page, and advisories are attributed per-library.
-    if (htmlText) {
-      const libraries = [
-        {
-          name: "jQuery",
-          match: /jquery[-.](1\.\d+\.\d+|2\.\d+\.\d+)/i,
-          severity: "medium" as Severity,
-          advisories: ["CVE-2020-11022", "CVE-2020-11023"],
-          desc: "jQuery before 3.5.0 is affected by cross-site scripting via htmlPrefilter when passing untrusted HTML to DOM-manipulation methods.",
-          fix: "Upgrade jQuery to >= 3.5.0.",
-        },
-        {
-          name: "Bootstrap",
-          match: /bootstrap[-./](3\.\d+\.\d+)/i,
-          severity: "medium" as Severity,
-          advisories: ["CVE-2019-8331"],
-          desc: "Bootstrap 3.x is affected by XSS in data-template/tooltip/popover handling and no longer receives security fixes.",
-          fix: "Upgrade Bootstrap to >= 4.3.1 (ideally 5.x).",
-        },
-        {
-          name: "AngularJS",
-          match: /angular[-.](1\.[0-8]\.\d+)/i,
-          severity: "low" as Severity,
-          advisories: ["EOL"],
-          desc: "AngularJS (1.x) is past end-of-life and receives no further security patches.",
-          fix: "Migrate off AngularJS to a maintained framework.",
-        },
-        {
-          name: "Lodash",
-          match: /lodash[@/-](4\.(?:[0-9]|1[0-6])\.\d+)\b/i,
-          severity: "high" as Severity,
-          advisories: ["CVE-2019-10744"],
-          desc: "lodash before 4.17.12 is vulnerable to prototype pollution via defaultsDeep.",
-          fix: "Upgrade lodash to >= 4.17.21.",
-        },
-      ];
-
-      libraries.forEach((lib) => {
-        const m = lib.match.exec(htmlText);
-        if (m) {
-          result.scaLibraries.push({
-            name: lib.name,
-            version: m[1],
-            status: "vuln",
-            advisories: lib.advisories,
-            severity: lib.severity,
-            description: lib.desc,
-            fix: lib.fix,
-          });
-        }
-      });
-    }
+    // Detection is scoped to the code surface (script/link references + inline
+    // scripts) so incidental version strings in body text never false-positive.
+    result.scaLibraries.push(...detectVulnerableLibraries(htmlText));
 }

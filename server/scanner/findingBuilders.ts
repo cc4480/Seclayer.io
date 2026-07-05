@@ -71,17 +71,19 @@ export function pushDiagnosticFindings(diag: DiagnosticResult, findings: Finding
     });
   }
 
-  diag.cookieIssues.forEach((issue) => {
+  // One consolidated finding for all missing cookie directives, rather than a
+  // separate finding per flag (which read as duplicate noise).
+  if (diag.cookieIssues.length > 0) {
     findings.push({
       id: "f_" + crypto.randomBytes(4).toString("hex"),
-      title: `Deficient Cookie Directives (${issue})`,
-      description: `Critical cookies do not feature standard secure storage parameters. Without HttpOnly, Javascript payloads can drain active session IDs easily.`,
+      title: "Insecure Session Cookie Attributes",
+      description: `The session cookie is missing hardening directives: ${diag.cookieIssues.join("; ")}. Without HttpOnly, JavaScript payloads can read active session IDs; without Secure/SameSite the cookie is exposed to interception and cross-site request forgery.`,
       severity: "medium",
       confidence: "high",
-      fix: "Incorporate HttpOnly, Secure, and SameSite=Lax (or SameSite=Strict) properties inside set-cookie headers.",
+      fix: "Set HttpOnly, Secure, and SameSite=Lax (or Strict) on session/auth cookies.",
       category: "IAST",
     });
-  });
+  }
 
   // 3. SAST (Static Code Security Analysis) checks
   diag.sastFindings.forEach((sf) => {
