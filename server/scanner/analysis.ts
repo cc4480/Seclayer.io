@@ -1,10 +1,18 @@
 import { DiagnosticResult } from "./types.js";
 import { Severity } from "../../src/types.js";
+import { analyzeCookies } from "./cookies.js";
 
 // Analyzes the fetched root document: missing security headers, leaked
 // framework signatures, insecure cookie directives, and high-precision
 // SAST secret + SCA vulnerable-library signatures in the served markup.
-export function analyzeResponse(result: DiagnosticResult, htmlText: string, url: string): void {
+//
+// `setCookies` is the per-cookie Set-Cookie array (undici getSetCookie()) so
+// multi-cookie responses are analyzed correctly. Header checks are context-aware
+// to avoid the common false positives (CSP via meta tag, XFO superseded by CSP
+// frame-ancestors, HSTS on plain HTTP, unversioned Server banners).
+export function analyzeResponse(result: DiagnosticResult, htmlText: string, url: string, setCookies: string[] = []): void {
+    const isHttps = url.startsWith("https://");
+
     // Analyze Security Headers
     const securityHeaders = {
       "content-security-policy":
@@ -25,29 +33,47 @@ export function analyzeResponse(result: DiagnosticResult, htmlText: string, url:
       }
     }
 
-    // Technology leaks checking (X-Powered-By, Server, etc.)
+    // Context-aware suppression of header false positives. A policy can be
+    // delivered by a <meta http-equiv> tag rather than a response header, and
+    // some headers are only meaningful (or non-redundant) in certain contexts.
+    const cspHeader = result.headers["content-security-policy"] || "";
+    const metaCspMatch = htmlText.match(
+      /<meta[^>]+http-equiv\s*=\s*["']?content-security-policy["']?[^>]*content\s*=\s*["']([^"']*)["'][^>]*>/i,
+    );
+    const metaCsp = metaCspMatch ? metaCspMatch[1] : "";
+    const cspText = `${cspHeader} ${metaCsp}`;
+    // CSP present via meta tag → not "missing".
+    if (metaCsp) {
+      result.missingHeaders = result.missingHeaders.filter((h) => h !== "content-security-policy");
+    }
+    // CSP frame-ancestors supersedes X-Frame-Options — do not flag XFO as missing.
+    if (/frame-ancestors/i.test(cspText)) {
+      result.missingHeaders = result.missingHeaders.filter((h) => h !== "x-frame-options");
+    }
+    // HSTS only applies over HTTPS; on plain HTTP the "Insecure Connection"
+    // finding already covers it, so flagging missing HSTS is redundant noise.
+    if (!isHttps) {
+      result.missingHeaders = result.missingHeaders.filter((h) => h !== "strict-transport-security");
+    }
+
+    // Technology leaks: only report a banner that discloses a concrete VERSION
+    // (e.g. "nginx/1.18.0", "PHP/7.4.3"). A bare product name is not actionable
+    // and firing on it produces a finding on nearly every site.
+    const hasVersion = (v: string) => /\d+(?:\.\d+)+|\/\d/.test(v);
     const serverHeader = result.headers["server"];
-    if (serverHeader && !/cloudflare/i.test(serverHeader)) {
+    if (serverHeader && !/cloudflare/i.test(serverHeader) && hasVersion(serverHeader)) {
       result.techLeaked.push(`Server: ${serverHeader}`);
     }
     const poweredBy = result.headers["x-powered-by"];
-    if (poweredBy) {
+    if (poweredBy && hasVersion(poweredBy)) {
       result.techLeaked.push(`X-Powered-By: ${poweredBy}`);
     }
 
-    // Capture cookie parameters if set-cookie contains flags
-    const setCookie = result.headers["set-cookie"];
-    if (setCookie) {
-      if (!/httponly/i.test(setCookie)) {
-        result.cookieIssues.push("Session cookie lacks HttpOnly flag");
-      }
-      if (!/secure/i.test(setCookie) && url.startsWith("https://")) {
-        result.cookieIssues.push("Session cookie lacks Secure directive");
-      }
-      if (!/samesite/i.test(setCookie)) {
-        result.cookieIssues.push("Session cookie lacks SameSite policy");
-      }
-    }
+    // Cookie flags — scoped to session/auth cookies only (see cookies.ts).
+    const cookieList = setCookies.length
+      ? setCookies
+      : (result.headers["set-cookie"] ? [result.headers["set-cookie"]] : []);
+    result.cookieIssues.push(...analyzeCookies(cookieList, isHttps));
 
     // --- 2. SAST SCAN ENGINE (high-precision secret signatures only) ---
     // Only patterns that are essentially never legitimately client-side are

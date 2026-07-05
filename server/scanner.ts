@@ -13,6 +13,7 @@ import { probeSensitivePaths } from "./scanner/probes.js";
 import { runRootRedTeamProbes } from "./scanner/redteam.js";
 import { runApiSecProbes } from "./scanner/apisec.js";
 import { fuzzDiscoveredTargets } from "./scanner/fuzzer.js";
+import { extractSetCookies } from "./scanner/cookies.js";
 
 // Public scanner API — re-exported so existing importers (`./scanner.js`) keep
 // working after the internals were split into ./scanner/* modules.
@@ -109,10 +110,12 @@ export async function runDiagnostics(
       result.headers[key.toLowerCase()] = value;
     });
 
+    const setCookies = extractSetCookies(response.headers);
+
     const htmlText = await response.text().catch(() => "");
     rootHtml = htmlText;
 
-    analyzeResponse(result, htmlText, url);
+    analyzeResponse(result, htmlText, url, setCookies);
     await enumeratePerimeter(hostname, result);
     await probeSensitivePaths(host, result);
   } catch (err: any) {
