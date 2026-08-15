@@ -1,23 +1,27 @@
 import path from 'path';
-import crypto from 'crypto';
 import Database from 'better-sqlite3';
-import { User, Scan, CreditTransaction, ApiKey, Finding, SuppressionRule, MonitoredTarget } from '../src/types.js';
+import { User, Scan, CreditTransaction, ApiKey, SuppressionRule, MonitoredTarget } from '../src/types.js';
 import { scoreFindings } from './scoring.js';
+import { runMigrations } from './db/schema.js';
+import { cleanUrl } from './db/url.js';
+import * as auth from './db/auth.js';
+import * as users from './db/users.js';
+import * as scans from './db/scans.js';
+import * as keys from './db/keys.js';
+import * as suppressions from './db/suppressions.js';
+import * as monitoring from './db/monitoring.js';
 
 const DB_FILE = process.env.DB_PATH || path.join(process.cwd(), 'data.sqlite');
 
 // --- URL + scoring helpers ---------------------------------------------------
-export function cleanUrl(urlStr: string): string {
-  try {
-    return urlStr.replace(/https?:\/\//i, '').replace(/\/+$/, '').trim().toLowerCase();
-  } catch {
-    return String(urlStr || '').trim().toLowerCase();
-  }
-}
+export { cleanUrl };
 
 // Re-exported for callers/tests that recompute a score from a finding set.
 export const recalculateScore = scoreFindings;
 
+// SqliteDb owns the connection and delegates every operation to the domain
+// modules under ./db/*. Splitting the queries out keeps each module small while
+// preserving the singleton's public method surface exactly.
 class SqliteDb {
   private db: Database.Database;
 
@@ -25,391 +29,60 @@ class SqliteDb {
     this.db = new Database(DB_FILE);
     this.db.pragma('journal_mode = WAL');
     this.db.pragma('foreign_keys = ON');
-    this.migrate();
-  }
-
-  private migrate() {
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS users (
-        id TEXT PRIMARY KEY,
-        email TEXT UNIQUE NOT NULL,
-        credits INTEGER NOT NULL DEFAULT 0,
-        apiKey TEXT,
-        createdAt TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS scans (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        url TEXT NOT NULL,
-        authHeader TEXT,
-        status TEXT NOT NULL,
-        score INTEGER,
-        severity TEXT,
-        findings TEXT,
-        aiSummary TEXT,
-        error TEXT,
-        createdAt TEXT NOT NULL,
-        completedAt TEXT
-      );
-      CREATE INDEX IF NOT EXISTS idx_scans_user ON scans(userId);
-      CREATE TABLE IF NOT EXISTS transactions (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        amount INTEGER NOT NULL,
-        type TEXT NOT NULL,
-        stripeSessionId TEXT,
-        createdAt TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_tx_user ON transactions(userId);
-      CREATE TABLE IF NOT EXISTS api_keys (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        key TEXT UNIQUE NOT NULL,
-        credits INTEGER NOT NULL DEFAULT 0,
-        active INTEGER NOT NULL DEFAULT 1,
-        createdAt TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_keys_user ON api_keys(userId);
-      CREATE TABLE IF NOT EXISTS suppressions (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        targetUrl TEXT NOT NULL,
-        findingTitle TEXT NOT NULL,
-        reason TEXT,
-        createdAt TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_supp_user ON suppressions(userId);
-      CREATE TABLE IF NOT EXISTS monitored_targets (
-        id TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        url TEXT NOT NULL,
-        frequencyDays INTEGER NOT NULL,
-        scheduleString TEXT,
-        lastScannedAt TEXT,
-        nextScanAt TEXT,
-        createdAt TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_mon_user ON monitored_targets(userId);
-      CREATE TABLE IF NOT EXISTS login_tokens (
-        tokenHash TEXT PRIMARY KEY,
-        email TEXT NOT NULL,
-        expiresAt TEXT NOT NULL,
-        consumedAt TEXT,
-        createdAt TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS sessions (
-        tokenHash TEXT PRIMARY KEY,
-        userId TEXT NOT NULL,
-        expiresAt TEXT NOT NULL,
-        createdAt TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(userId);
-    `);
-    // Additive column migrations (safe across existing databases).
-    this.addColumnIfMissing("users", "notifyWebhook", "TEXT");
-  }
-
-  private addColumnIfMissing(table: string, column: string, decl: string) {
-    const cols = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
-    if (!cols.some((c) => c.name === column)) {
-      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
-    }
+    runMigrations(this.db);
   }
 
   // --- Magic-link auth + sessions ---
-  // Tokens are random secrets; only their SHA-256 hash is persisted so a DB
-  // read cannot reveal a usable login link or session token.
-  private hashToken(raw: string): string {
-    return crypto.createHash('sha256').update(raw).digest('hex');
-  }
-
-  // Issues a single-use magic-link token (default 15 min TTL). Returns the raw
-  // token to embed in the emailed link; only its hash is stored.
-  createLoginToken(email: string, ttlMs = 15 * 60 * 1000): string {
-    const raw = crypto.randomBytes(32).toString('hex');
-    const now = Date.now();
-    this.db.prepare('INSERT INTO login_tokens (tokenHash, email, expiresAt, createdAt) VALUES (?, ?, ?, ?)')
-      .run(this.hashToken(raw), email.toLowerCase().trim(), new Date(now + ttlMs).toISOString(), new Date(now).toISOString());
-    return raw;
-  }
-
-  // Validates and burns a magic-link token, returning the associated email.
-  consumeLoginToken(raw: string): string | null {
-    const hash = this.hashToken(raw);
-    const row: any = this.db.prepare('SELECT * FROM login_tokens WHERE tokenHash = ?').get(hash);
-    if (!row || row.consumedAt) return null;
-    if (new Date(row.expiresAt).getTime() < Date.now()) return null;
-    this.db.prepare('UPDATE login_tokens SET consumedAt = ? WHERE tokenHash = ?').run(new Date().toISOString(), hash);
-    return row.email;
-  }
-
-  // Creates a server-side session (default 30 day TTL). Returns the raw token
-  // to set as an httpOnly cookie; only its hash is stored.
-  createSession(userId: string, ttlMs = 30 * 24 * 60 * 60 * 1000): string {
-    const raw = crypto.randomBytes(32).toString('hex');
-    const now = Date.now();
-    this.db.prepare('INSERT INTO sessions (tokenHash, userId, expiresAt, createdAt) VALUES (?, ?, ?, ?)')
-      .run(this.hashToken(raw), userId, new Date(now + ttlMs).toISOString(), new Date(now).toISOString());
-    return raw;
-  }
-
-  // Resolves a session cookie to a userId, or null if missing/expired.
-  getSessionUserId(raw: string): string | null {
-    const row: any = this.db.prepare('SELECT * FROM sessions WHERE tokenHash = ?').get(this.hashToken(raw));
-    if (!row) return null;
-    if (new Date(row.expiresAt).getTime() < Date.now()) {
-      this.db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(row.tokenHash);
-      return null;
-    }
-    return row.userId;
-  }
-
-  deleteSession(raw: string): void {
-    this.db.prepare('DELETE FROM sessions WHERE tokenHash = ?').run(this.hashToken(raw));
-  }
-
-  // --- Row mappers ---
-  private rowToUser(row: any): User | undefined {
-    if (!row) return undefined;
-    return {
-      id: row.id, email: row.email, credits: row.credits, apiKey: row.apiKey,
-      notifyWebhook: row.notifyWebhook ?? undefined, createdAt: row.createdAt,
-    };
-  }
-
-  setUserWebhook(userId: string, url: string | null): User | undefined {
-    this.db.prepare("UPDATE users SET notifyWebhook = ? WHERE id = ?").run(url, userId);
-    return this.getUser(userId);
-  }
-
-  private rowToScan(row: any): Scan | undefined {
-    if (!row) return undefined;
-    return {
-      id: row.id,
-      userId: row.userId,
-      url: row.url,
-      authHeader: row.authHeader ?? undefined,
-      status: row.status,
-      score: row.score ?? undefined,
-      severity: row.severity ?? undefined,
-      findings: row.findings ? JSON.parse(row.findings) : undefined,
-      aiSummary: row.aiSummary ?? undefined,
-      error: row.error ?? undefined,
-      createdAt: row.createdAt,
-      completedAt: row.completedAt ?? undefined,
-    };
-  }
-
-  private rowToApiKey(row: any): ApiKey {
-    return {
-      id: row.id, userId: row.userId, key: row.key,
-      credits: row.credits, active: !!row.active, createdAt: row.createdAt,
-    };
-  }
+  createLoginToken(email: string, ttlMs?: number): string { return auth.createLoginToken(this.db, email, ttlMs); }
+  consumeLoginToken(raw: string): string | null { return auth.consumeLoginToken(this.db, raw); }
+  createSession(userId: string, ttlMs?: number): string { return auth.createSession(this.db, userId, ttlMs); }
+  getSessionUserId(raw: string): string | null { return auth.getSessionUserId(this.db, raw); }
+  deleteSession(raw: string): void { auth.deleteSession(this.db, raw); }
 
   // --- Users ---
-  getUser(id: string): User | undefined {
-    return this.rowToUser(this.db.prepare('SELECT * FROM users WHERE id = ?').get(id));
-  }
-
-  getUserByEmail(email: string): User | undefined {
-    return this.rowToUser(
-      this.db.prepare('SELECT * FROM users WHERE email = ?').get(email.toLowerCase().trim())
-    );
-  }
-
-  getOrCreateUser(email: string): User {
-    const normEmail = email.toLowerCase().trim();
-    const existing = this.getUserByEmail(normEmail);
-    if (existing) return existing;
-
-    const id = 'user_' + crypto.randomBytes(6).toString('hex');
-    const apiKey = 'sl_live_' + crypto.randomBytes(16).toString('hex');
-    const now = new Date().toISOString();
-
-    const tx = this.db.transaction(() => {
-      this.db.prepare('INSERT INTO users (id, email, credits, apiKey, createdAt) VALUES (?, ?, ?, ?, ?)')
-        .run(id, normEmail, 5, apiKey, now); // 5 signup credits
-      this.db.prepare('INSERT INTO transactions (id, userId, amount, type, createdAt) VALUES (?, ?, ?, ?, ?)')
-        .run('tx-signup-' + id, id, 5, 'purchase', now);
-      this.db.prepare('INSERT INTO api_keys (id, userId, key, credits, active, createdAt) VALUES (?, ?, ?, ?, 1, ?)')
-        .run('key-' + id, id, apiKey, 5, now);
-    });
-    tx();
-    return this.getUser(id)!;
-  }
-
+  getUser(id: string): User | undefined { return users.getUser(this.db, id); }
+  getUserByEmail(email: string): User | undefined { return users.getUserByEmail(this.db, email); }
+  getOrCreateUser(email: string): User { return users.getOrCreateUser(this.db, email); }
   addCredits(userId: string, amount: number, type: 'purchase' | 'scan_debit', stripeSessionId?: string): User {
-    const user = this.getUser(userId);
-    if (!user) throw new Error('User not found');
-    const newCredits = Math.max(0, user.credits + amount);
-
-    const tx = this.db.transaction(() => {
-      this.db.prepare('UPDATE users SET credits = ? WHERE id = ?').run(newCredits, userId);
-      this.db.prepare('UPDATE api_keys SET credits = ? WHERE userId = ? AND active = 1').run(newCredits, userId);
-      this.db.prepare('INSERT INTO transactions (id, userId, amount, type, stripeSessionId, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
-        .run('tx_' + crypto.randomBytes(8).toString('hex'), userId, amount, type, stripeSessionId ?? null, new Date().toISOString());
-    });
-    tx();
-    return this.getUser(userId)!;
+    return users.addCredits(this.db, userId, amount, type, stripeSessionId);
   }
-
-  deductCredits(userId: string, amount: number): boolean {
-    const user = this.getUser(userId);
-    if (!user || user.credits < amount) return false;
-    this.addCredits(userId, -amount, 'scan_debit');
-    return true;
-  }
-
-  listTransactions(userId: string): CreditTransaction[] {
-    return this.db.prepare('SELECT * FROM transactions WHERE userId = ? ORDER BY createdAt DESC').all(userId) as CreditTransaction[];
-  }
-
-  // Idempotency guard for Stripe webhooks: true if a purchase for this Checkout
-  // session was already recorded, so retries never grant duplicate credits.
-  hasTransactionForSession(sessionId: string): boolean {
-    return !!this.db.prepare('SELECT 1 FROM transactions WHERE stripeSessionId = ? LIMIT 1').get(sessionId);
-  }
+  deductCredits(userId: string, amount: number): boolean { return users.deductCredits(this.db, userId, amount); }
+  listTransactions(userId: string): CreditTransaction[] { return users.listTransactions(this.db, userId); }
+  hasTransactionForSession(sessionId: string): boolean { return users.hasTransactionForSession(this.db, sessionId); }
+  setUserWebhook(userId: string, url: string | null): User | undefined { return users.setUserWebhook(this.db, userId, url); }
 
   // --- Scans ---
-  listScans(userId: string): Scan[] {
-    const rows = this.db.prepare('SELECT * FROM scans WHERE userId = ? ORDER BY createdAt DESC').all(userId);
-    return rows.map(r => this.rowToScan(r)!).filter(Boolean);
-  }
-
-  getScan(id: string): Scan | undefined {
-    return this.rowToScan(this.db.prepare('SELECT * FROM scans WHERE id = ?').get(id));
-  }
-
-  createScan(userId: string, url: string, authHeader?: string): Scan {
-    const id = 'scan_' + crypto.randomBytes(8).toString('hex');
-    const now = new Date().toISOString();
-    this.db.prepare('INSERT INTO scans (id, userId, url, authHeader, status, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, userId, url, authHeader ?? null, 'queued', now);
-    return this.getScan(id)!;
-  }
-
-  updateScan(id: string, updates: Partial<Scan>): Scan {
-    const existing = this.getScan(id);
-    if (!existing) throw new Error('Scan not found');
-    const merged = { ...existing, ...updates };
-    this.db.prepare(`
-      UPDATE scans SET status = ?, score = ?, severity = ?, findings = ?, aiSummary = ?, error = ?, completedAt = ?
-      WHERE id = ?
-    `).run(
-      merged.status,
-      merged.score ?? null,
-      merged.severity ?? null,
-      merged.findings ? JSON.stringify(merged.findings) : null,
-      merged.aiSummary ?? null,
-      merged.error ?? null,
-      merged.completedAt ?? null,
-      id
-    );
-    return this.getScan(id)!;
-  }
+  listScans(userId: string): Scan[] { return scans.listScans(this.db, userId); }
+  getScan(id: string): Scan | undefined { return scans.getScan(this.db, id); }
+  createScan(userId: string, url: string, authHeader?: string): Scan { return scans.createScan(this.db, userId, url, authHeader); }
+  updateScan(id: string, updates: Partial<Scan>): Scan { return scans.updateScan(this.db, id, updates); }
+  getScanWithSuppressedFindings(scan: Scan): Scan { return scans.getScanWithSuppressedFindings(this.db, scan); }
 
   // --- API Keys ---
-  listApiKeys(userId: string): ApiKey[] {
-    return (this.db.prepare('SELECT * FROM api_keys WHERE userId = ?').all(userId) as any[]).map(r => this.rowToApiKey(r));
-  }
-
-  generateApiKey(userId: string): ApiKey {
-    const user = this.getUser(userId);
-    if (!user) throw new Error('User not found');
-    const id = 'key_' + crypto.randomBytes(8).toString('hex');
-    const keyStr = 'sl_live_' + crypto.randomBytes(16).toString('hex');
-    this.db.prepare('INSERT INTO api_keys (id, userId, key, credits, active, createdAt) VALUES (?, ?, ?, ?, 1, ?)')
-      .run(id, userId, keyStr, user.credits, new Date().toISOString());
-    return this.rowToApiKey(this.db.prepare('SELECT * FROM api_keys WHERE id = ?').get(id));
-  }
-
-  revokeApiKey(userId: string, keyId: string): boolean {
-    const res = this.db.prepare('UPDATE api_keys SET active = 0 WHERE id = ? AND userId = ?').run(keyId, userId);
-    return res.changes > 0;
-  }
-
+  listApiKeys(userId: string): ApiKey[] { return keys.listApiKeys(this.db, userId); }
+  generateApiKey(userId: string): ApiKey { return keys.generateApiKey(this.db, userId); }
+  revokeApiKey(userId: string, keyId: string): boolean { return keys.revokeApiKey(this.db, userId, keyId); }
   validateApiKeyAndDeduct(apiKeyString: string, quantity: number = 1): User | null {
-    const keyRow: any = this.db.prepare('SELECT * FROM api_keys WHERE key = ?').get(apiKeyString);
-    if (!keyRow || !keyRow.active) return null;
-    const user = this.getUser(keyRow.userId);
-    if (!user || user.credits < quantity) return null;
-    return this.addCredits(user.id, -quantity, 'scan_debit');
+    return keys.validateApiKeyAndDeduct(this.db, apiKeyString, quantity);
   }
 
-  // --- Suppression Rules (False Positive Management) ---
-  // Suppression is applied as a read-model (see getScanWithSuppressedFindings),
-  // so adding/removing a rule is a simple row mutation with no scan rewrites.
-  listSuppressions(userId: string): SuppressionRule[] {
-    return this.db.prepare('SELECT * FROM suppressions WHERE userId = ?').all(userId) as SuppressionRule[];
-  }
-
+  // --- Suppression Rules ---
+  listSuppressions(userId: string): SuppressionRule[] { return suppressions.listSuppressions(this.db, userId); }
   addSuppression(userId: string, targetUrl: string, findingTitle: string, reason: string): SuppressionRule {
-    const id = 'supp_' + crypto.randomBytes(8).toString('hex');
-    const rule: SuppressionRule = { id, userId, targetUrl, findingTitle, reason, createdAt: new Date().toISOString() };
-    this.db.prepare('INSERT INTO suppressions (id, userId, targetUrl, findingTitle, reason, createdAt) VALUES (?, ?, ?, ?, ?, ?)')
-      .run(id, userId, targetUrl, findingTitle, reason, rule.createdAt);
-    return rule;
+    return suppressions.addSuppression(this.db, userId, targetUrl, findingTitle, reason);
   }
-
-  removeSuppression(userId: string, ruleId: string): boolean {
-    const res = this.db.prepare('DELETE FROM suppressions WHERE id = ? AND userId = ?').run(ruleId, userId);
-    return res.changes > 0;
-  }
+  removeSuppression(userId: string, ruleId: string): boolean { return suppressions.removeSuppression(this.db, userId, ruleId); }
 
   // --- Monitored Targets ---
-  listMonitoredTargets(userId: string): MonitoredTarget[] {
-    return this.db.prepare('SELECT * FROM monitored_targets WHERE userId = ?').all(userId) as MonitoredTarget[];
-  }
-
+  listMonitoredTargets(userId: string): MonitoredTarget[] { return monitoring.listMonitoredTargets(this.db, userId); }
   addMonitoredTarget(userId: string, url: string, frequencyDays: number, scheduleString?: string): MonitoredTarget {
-    const id = 'mon_' + crypto.randomBytes(8).toString('hex');
-    const now = new Date().toISOString();
-    const nextScanAt = new Date(Date.now() + frequencyDays * 24 * 60 * 60 * 1000).toISOString();
-    this.db.prepare('INSERT INTO monitored_targets (id, userId, url, frequencyDays, scheduleString, nextScanAt, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(id, userId, url, frequencyDays, scheduleString ?? null, nextScanAt, now);
-    return this.db.prepare('SELECT * FROM monitored_targets WHERE id = ?').get(id) as MonitoredTarget;
+    return monitoring.addMonitoredTarget(this.db, userId, url, frequencyDays, scheduleString);
   }
-
-  removeMonitoredTarget(userId: string, id: string): boolean {
-    const res = this.db.prepare('DELETE FROM monitored_targets WHERE id = ? AND userId = ?').run(id, userId);
-    return res.changes > 0;
-  }
-
-  // Targets whose next scheduled scan is due (used by the monitoring worker).
-  listDueMonitoredTargets(nowIso: string): MonitoredTarget[] {
-    return this.db.prepare(
-      'SELECT * FROM monitored_targets WHERE nextScanAt IS NOT NULL AND nextScanAt <= ?'
-    ).all(nowIso) as MonitoredTarget[];
-  }
-
+  removeMonitoredTarget(userId: string, id: string): boolean { return monitoring.removeMonitoredTarget(this.db, userId, id); }
+  listDueMonitoredTargets(nowIso: string): MonitoredTarget[] { return monitoring.listDueMonitoredTargets(this.db, nowIso); }
   markMonitoredScanned(id: string, lastScannedAt: string, nextScanAt: string): void {
-    this.db.prepare('UPDATE monitored_targets SET lastScannedAt = ?, nextScanAt = ? WHERE id = ?')
-      .run(lastScannedAt, nextScanAt, id);
+    monitoring.markMonitoredScanned(this.db, id, lastScannedAt, nextScanAt);
   }
-
-  // Read-model: returns a scan with suppression rules applied and the score
-  // recalculated. This is a PURE transform — it never writes to the database,
-  // so reads have no side effects.
-  getScanWithSuppressedFindings(scan: Scan): Scan {
-    if (!scan || !scan.findings) return scan;
-    const rules = this.listSuppressions(scan.userId);
-    const scanUrlClean = cleanUrl(scan.url);
-
-    const findings = scan.findings.map((finding) => {
-      const rule = rules.find(r => cleanUrl(r.targetUrl) === scanUrlClean && r.findingTitle === finding.title);
-      if (rule) {
-        return { ...finding, isFalsePositive: true, suppressionReason: rule.reason, suppressedAt: rule.createdAt };
-      }
-      // Strip any stale suppression metadata if no rule currently matches.
-      const { isFalsePositive, suppressionReason, suppressedAt, ...rest } = finding;
-      return rest as Finding;
-    });
-
-    const { score, severity } = scoreFindings(findings);
-    return { ...scan, findings, score, severity };
-  }
-
 }
 
 export const db = new SqliteDb();
