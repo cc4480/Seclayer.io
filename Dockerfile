@@ -1,6 +1,16 @@
 # --- Build stage: install all deps, build client + server, drop dev deps ---
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
+
+# better-sqlite3 installs via "prebuild-install || node-gyp rebuild". When the
+# prebuilt binary cannot be downloaded (restricted networks, proxies, uncommon
+# platforms) it compiles from source, which needs a toolchain. Installing it
+# here keeps `npm ci` from failing the whole build; the runtime stage stays slim
+# because it only copies the already-compiled node_modules.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends python3 make g++ ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY package*.json ./
 RUN npm ci
 COPY . .
@@ -18,8 +28,11 @@ COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
 COPY package.json ./
 
-# SQLite database lives on a persistent volume.
-RUN mkdir -p /data
+# SQLite database lives on a persistent volume, owned by the unprivileged user
+# the app runs as. Running a security scanner as root is unnecessary privilege.
+RUN mkdir -p /data && chown -R node:node /data /app
+USER node
+
 VOLUME ["/data"]
 
 EXPOSE 3000

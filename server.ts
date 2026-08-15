@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 import { createServer as createViteServer } from 'vite';
 import { config, validateConfigOnBoot } from './server/config.js';
 import { attachSession } from './server/http/context.js';
+import { jsonErrorHandler } from './server/http/errorHandler.js';
 import { startMonitoringWorker } from './server/worker.js';
 import { registerSystemRoutes } from './server/routes/system.js';
 import { registerAuthRoutes } from './server/routes/auth.js';
@@ -84,13 +85,8 @@ async function startServer() {
     });
   }
 
-  // JSON error handler — keeps thrown route errors from leaking stack traces
-  // or crashing the process; always responds with structured JSON.
-  app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
-    console.error('[server] Unhandled route error:', err?.message || err);
-    if (res.headersSent) return next(err);
-    res.status(500).json({ status: 'error', message: 'An unexpected server error occurred.' });
-  });
+  // Terminal JSON error handler (classifies body-parser failures as 400/413).
+  app.use(jsonErrorHandler);
 
   const server = app.listen(PORT, '0.0.0.0', () => {
     console.log(`[Seclayer Engine] Listening on http://0.0.0.0:${PORT} (${config.isProd ? 'production' : 'development'})`);
