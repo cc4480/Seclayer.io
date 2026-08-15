@@ -1,12 +1,15 @@
 name: CI
 
 on:
+  # Restricted to the default branch on purpose: a commit on a branch with an
+  # open PR would otherwise trigger this workflow twice (once for `push`, once
+  # for `pull_request`) and run the identical job for double the CI minutes.
+  # Feature branches are covered by the pull_request trigger below.
   push:
-    branches: ['**']
+    branches: [main]
   pull_request:
 
-# Cancel superseded runs on the same ref so pushes don't queue up behind
-# each other.
+# Cancel superseded runs on the same ref so rapid pushes don't queue up.
 concurrency:
   group: ci-${{ github.ref }}
   cancel-in-progress: true
