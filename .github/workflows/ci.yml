@@ -5,9 +5,17 @@ on:
     branches: ['**']
   pull_request:
 
+# Cancel superseded runs on the same ref so pushes don't queue up behind
+# each other.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
 
@@ -23,8 +31,16 @@ jobs:
       - name: Typecheck
         run: npm run lint
 
+      - name: Check module size limit
+        run: npm run lint:size
+
       - name: Test
         run: npm test
 
       - name: Build
         run: npm run build
+
+      # Boots the built production bundle and asserts it actually serves:
+      # catches regressions that compile cleanly but fail at runtime.
+      - name: Smoke test production bundle
+        run: npm run smoke
